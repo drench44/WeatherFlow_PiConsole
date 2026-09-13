@@ -584,7 +584,7 @@
   .rad-over .rad-scale { fill: none; stroke: var(--ink-soft); stroke-width: 2; }
   /* radar loop control: a single quiet Play/Pause target + the current frame's
      time. Shown only while a loop is possible (>=2 frames with echoes). */
-  .rad-loop { display: flex; align-items: center; gap: 12px; margin-top: 16px; }
+  .rad-loop { display: flex; align-items: center; gap: 12px; margin-top: 10px; }
   .rad-loop[hidden] { display: none; }
   .rad-play { width: 44px; height: 44px; flex: 0 0 44px; border: 1px solid var(--rule);
               background: none; color: var(--ink); font-size: 13px; line-height: 1; cursor: pointer;
@@ -596,8 +596,13 @@
   .rad-ledger { width: 100%; }
   .rad-ledger .lrow { flex-wrap: wrap; gap: 0 4px; }
   .rad-ledger .lrow .k { font-size: 11.5px; letter-spacing: .07em; }
-  .rad-ledger .lrow .v { font-size: 15px; }
-  .rad-legend { margin-top: 22px; font: 13px var(--sans); }
+  .rad-ledger .lrow .v { font-size: 17px; }
+  #rad-asof { font: 17px var(--serif); font-variant-numeric: tabular-nums; }
+  #rad-status { font-size: 11.5px; }
+  #rad-cadence { font: 12px var(--sans); }
+  #rad-updated-row[hidden], #rad-cadence-row[hidden] { display: none; }
+  .rad-attrib a { color: inherit; text-decoration: none; }
+  .rad-legend { margin-top: 14px; font: 13px var(--sans); }
   .rad-legend-title { color: var(--ink-soft); font-size: 11.5px; letter-spacing: .1em;
     text-transform: uppercase; margin-bottom: 8px; }
   .rad-legend-row { display: flex; align-items: center; gap: 12px; min-height: 24px; }
@@ -1073,7 +1078,7 @@
         <svg class="rad-base" id="rad-base" viewBox="0 0 480 480" aria-hidden="true"></svg>
         <img class="rad-echo" id="rad-echo" decoding="async" alt="" hidden>
         <svg class="rad-over" id="rad-over" viewBox="0 0 480 480" aria-label="Station, range rings and distance scale"></svg>
-        <figcaption class="rad-attrib">Radar mosaic · RainViewer</figcaption>
+        <figcaption class="rad-attrib" id="rad-attrib">Radar mosaic · RainViewer</figcaption>
       </figure>
       <div class="rad-rail">
         <div class="rad-place" id="rad-place"></div>
@@ -1081,12 +1086,13 @@
         <div class="sc-ledger rad-ledger">
           <div class="lrow"><span class="k">Range</span><span class="dots"></span><span class="v" id="rad-range"></span></div>
           <div class="lrow" id="rad-nexrad-row" hidden><span class="k">Nearest NEXRAD</span><span class="dots"></span><span class="v" id="rad-nexrad"></span></div>
-          <div class="lrow"><span class="k">Observed</span><span class="dots"></span><span class="v" id="rad-observed"></span></div>
+          <div class="lrow" id="rad-updated-row" hidden><span class="k">Updated</span><span class="dots"></span><span class="v" id="rad-updated"></span></div>
+          <div class="lrow" id="rad-cadence-row" hidden><span class="k">Frames ·</span><span class="v" id="rad-cadence"></span></div>
         </div>
         <div class="rad-legend" id="rad-legend"></div>
         <div class="rad-loop" id="rad-loop" hidden>
           <button class="rad-play" id="rad-play" type="button" aria-label="Pause radar loop">&#10073;&#10073;</button>
-          <span class="rad-loop-cap">Past hour&#160;&#183;&#160;<span id="rad-frame-time">&#8212;</span></span>
+          <span class="rad-loop-cap" id="rad-frame-time">&#8212;</span>
         </div>
       </div>
     </div>
@@ -2536,7 +2542,8 @@
 
   /* Phase 1: decode just the latest static frame. Phase 2 can preload the
      complete oldest->newest frames here, with an active-screen-only RAF loop. */
-  var radarView = { geometry: null, colorId: null, good: null, pending: null,
+  var radarView = { geometry: null, legendKey: null, good: null, pending: null,
+                    generation: 0, wantedKey: null, current: null,
                     failed: false, clear: false, retryAt: 0, data: null,
                     loaded: [], loadKey: null, idx: 0, timer: null, paused: false, active: false };
 
@@ -2548,6 +2555,7 @@
   function radarReduced() { return window.matchMedia("(prefers-reduced-motion: reduce)").matches; }
   function radarReady() { return radarView.loaded.filter(function (f) { return f.ready; }); }
   function radarFrameLabel(fr) {
+    if (fr.at) return fr.at;
     /* station-local HH:MM, derived from the latest frame's own local time so a
        browser in a different timezone than the station never mislabels it */
     var r = radarView.data;
@@ -2560,16 +2568,18 @@
   }
   function radarPreload(r) {
     var complete = (r.frames || []).filter(function (f) { return f.complete && f.url; });
-    var key = complete.map(function (f) { return f.id; }).join(",");
+    var generation = radarView.generation;
+    var key = generation + ":" + complete.map(function (f) { return f.id + f.url; }).join(",");
     if (key === radarView.loadKey) return;
     radarView.loadKey = key;
     var have = {}; radarView.loaded.forEach(function (fr) { have[fr.id] = fr; });
     var next = [];
     complete.forEach(function (f) {
-      if (have[f.id]) { next.push(have[f.id]); return; }
-      var fr = { id: f.id, ts: f.ts, url: f.url, img: new Image(), ready: false, hasEcho: false };
+      if (have[f.id] && have[f.id].ready) { next.push(have[f.id]); return; }
+      var fr = { id: f.id, ts: f.ts, at: f.at, url: f.url, img: new Image(), ready: false, hasEcho: false };
       fr.img.decoding = "async";
       fr.img.onload = function () {
+        if (generation !== radarView.generation) return;
         fr.ready = true;
         try {
           var c = document.createElement("canvas"); c.width = fr.img.naturalWidth; c.height = fr.img.naturalHeight;
@@ -2588,13 +2598,13 @@
   }
   function radarCouldLoop() {
     var r = radarView.data, ready = radarReady();
-    return radarView.active && !radarReduced() && !document.hidden &&
+    return radarView.active && !radarView.pending && !radarView.failed && !radarReduced() && !document.hidden &&
            ready.length >= 2 && ready.some(function (f) { return f.hasEcho; }) &&
            !(r && r.stale);
   }
   function radarStopLoop(showLatest) {
     if (radarView.timer) { clearTimeout(radarView.timer); radarView.timer = null; }
-    if (showLatest && radarView.good) { var e = $("rad-echo"); e.src = radarView.good.url; e.hidden = false; }
+    if (showLatest && radarView.good) { var e = $("rad-echo"); e.src = radarView.good.url; e.hidden = false; radarView.current = radarView.good; }
   }
   function radarLoopStep() {
     if (!(radarCouldLoop() && !radarView.paused)) { radarLoopSync(); return; }
@@ -2602,7 +2612,8 @@
     if (radarView.idx >= ready.length) radarView.idx = 0;
     var fr = ready[radarView.idx];
     var echo = $("rad-echo"); echo.src = fr.url; echo.hidden = false;
-    $("rad-frame-time").textContent = radarFrameLabel(fr);
+    radarView.current = fr;
+    $("rad-frame-time").textContent = "−" + Math.round((radarView.data.observedTs - fr.ts) / 60) + " min ──── newest";
     var newest = radarView.idx === ready.length - 1;
     radarView.idx = (radarView.idx + 1) % ready.length;
     radarView.timer = setTimeout(radarLoopStep, newest ? RAD_HOLD_MS : RAD_FRAME_MS);
@@ -2612,9 +2623,9 @@
     if (!radarCouldLoop()) { radarStopLoop(true); loop.hidden = true; return; }
     loop.hidden = false;
     if (radarView.paused) {
-      radarStopLoop(true);
+      radarStopLoop(false);
       play.textContent = "▶"; play.setAttribute("aria-label", "Play radar loop");
-      $("rad-frame-time").textContent = (radarView.good && radarView.good.at) || "—";
+      $("rad-frame-time").textContent = radarView.current ? radarFrameLabel(radarView.current) : "—";
     } else {
       play.textContent = "❙❙"; play.setAttribute("aria-label", "Pause radar loop");
       if (!radarView.timer) radarLoopStep();
@@ -2631,36 +2642,85 @@
                 r.stale || radarView.failed ? "stale" : radarView.clear ? "clear" : "live";
     $("rad-echo").hidden = !hasFrame || !decoded;
     var stamp = radarView.failed && radarView.good ? radarView.good.at : r.observedAt;
-    $("rad-observed").textContent = stamp || "—";
     var age = r.ageSec || 0;
     if (radarView.failed && radarView.good) age += Math.max(0, r.observedTs - radarView.good.ts);
     var status = $("rad-status");
     status.dataset.state = state;
     $("rad-plate").dataset.state = state;
     status.replaceChildren();
-    if (state === "loading" || state === "clear") {
-      status.append(document.createTextNode(state === "clear" ? "No echoes shown" : "Fetching radar"));
-      var hiddenStamp = document.createElement("span");
-      hiddenStamp.id = "rad-asof"; hiddenStamp.hidden = true; hiddenStamp.textContent = stamp || "";
-      status.append(hiddenStamp);
-    } else {
-      status.append(document.createTextNode("As of "));
-      var asof = document.createElement("span"); asof.id = "rad-asof"; asof.textContent = stamp || "—";
-      status.append(asof);
-      if (state === "stale") status.append(document.createTextNode(" · " + Math.floor(age / 60) + " min old"));
-    }
+    status.append(document.createTextNode("As of "));
+    var asof = document.createElement("span"); asof.id = "rad-asof"; asof.textContent = stamp || "—";
+    status.append(asof);
+    if (state === "clear") status.append(document.createTextNode(" · No echoes shown"));
+    if (state === "loading") status.append(document.createTextNode(" · Fetching radar"));
+    if (state === "stale") status.append(document.createTextNode(" · " + Math.floor(age / 60) + " min old"));
+  }
+  function radarPresentationKey(r) {
+    return JSON.stringify([r.sourceId || "rainviewer", r.legend && (r.legend.id || r.legend.colorId),
+                           r.center, r.zoom, r.bounds, r.viewport, r.latest]);
   }
   function renderRadar(d) {
     var r = d.radar, tab = document.querySelector('.tab[data-screen="s-radar"]');
     tab.hidden = !(r && r.available);
-    radarView.data = r;
     document.querySelector(".page").dataset.radarAlerts = d.alerts && d.alerts.length ? "on" : "off";
     if (tab.hidden) {
-      if ($("s-radar").classList.contains("active")) activate("s-obs");
-      radarView.pending = null;
+      ++radarView.generation; radarView.pending = null; radarView.wantedKey = null;
+      radarView.loaded = []; radarView.loadKey = null;
       radarStopLoop(false); $("rad-loop").hidden = true;
+      if ($("s-radar").classList.contains("active")) activate("s-obs");
       return;
     }
+    var frame = (r.frames || []).find(function (f) { return f.id === r.latest && f.complete && f.url; });
+    if (!frame) return;
+    var key = radarPresentationKey(r) + frame.url;
+    if (key !== radarView.wantedKey) {
+      radarView.wantedKey = key; ++radarView.generation;
+      radarView.pending = null; radarView.retryAt = 0;
+    }
+    if (radarView.good && radarView.good.key === key) {
+      radarView.failed = false;
+      radarView.good.at = frame.at || r.observedAt;
+      radarCommit(d);  // successful same-frame refresh: update metadata without a download
+      return;
+    }
+    if (radarView.pending) { radarView.pending.data = d; return; }
+    if (Date.now() < radarView.retryAt) return;
+    var generation = radarView.generation, image = new Image();
+    var pending = { data: d };
+    radarView.pending = pending;
+    radarStopLoop(true); $("rad-loop").hidden = true;
+    image.decoding = "async";
+    function failed() {
+      if (generation !== radarView.generation || radarView.pending !== pending) return;
+      radarView.pending = null; radarView.failed = true; radarView.retryAt = Date.now() + 120000;
+      radarState();  // retained image, legend, attribution and times all stay together
+    }
+    image.onerror = failed;
+    image.onload = async function () {
+      try {
+        if (image.decode) await image.decode();
+        if (generation !== radarView.generation || radarView.pending !== pending) return;
+        if (image.naturalWidth !== 480 || image.naturalHeight !== 480) { failed(); return; }
+        var canvas = document.createElement("canvas"); canvas.width = 480; canvas.height = 480;
+        var ctx = canvas.getContext("2d", {willReadFrequently:true}); ctx.drawImage(image, 0, 0);
+        var pixels = ctx.getImageData(0, 0, 480, 480).data, clear = true;
+        for (var a = 3; a < pixels.length; a += 4) if (pixels[a]) { clear = false; break; }
+        var current = pending.data.radar;
+        radarView.good = {key:key, id:frame.id, url:frame.url, ts:frame.ts, at:frame.at || current.observedAt};
+        radarView.current = radarView.good;
+        radarView.clear = clear; radarView.failed = false; radarView.pending = null; radarView.retryAt = 0;
+        radarView.loaded = []; radarView.loadKey = null; radarView.idx = 0;
+        image.onload = image.onerror = null;
+        image.id = "rad-echo"; image.className = "rad-echo"; image.alt = "";
+        $("rad-echo").replaceWith(image);  // the already-decoded node and source metadata commit in one turn
+        radarCommit(pending.data);
+      } catch (e) { failed(); }
+    };
+    image.src = frame.url;
+  }
+  function radarCommit(d) {
+    var r = d.radar;
+    radarView.data = r;
     var key = JSON.stringify([r.zoom, r.metersPerPixel, r.bounds, r.marker, r.rings, r.scaleBar]);
     if (radarView.geometry !== key) {
       radarView.geometry = key;
@@ -2686,11 +2746,25 @@
     $("rad-place").textContent = d.station || "—";
     var rings = r.rings || [];
     $("rad-range").textContent = rings.length ? rings[rings.length-1].label : r.scaleBar.distDisp;
-    $("rad-observed").textContent = r.observedAt || "—";
+    $("rad-updated-row").hidden = !r.updatedAt;
+    $("rad-updated").textContent = r.updatedAt || "—";
+    $("rad-cadence-row").hidden = !r.cadenceSec;
+    var count = r.completeFrameCount || 0, span = r.historySpanSec || 0;
+    var spacing = r.frameSpacingSec || r.cadenceSec;
+    $("rad-cadence").textContent = count < 2 ? "Source cadence ~" + (r.cadenceSec / 60) + " min" :
+      (span >= 3600 ? "Past hour" : Math.round(span / 60) + " min" + (count < r.frameCount ? " · History loading" : "")) +
+      " · ~" + (spacing / 60) + " min" + (r.historyGaps ? " · gaps" : "");
+    var attrib = $("rad-attrib"); attrib.replaceChildren(document.createTextNode("Radar mosaic · "));
+    var credit = document.createElement("a"); credit.textContent = r.attribution || "RainViewer";
+    var creditUrl = r.attributionUrl || "https://www.rainviewer.com/";
+    if (/^https:\/\//.test(creditUrl)) credit.href = creditUrl;
+    attrib.append(credit);
+    if (r.partialCoverage) attrib.append(document.createTextNode(" · Partial coverage"));
     $("rad-nexrad-row").hidden = !r.nexrad;
     if (r.nexrad) $("rad-nexrad").textContent = r.nexrad.id + " · " + r.nexrad.distanceDisp + " " + r.nexrad.bearing;
-    if (r.legend && radarView.colorId !== r.legend.colorId) {
-      radarView.colorId = r.legend.colorId;
+    var legendKey = (r.sourceId || "rainviewer") + ":" + (r.legend && (r.legend.id || r.legend.colorId));
+    if (r.legend && radarView.legendKey !== legendKey) {
+      radarView.legendKey = legendKey;
       var legend = $("rad-legend"); legend.replaceChildren();
       var title = document.createElement("div"); title.className = "rad-legend-title";
       title.textContent = "Reflectivity · dBZ"; legend.append(title);
@@ -2702,34 +2776,7 @@
         row.append(swatch, dbz, label); legend.append(row);
       }
       r.legend.rain.forEach(function(stop) { legendRow(stop, false); });
-      legendRow(r.legend.snow, true);
-    }
-    var frame = (r.frames || []).find(function (f) { return f.id === r.latest; });
-    if (frame && (!radarView.good || radarView.good.id !== frame.id) &&
-        radarView.pending !== frame.id && Date.now() >= radarView.retryAt) {
-      var id = frame.id, image = new Image();
-      radarView.pending = id;
-      image.decoding = "async";
-      image.onload = function () {
-        if (radarView.pending !== id) return;
-        // Inspect alpha once per decoded frame. All transparent means clear,
-        // not no coverage. Nothing is recolored or filtered.
-        var canvas = document.createElement("canvas"); canvas.width = image.naturalWidth; canvas.height = image.naturalHeight;
-        var ctx = canvas.getContext("2d", {willReadFrequently:true}); ctx.drawImage(image, 0, 0);
-        var pixels = ctx.getImageData(0, 0, canvas.width, canvas.height).data, clear = true;
-        for (var a = 3; a < pixels.length; a += 4) if (pixels[a]) { clear = false; break; }
-        var current = radarView.data;
-        radarView.good = {id:id, url:frame.url, ts:frame.ts, at:current.observedAt};
-        radarView.clear = clear; radarView.failed = false; radarView.pending = null; radarView.retryAt = 0;
-        radarState();
-        radarLoopSync();          /* owns rad-echo.src: the loop when running, else this latest frame */
-      };
-      image.onerror = function () {
-        if (radarView.pending !== id) return;
-        radarView.pending = null; radarView.failed = true; radarView.retryAt = Date.now() + 120000;
-        radarState();  // displayed img keeps its previously decoded source
-      };
-      image.src = frame.url;
+      if (r.legend.snow) legendRow(r.legend.snow, true);
     }
     radarState();
     radarPreload(r);      /* load the past-hour frames (when the history is present) */

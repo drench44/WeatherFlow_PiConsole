@@ -32,6 +32,9 @@ from collections import namedtuple
 from datetime import datetime, timedelta, timezone
 import json
 import io
+import hashlib
+from functools import lru_cache
+from statistics import median
 import math
 import os
 import re
@@ -54,29 +57,86 @@ AQI_CHECK_INTERVAL     = 600   # seconds (10 min) — refresh air quality; short
 ALERTS_CHECK_INTERVAL  = 900   # seconds (15 min) — NWS alerts change slowly; be gentle on api.weather.gov
 FORECAST_CHECK_INTERVAL = 3600 # seconds (1 h) — the daily outlook barely moves intra-hour
 FORECAST_RETRY_SEC      = 120  # seconds — boot retry cadence until the FIRST forecast succeeds
-RADAR_CHECK_INTERVAL = 300
+RADAR_CHECK_INTERVAL = 180
 RADAR_RETRY_SEC = 120
-RADAR_STALE_SEC = 1200
+RADAR_HISTORY_SEC = 3600
+RADAR_IEM_FRAME_INTERVAL_SEC = 120
+RADAR_RAINVIEWER_FRAME_INTERVAL_SEC = 600
+RADAR_IEM_STALE_SEC = 600
+RADAR_RAINVIEWER_STALE_SEC = 1200
+RADAR_REQUESTS_PER_MIN = 90
+RADAR_MAX_FRAME_BUILDS_PER_PASS = 20
+RADAR_BUILD_DEADLINE_SEC = 150
+RADAR_HTTP_TIMEOUT_SEC = 10
+RADAR_PRIMARY_DEADLINE_SEC = 25
+RADAR_NEGATIVE_CACHE_SEC = 120
+RADAR_CACHE_GRACE_SEC = 120
+RADAR_IEM_METADATA_URL = "https://mesonet.agron.iastate.edu/data/gis/images/4326/mrms/lcref.json"
+RADAR_IEM_TILE_TEMPLATE = "https://mesonet.agron.iastate.edu/cache/tile.py/1.0.0/mrms::lcref-{stamp}/{z}/{x}/{y}.png"
+RADAR_IEM_ARCHIVE_TEMPLATE = "https://mesonet.agron.iastate.edu/archive/data/%Y/%m/%d/GIS/mrms/lcref_%Y%m%d%H%M.png"
 RADAR_MIN_ZOOM = 4
 RADAR_MAX_ZOOM = 7
 RADAR_TARGET_METERS = 256000
 RADAR_VIEW_TTL = 900
 RADAR_VIEWPORT_PX = 480
-RADAR_COLOR = 2
-RADAR_TILE_OPTS = "1_1"
-RADAR_MANIFEST_URL = "https://api.rainviewer.com/public/weather-maps.json"
+RADAR_RAINVIEWER_COLOR = 2
+RADAR_RAINVIEWER_TILE_OPTS = "1_1"
+RADAR_RAINVIEWER_MANIFEST_URL = "https://api.rainviewer.com/public/weather-maps.json"
 RADAR_DIR = os.environ.get("WFP_RADAR_DIR", os.path.expanduser("~/almanac_web/radar"))
 # Verified against https://www.rainviewer.com/files/rainviewer_api_colors_table.csv
 # RGBA, including the translucent 5 dBZ stop. Snow key represents 20 dBZ;
 # the provider uses a separate intensity-dependent blue ramp for snow.
 _RADAR_LEGEND = {
-    'colorId': 2, 'colorName': 'Universal Blue',
+    'id': 'rainviewer-universal-blue-v1', 'colorId': 2, 'colorName': 'Universal Blue',
     'rain': ((5, '#92887164', 'Light'), (20, '#00a3e0ff', ''),
              (30, '#005588ff', 'Moderate'), (40, '#ffaa00ff', ''),
              (50, '#c10000ff', 'Heavy'), (60, '#ff77ffff', ''),
              (65, '#ffffffff', 'Intense')),
     'snow': ('#7fbfffff', 'Snow'),
 }
+# Verified 2026-09-13 against IEM's native table (rid=4), index/2 - 32 dBZ:
+# indices 86, 114, 134, 154, 174, 194, 206. Representative colors, not bin edges.
+_RADAR_IEM_LEGEND = {
+    'id': 'iem-mrms-lcref-v1', 'colorId': None, 'colorName': 'IEM MRMS reflectivity',
+    'rain': ((11, '#a4a4ff', 'Weak'), (25, '#3366cc', ''),
+             (35, '#00cc00', ''), (45, '#ffcc00', ''),
+             (55, '#d90000', ''), (65, '#cc00cc', ''),
+             (71, '#ffffff', 'Strong')),
+    'snow': None,
+}
+_RADAR_SOURCES = {
+    'iem-mrms-lcref': dict(provider='iem', attribution='IEM / NOAA MRMS',
+        attribution_url='https://mesonet.agron.iastate.edu/ogc/',
+        cadence=RADAR_IEM_FRAME_INTERVAL_SEC, stale_sec=RADAR_IEM_STALE_SEC,
+        legend=_RADAR_IEM_LEGEND),
+    'rainviewer': dict(provider='rainviewer', attribution='RainViewer',
+        attribution_url='https://www.rainviewer.com/',
+        cadence=RADAR_RAINVIEWER_FRAME_INTERVAL_SEC, stale_sec=RADAR_RAINVIEWER_STALE_SEC,
+        legend=_RADAR_LEGEND),
+}
+# Coarse station-center CONUS land mask (lon, lat), deliberately independent of
+# the nearest-NEXRAD caption. Coast/border detail is approximate, not geocoding.
+_RADAR_CONUS = ((-124.73,48.4), (-123.1,48.3), (-123.1,49), (-95.16,49),
+    (-95.16,49.38), (-94.8,49.38), (-94.6,48.7), (-92.7,48.55), (-90.9,48.25),
+    (-89.5,48), (-88.4,48.3), (-84.9,46.9), (-84.5,46.45), (-84.1,46.5),
+    (-83.5,45.8), (-82.5,45.3), (-82.1,43.6), (-82.42,43), (-82.42,42.5),
+    (-83.1,42.3), (-83.15,42.05), (-83,41.7), (-82.7,41.7), (-80.5,42.3),
+    (-79.1,42.85), (-79.05,43.45), (-76.8,43.6), (-76.45,44.1), (-74.7,45),
+    (-71.5,45), (-71.4,45.25), (-70.7,45.4), (-70,46.4), (-69.2,47.45),
+    (-68.3,47.35), (-67.8,47), (-67.8,45.7), (-67,44.8), (-70,43),
+    (-69.8,41.5), (-72,41), (-74,40.5), (-75.5,35.2), (-80.5,32),
+    (-80,26.7), (-80.05,25.6), (-80.4,25.1), (-81.2,24.5), (-82,26), (-82.8,28),
+    (-84,30), (-89,29), (-90,29), (-93.8,29.7), (-97.15,25.95),
+    (-97.5,25.85), (-99.1,26.4), (-99.5,27.5), (-100.3,28.3),
+    (-101.4,29.8), (-102.8,29.2), (-103,29), (-104.5,29.65),
+    (-106.5,31.78), (-108.2,31.78), (-108.2,31.33), (-111.07,31.33),
+    (-114.72,32.72), (-117.13,32.54), (-120.6,34.5), (-122.5,37.7),
+    (-124.4,40.4), (-124.6,42), (-124,46.3))
+# Live original PNG was 7000 x 3500, .01 degrees/cell, world-file upper-left
+# center (-129.995, 54.995): outer edges west/east -130/-60, south/north 20/55.
+_RADAR_IEM_DOMAIN = dict(w=-130, e=-60, s=20, n=55)
+
+
 FC_STALE_SEC           = 86400 # seconds (24 h) without a successful forecast fetch -> fcStale (band hides)
 RAIN_WINDOW_SEC        = 600   # seconds (10 min) — light rain is bridged across the sensor's dry minutes
 ALERTS_TIMEOUT         = 20    # seconds — socket timeout for the alerts fetch
@@ -505,6 +565,23 @@ _NEXRAD_SITES = {
 }
 
 
+@lru_cache(maxsize=128)
+def _radar_iem_eligible(lat, lon):
+    if not (math.isfinite(lat) and math.isfinite(lon) and 20 < lat < 55 and -130 < lon < -60):
+        return False
+    inside = False
+    x0, y0 = _RADAR_CONUS[-1]
+    for x1, y1 in _RADAR_CONUS:
+        if (y0 > lat) != (y1 > lat) and lon < (x1 - x0) * (lat - y0) / (y1 - y0) + x0:
+            inside = not inside
+        x0, y0 = x1, y1
+    return inside
+
+
+class _RadarBudget(Exception):
+    """Yield unfinished history to a later pass; never bypass the shared limit."""
+
+
 def _radar_zoom_for(lat):
     """Target 256 km across the plate, bounded by useful/free-tier zooms."""
     zoom = round(math.log2(156543.03392 * math.cos(math.radians(lat)) /
@@ -582,7 +659,10 @@ def _radar_nexrad(lat, lon, unit):
 # result locally and publishes it with a single attribute assignment, and the
 # tick reads that one reference once.
 _RadarResult = namedtuple('_RadarResult',
-    'available reason frames latest ts_frame center zoom mpp bounds scalebar rings nexrad ts_fetch')
+    'available reason frames latest ts_frame center zoom mpp bounds scalebar rings nexrad ts_fetch '
+    'source_id provider attribution attribution_url cadence stale_sec legend partial_coverage',
+    defaults=('rainviewer', 'rainviewer', 'RainViewer', 'https://www.rainviewer.com/',
+              RADAR_RAINVIEWER_FRAME_INTERVAL_SEC, RADAR_RAINVIEWER_STALE_SEC, _RADAR_LEGEND, False))
 _RADAR_NONE = _RadarResult(False, 'no data yet', (), None, None, None, None, None,
                            None, None, None, None, None)
 
@@ -632,7 +712,10 @@ class AlmanacEmitter:
         self.interval    = interval
         self._event      = None
         self._radar_result = _RADAR_NONE
-        self._radar_tile_times = []  # rolling rate limit, also shared across retries
+        self._radar_request_times = []  # ALL attempts, shared across sources and retries
+        self._radar_negative = {}
+        self._radar_cooldowns = {}
+        self._radar_metadata = {}
         self._radar_zoom_cache = None  # (latitude, zoom), independent of fetch success
         # scheduling registry: EVERY handle we hand to Clock (intervals and
         # one-shots alike) so stop() can cancel all of them, plus the guards
@@ -801,126 +884,298 @@ class AlmanacEmitter:
     def _check_radar(self, _dt=None):
         self._spawn('radar', self._do_radar)
 
-    def _do_radar(self):
-        """Build complete, self-versioned PNGs off-thread; keep last-good on failure."""
+    def _radar_request(self, source, url, deadline, method='GET', metadata=False):
+        """Validated transport; every attempt uses one monotonic rate/cooldown gate."""
+        import urllib.request
+        import urllib.error
+        from email.utils import parsedate_to_datetime
+        now = time.monotonic()
+        self._radar_request_times = [t for t in self._radar_request_times if now - t < 60]
+        if (now >= deadline or now < self._radar_cooldowns.get(source, 0) or
+                len(self._radar_request_times) >= RADAR_REQUESTS_PER_MIN):
+            raise _RadarBudget('radar request budget/cooldown')
+        headers = {'User-Agent': 'WeatherFlow-PiConsole-almanac'}
+        cached = self._radar_metadata.get(url)
+        if metadata:
+            headers['Cache-Control'] = 'no-cache'
+            if cached:
+                headers.update(cached[1])
+        req = urllib.request.Request(url, headers=headers, method=method)
+        self._radar_request_times.append(now)
         try:
-            import urllib.request
-            import urllib.error
+            with urllib.request.urlopen(req, timeout=min(RADAR_HTTP_TIMEOUT_SEC, deadline - now)) as response:
+                if getattr(response, 'status', 200) != 200:
+                    raise ValueError('unexpected radar HTTP status')
+                raw = response.read(2 * 1024 * 1024 + 1) if method == 'GET' else b''
+                if len(raw) > 2 * 1024 * 1024:
+                    raise ValueError('oversized radar response')
+                if time.monotonic() >= deadline:
+                    raise _RadarBudget('radar response exceeded deadline')
+                if metadata:
+                    validators = {}
+                    response_headers = getattr(response, 'headers', {})
+                    for name, request_name in [('ETag', 'If-None-Match'), ('Last-Modified', 'If-Modified-Since')]:
+                        if response_headers.get(name):
+                            validators[request_name] = response_headers[name]
+                    self._radar_metadata[url] = (raw, validators)
+                return raw
+        except urllib.error.HTTPError as error:
+            if error.code == 304 and metadata and cached:
+                return cached[0]
+            if error.code == 429:
+                retry = error.headers.get('Retry-After', '') if error.headers else ''
+                try:
+                    delay = float(retry)
+                except ValueError:
+                    try:
+                        delay = parsedate_to_datetime(retry).timestamp() - time.time()
+                    except (ValueError, TypeError, OverflowError):
+                        delay = RADAR_RETRY_SEC
+                if not math.isfinite(delay):
+                    delay = RADAR_RETRY_SEC
+                self._radar_cooldowns[source] = time.monotonic() + max(1, delay)
+                raise _RadarBudget('radar provider rate limited') from error
+            raise
+
+    def _radar_composite(self, source, ts, ctx, deadline, tile_url, archive_url=None):
+        """Source/viewport identity; validate all PNGs before an atomic crop write."""
+        from PIL import Image
+        ident = _RADAR_SOURCES[source]['legend']['id'] + '/' + ctx['identity'] + '/' + str(ts)
+        frame = dict(id=ident, ts=ts, complete=False)
+        target = os.path.join(RADAR_DIR, ident + '.png')
+        if os.path.isfile(target):
+            frame.update(complete=True, url='radar/' + ident + '.png')
+            return frame
+        if time.monotonic() < self._radar_negative.get(ident, 0):
+            return frame
+        if ctx['builds'] >= RADAR_MAX_FRAME_BUILDS_PER_PASS or time.monotonic() >= deadline:
+            raise _RadarBudget('radar build budget')
+        ctx['builds'] += 1
+        try:
+            if archive_url:
+                self._radar_request(source, archive_url, deadline, method='HEAD')
+            with Image.new('RGBA', (RADAR_VIEWPORT_PX, RADAR_VIEWPORT_PX)) as composite:
+                for tx, ty, x, y in ctx['tiles']:
+                    raw = self._radar_request(source, tile_url(tx, ty), deadline)
+                    if not raw.startswith(b'\x89PNG\r\n\x1a\n'):
+                        raise ValueError('radar response is not PNG')
+                    with Image.open(io.BytesIO(raw)) as tile:
+                        if tile.format != 'PNG' or tile.size != (256, 256):
+                            raise ValueError('unexpected radar tile size/format')
+                        rgba = tile.convert('RGBA')
+                        # The IEM out-of-domain error tile is opaque solid red.
+                        if source == 'iem-mrms-lcref' and rgba.getextrema() == ((255, 255), (0, 0), (0, 0), (255, 255)):
+                            raise ValueError('IEM placeholder tile')
+                        composite.paste(rgba, (x, y))  # no mask: preserve native alpha
+                os.makedirs(os.path.dirname(target), exist_ok=True)
+                tmp = f'{target}.tmp.{os.getpid()}'
+                try:
+                    composite.save(tmp, format='PNG')
+                    os.replace(tmp, target)
+                finally:
+                    if os.path.exists(tmp):
+                        os.unlink(tmp)
+            frame.update(complete=True, url='radar/' + ident + '.png')
+        except _RadarBudget:
+            raise
+        except Exception:
+            self._radar_negative[ident] = time.monotonic() + RADAR_NEGATIVE_CACHE_SEC
+        return frame
+
+    def _radar_iem_frames(self, ctx):
+        """Acquire a fresh complete primary first, probing even UTC slots backward."""
+        source = 'iem-mrms-lcref'
+        deadline = min(ctx['deadline'], time.monotonic() + RADAR_PRIMARY_DEADLINE_SEC)
+        meta = json.loads(self._radar_request(source, RADAR_IEM_METADATA_URL, deadline, metadata=True))['meta']
+        valid = datetime.fromisoformat(meta['end_valid'].replace('Z', '+00:00'))
+        ts = int(valid.timestamp())
+        now = time.time()
+        if (valid.utcoffset() != timedelta(0) or meta.get('product') != 'lcref' or
+                meta.get('units') != '0.5 dBZ' or ts % RADAR_IEM_FRAME_INTERVAL_SEC or
+                not 0 <= now - ts <= RADAR_IEM_STALE_SEC):
+            raise ValueError('invalid or stale IEM metadata')
+        newest = min(ts, int(now - 240) // 120 * 120)
+        def build(stamp, limit):
+            utc = datetime.fromtimestamp(stamp, timezone.utc)
+            return self._radar_composite(source, stamp, ctx, limit,
+                lambda x, y: RADAR_IEM_TILE_TEMPLATE.format(stamp=utc.strftime('%Y%m%d%H%M'),
+                    z=ctx['zoom'], x=x, y=y), utc.strftime(RADAR_IEM_ARCHIVE_TEMPLATE))
+        for candidate in range(newest, int(now - RADAR_IEM_STALE_SEC) - 1, -120):
+            latest = build(candidate, deadline)
+            if latest['complete']:
+                if time.time() - candidate > RADAR_IEM_STALE_SEC:
+                    break
+                return self._radar_history(source, candidate, newest, ctx, build, latest)
+        raise ValueError('no fresh complete IEM frame')
+
+    def _radar_rainviewer_frames(self, ctx):
+        """Global past-frame adapter; never include nowcast or more than one hour."""
+        source = 'rainviewer'
+        manifest = json.loads(self._radar_request(source, RADAR_RAINVIEWER_MANIFEST_URL,
+            ctx['deadline'], metadata=True))
+        host = manifest['host'].rstrip('/')
+        if not host.startswith('https://'):
+            raise ValueError('invalid RainViewer host')
+        past = {int(f['time']): f['path'] for f in manifest['radar']['past']}
+        newest = max(past)
+        if not 0 <= time.time() - newest <= RADAR_RAINVIEWER_STALE_SEC:
+            raise ValueError('invalid or stale RainViewer manifest')
+        past = {t: p for t, p in past.items() if newest - RADAR_HISTORY_SEC <= t <= newest}
+        def build(ts, limit):
+            path = past[ts]
+            if not isinstance(path, str) or not path.startswith('/'):
+                raise ValueError('invalid RainViewer path')
+            return self._radar_composite(source, ts, ctx, limit,
+                lambda x, y: f'{host}{path}/256/{ctx["zoom"]}/{x}/{y}/{RADAR_RAINVIEWER_COLOR}/{RADAR_RAINVIEWER_TILE_OPTS}.png')
+        latest = build(newest, ctx['deadline'])
+        if not latest['complete']:
+            raise ValueError('no complete RainViewer latest')
+        return self._radar_history(source, newest, newest, ctx, build, latest, sorted(past))
+
+    def _radar_history(self, source, newest, advertised, ctx, build, latest, slots=None):
+        """Publish latest promptly, then atomically replace with bounded backfill."""
+        settings = _RADAR_SOURCES[source]
+        slots = slots or list(range(newest - RADAR_HISTORY_SEC, newest + 1, settings['cadence']))
+        prefix = latest['id'].rsplit('/', 1)[0]
+        frames = {t: dict(id=prefix + '/' + str(t), ts=t, complete=False) for t in slots}
+        frames[newest] = latest
+        previous = self._radar_result
+        fetched = time.time()
+        if newest < advertised:
+            self._schedule_retry('radar', self._check_radar, RADAR_RETRY_SEC)
+        if newest < advertised and previous.source_id == source and previous.ts_frame == newest:
+            fetched = previous.ts_fetch  # a failed newer frame is not a successful refresh
+        def publish():
+            if source == 'iem-mrms-lcref' and time.time() - newest > settings['stale_sec']:
+                return False
+            self._radar_result = _RadarResult(True, None, tuple(frames[t] for t in sorted(frames)),
+                latest['id'], newest, ctx['center'], ctx['zoom'], ctx['mpp'], ctx['bounds'],
+                ctx['bar'], ctx['rings'], ctx['nexrad'], fetched, source, **settings,
+                partial_coverage=source == 'iem-mrms-lcref' and any(
+                    ctx['bounds'][k] < _RADAR_IEM_DOMAIN[k] if k in ('w', 's') else
+                    ctx['bounds'][k] > _RADAR_IEM_DOMAIN[k] for k in ('w', 'e', 's', 'n')))
+            return True
+        # Include warm cached history in the initial publication, without HTTP.
+        if ctx['viewed']:
+            for t in slots:
+                if os.path.isfile(os.path.join(RADAR_DIR, frames[t]['id'] + '.png')):
+                    frames[t] = dict(frames[t], complete=True, url='radar/' + frames[t]['id'] + '.png')
+        if not publish():
+            raise ValueError('IEM frame aged out during acquisition')
+        if ctx['viewed']:
+            for t in reversed(slots):
+                if frames[t]['complete']:
+                    continue
+                try:
+                    frame = build(t, ctx['deadline'])
+                except _RadarBudget:
+                    break
+                if frame['complete']:
+                    frames[t] = frame
+                    if not publish():
+                        break
+            if any(not f['complete'] for f in frames.values()):
+                self._schedule_retry('radar', self._check_radar, RADAR_RETRY_SEC)
+        return self._radar_result
+
+    def _radar_prune(self, previous):
+        """Prune only owned namespaces; give abandoned generations decode grace."""
+        keep = {f['id'] for f in self._radar_result.frames if f['complete']}
+        # Touch the previous generation at retirement, not at its original build.
+        for f in previous.frames:
+            if f['complete'] and f['id'] not in keep:
+                path = os.path.join(RADAR_DIR, f['id'] + '.png')
+                if os.path.isfile(path):
+                    os.utime(path, (time.time(), time.time()))
+        for source in _RADAR_SOURCES.values():
+            root = os.path.join(RADAR_DIR, source['legend']['id'])
+            for directory, _, names in os.walk(root):
+                for name in names:
+                    if not re.fullmatch(r'[0-9]+\.png', name):
+                        continue
+                    path = os.path.join(directory, name)
+                    ident = os.path.relpath(path, RADAR_DIR)[:-4]
+                    if ident not in keep and time.time() - os.path.getmtime(path) >= RADAR_CACHE_GRACE_SEC:
+                        os.unlink(path)
+
+    def _do_radar(self):
+        """Primary-first orchestration; radar failures never alter engine health."""
+        try:
             config = getattr(self.app, 'config', {}) or {}
             lat = _num(_cfg(config, 'Station', 'Latitude'))
             lon = _num(_cfg(config, 'Station', 'Longitude'))
             if lat is None or lon is None or not (-90 <= lat <= 90 and -180 <= lon <= 180):
                 self._radar_result = _RADAR_NONE._replace(reason='no location')
                 return
+            previous = self._radar_result
+            center = dict(lat=lat, lon=lon)
+            if self._radar_result.center is not None and self._radar_result.center != center:
+                self._radar_result = _RADAR_NONE  # never relabel the previous station's crop
             try:
-                from PIL import Image
+                from PIL import Image  # noqa: F401
             except ImportError:
                 self._radar_result = _RADAR_NONE._replace(reason='compositor unavailable')
                 return
-            def fetch(url):
-                req = urllib.request.Request(url, headers={'User-Agent': 'WeatherFlow-PiConsole-almanac'})
-                with urllib.request.urlopen(req, timeout=25) as response:
-                    return response.read()
-            manifest = json.loads(fetch(RADAR_MANIFEST_URL))
-            host = manifest['host'].rstrip('/')
-            past = sorted({int(f['time']): f['path'] for f in manifest['radar']['past']}.items())
-            fetched = time.time()
             if self._radar_zoom_cache is None or self._radar_zoom_cache[0] != lat:
                 self._radar_zoom_cache = (lat, _radar_zoom_for(lat))
             zoom = self._radar_zoom_cache[1]
             tiles, mpp, bounds, _ = _radar_viewport(lat, lon, zoom, RADAR_VIEWPORT_PX)
             try:
                 with open(os.path.join(os.path.dirname(self.output_path), 'radar_viewed')) as marker:
-                    viewed_age = fetched - float(marker.read(128))
-                viewed_recently = 0 <= viewed_age < RADAR_VIEW_TTL
+                    viewed_age = time.time() - float(marker.read(128))
+                viewed = 0 <= viewed_age < RADAR_VIEW_TTL
             except (OSError, ValueError, UnicodeError):
-                viewed_recently = False
+                viewed = False
             unit = _radar_distance_unit(config)
             bar, rings = _radar_scale(mpp, RADAR_VIEWPORT_PX, unit)
-            os.makedirs(RADAR_DIR, exist_ok=True)
-            frames, tile_gets, failures = [], 0, 0
-            for ts, path in past:
-                ident = str(ts)
-                frame = dict(id=ident, ts=ts, complete=False)
-                frames.append(frame)
-                if not viewed_recently and ts != past[-1][0]:
-                    continue
-                target = os.path.join(RADAR_DIR, ident + '.png')
-                if not os.path.isfile(target):
-                    with Image.new('RGBA', (RADAR_VIEWPORT_PX, RADAR_VIEWPORT_PX), (0, 0, 0, 0)) as composite:
-                        complete = True
-                        for tx, ty, x, y in tiles:
-                            # Cold starts can need 117 tiles. Keep even that burst
-                            # below 100 GETs/minute; steady-state needs only 9-18.
-                            now = time.monotonic()
-                            self._radar_tile_times = [t for t in self._radar_tile_times if now - t < 60]
-                            if len(self._radar_tile_times) >= 90:
-                                time.sleep(max(0, 60 - (now - self._radar_tile_times[0])))
-                                now = time.monotonic()
-                                self._radar_tile_times = [t for t in self._radar_tile_times if now - t < 60]
-                            self._radar_tile_times.append(now)
-                            tile_gets += 1
-                            try:
-                                raw = fetch(f'{host}{path}/256/{zoom}/{tx}/{ty}/{RADAR_COLOR}/{RADAR_TILE_OPTS}.png')
-                            except (urllib.error.URLError, TimeoutError, OSError):
-                                complete = False
-                                failures += 1
-                                continue
-                            finally:
-                                time.sleep(.05)
-                            with Image.open(io.BytesIO(raw)) as tile:
-                                if tile.size != (256, 256):
-                                    raise ValueError('unexpected radar tile size')
-                                # No alpha mask: preserve provider RGBA, don't square alpha.
-                                composite.paste(tile.convert('RGBA'), (x, y))
-                        if not complete:
-                            continue  # incomplete crops must never become permanent cache hits
-                        tmp = f'{target}.tmp.{os.getpid()}'
-                        try:
-                            composite.save(tmp, format='PNG')
-                            os.replace(tmp, target)  # same atomic publication pattern as _write_atomic
-                        finally:
-                            if os.path.exists(tmp):
-                                os.unlink(tmp)
-                frame.update(url=f'radar/{ident}.png', complete=True)
-            complete_frames = [f for f in frames if f['complete']]
-            Logger.info(f'almanac_emit: radar cycle tile_GETs={tile_gets} complete={len(complete_frames)} failed_tiles={failures}')
-            if failures:
-                Logger.warning(f'almanac_emit: radar missing {failures} tiles; incomplete frames withheld')
-                self._schedule_retry('radar', self._check_radar, RADAR_RETRY_SEC)
-            if not complete_frames:
-                if not failures:
-                    raise ValueError('no complete radar frames')
-                return
-            # Retain last-good files during total outages; only prune after a
-            # replacement is ready, and only numeric PNGs owned by this provider.
-            newest = complete_frames[-1]
-            current_ids = {str(ts) for ts, _ in past} if viewed_recently else {newest['id']}
-            for name in os.listdir(RADAR_DIR):
-                if re.fullmatch(r'[0-9]+\.png', name) and name[:-4] not in current_ids:
-                    os.unlink(os.path.join(RADAR_DIR, name))
-            self._radar_result = _RadarResult(True, None, tuple(frames), newest['id'], newest['ts'],
-                dict(lat=lat, lon=lon), zoom, mpp, bounds, bar, rings,
-                _radar_nexrad(lat, lon, unit), fetched)
-        except Exception as error:  # radar is a side artifact, never engine health
+            identity = hashlib.sha256(repr((lat, lon, zoom, RADAR_VIEWPORT_PX, tiles)).encode()).hexdigest()[:20]
+            ctx = dict(center=center, zoom=zoom, tiles=tiles, mpp=mpp, bounds=bounds,
+                bar=bar, rings=rings, nexrad=_radar_nexrad(lat, lon, unit), viewed=viewed,
+                identity=identity, builds=0, deadline=time.monotonic() + RADAR_BUILD_DEADLINE_SEC)
+            self._radar_negative = {k: v for k, v in self._radar_negative.items() if v > time.monotonic()}
+            adapters = [self._radar_rainviewer_frames]
+            if _radar_iem_eligible(lat, lon):
+                adapters.insert(0, self._radar_iem_frames)
+            errors = []
+            for adapter in adapters:
+                try:
+                    adapter(ctx)
+                    try:
+                        self._radar_prune(previous)
+                    except OSError as error:
+                        Logger.warning(f'almanac_emit: radar cache prune failed - {error}')
+                    return
+                except Exception as error:
+                    errors.append(str(error))
+            raise ValueError('; '.join(errors))
+        except Exception as error:
             Logger.warning(f'almanac_emit: radar fetch failed - {error}')
             self._schedule_retry('radar', self._check_radar, RADAR_RETRY_SEC)
 
     @staticmethod
     def _radar_payload(snap, now, tz):
+        def local(ts):
+            return datetime.fromtimestamp(ts, tz).strftime('%H:%M') if ts is not None else None
+        complete = [f['ts'] for f in snap.frames if f['complete']]
+        gaps = [b - a for a, b in zip(complete, complete[1:]) if b > a]
+        legend = snap.legend
         age = int(now - snap.ts_frame) if snap.ts_frame is not None else None
         return dict(available=snap.available, reason=snap.reason,
-            attribution='RainViewer', provider='rainviewer', center=snap.center,
+            sourceId=snap.source_id, attribution=snap.attribution, attributionUrl=snap.attribution_url,
+            provider=snap.provider, cadenceSec=snap.cadence, frameSpacingSec=median(gaps) if gaps else None,
+            historyGaps=any(g != snap.cadence for g in gaps),
+            historySpanSec=complete[-1] - complete[0] if complete else 0,
+            completeFrameCount=len(complete), partialCoverage=snap.partial_coverage, center=snap.center,
             zoom=snap.zoom or RADAR_MAX_ZOOM, viewport=dict(w=RADAR_VIEWPORT_PX, h=RADAR_VIEWPORT_PX),
             bounds=snap.bounds, marker=dict(x=.5, y=.5), metersPerPixel=snap.mpp,
-            scaleBar=snap.scalebar, rings=list(snap.rings or ()), frames=list(snap.frames),
-            latest=snap.latest, frameCount=len(snap.frames),
-            observedAt=datetime.fromtimestamp(snap.ts_frame, tz).strftime('%H:%M') if snap.ts_frame is not None else None,
-            observedTs=snap.ts_frame, ageSec=age, stale=snap.ts_frame is not None and now - snap.ts_frame > RADAR_STALE_SEC,
-            fetchedAt=snap.ts_fetch, nexrad=snap.nexrad,
-            legend=dict(colorId=_RADAR_LEGEND['colorId'], colorName=_RADAR_LEGEND['colorName'],
-                rain=[dict(dbz=d, hex=h, label=l) for d, h, l in _RADAR_LEGEND['rain']],
-                snow=dict(zip(('hex', 'label'), _RADAR_LEGEND['snow']))))
+            scaleBar=snap.scalebar, rings=list(snap.rings or ()),
+            frames=[dict(f, at=local(f['ts'])) for f in snap.frames],
+            latest=snap.latest, frameCount=len(snap.frames), observedAt=local(snap.ts_frame),
+            observedTs=snap.ts_frame, ageSec=age, stale=age is not None and age > snap.stale_sec,
+            fetchedAt=snap.ts_fetch, updatedAt=local(snap.ts_fetch), nexrad=snap.nexrad,
+            legend=dict(id=legend['id'], colorId=legend['colorId'], colorName=legend['colorName'],
+                rain=[dict(dbz=d, hex=h, label=l) for d, h, l in legend['rain']],
+                snow=dict(zip(('hex', 'label'), legend['snow'])) if legend['snow'] else None))
 
     def _check_version(self, _dt=None):
         """ Kick off a non-blocking GitHub version check on a daemon thread so a

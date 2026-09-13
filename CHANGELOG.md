@@ -18,7 +18,20 @@ to shared upstream code that the classic console benefits from too.
   (clamped to the free tier). The emitter keeps only the latest frame current
   when the tab is unwatched and builds the full history only when it's been
   viewed — an idle radar tab costs one frame's fetch, not thirteen. Radar runs
-  off-thread and never affects engine health. (Animated loop is a Phase 2 add.)
+  off-thread and never affects engine health.
+- **Radar animation loop.** While the Radar tab is open the past hour of frames
+  plays as a loop (oldest → newest, hold on the latest), so motion reads as "now";
+  a Play/Pause control and a relative "−N min → newest" counter sit under the plate.
+  The loop touches only the echo layer — never the basemap — pauses off-tab and
+  under reduced-motion, and never fetches per frame.
+- **Finer cadence where it's available.** For US stations the radar now leads with
+  IEM's MRMS reflectivity mosaic (~2-minute frames), falling back to RainViewer's
+  10-minute global mosaic elsewhere or when the primary is unavailable — it always
+  tries the finest source first. The plate shows both an "As of" scan time and a
+  distinct "Updated" refresh time (RadarScope-style), plus the source's frame
+  cadence, and the legend switches to match whichever source is live (IEM's native
+  reflectivity table or RainViewer's Universal Blue). Source hand-offs stage
+  atomically so a switch never shows a half-loaded or mislabeled frame.
 
 ### Core (shared with the classic console)
 - Sager Weathercaster no longer fails on a clear sky: it keyed on CheckWX's

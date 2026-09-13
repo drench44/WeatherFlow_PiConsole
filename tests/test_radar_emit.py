@@ -32,13 +32,15 @@ def radar_net(monkeypatch):
     state = dict(times=[1800000000, 1800000600], calls=[], fail=None, tile=tile.getvalue())
 
     def fetch(req, timeout):
-        assert timeout == 25
+        assert 0 < timeout <= ae.RADAR_HTTP_TIMEOUT_SEC
         assert req.get_header('User-agent') == 'WeatherFlow-PiConsole-almanac'
         url = req.full_url
+        if url == ae.RADAR_IEM_METADATA_URL:
+            raise urllib.error.URLError('primary unavailable in fallback fixture')
         state['calls'].append(url)
         if state['fail']:
             state['fail'](url)
-        if url == ae.RADAR_MANIFEST_URL:
+        if url == ae.RADAR_RAINVIEWER_MANIFEST_URL:
             return io.BytesIO(json.dumps(dict(host='https://tiles.example', radar=dict(
                 past=[dict(time=t, path=f'/v2/{t}') for t in reversed(state['times'])],
                 nowcast=[dict(time=1999999999, path='/never')]))).encode())
@@ -47,11 +49,12 @@ def radar_net(monkeypatch):
 
     monkeypatch.setattr(urllib.request, 'urlopen', fetch)
     monkeypatch.setattr(ae.time, 'sleep', lambda _: None)
+    monkeypatch.setattr(ae.time, 'time', lambda: state['times'][-1] + 240)
     return state
 
 
 def tile_calls(state):
-    return [u for u in state['calls'] if u != ae.RADAR_MANIFEST_URL]
+    return [u for u in state['calls'] if u != ae.RADAR_RAINVIEWER_MANIFEST_URL]
 
 
 @pytest.fixture
@@ -102,10 +105,10 @@ def test_unviewed_builds_only_latest(make_emitter, radar_net, radar_dir, tmp_pat
     radar_net['times'] = [1800000000 + i * 600 for i in range(13)]
     emitter = make_emitter(); emitter._do_radar()
     frames = emitter._radar_frames
-    assert [f['ts'] for f in frames] == radar_net['times']
+    assert [f['ts'] for f in frames] == radar_net['times'][-7:]
     assert all(not f['complete'] and 'url' not in f for f in frames[:-1])
     assert frames[-1]['complete'] and emitter._radar_latest == frames[-1]['id']
-    assert len(list(radar_dir.glob('*.png'))) == 1
+    assert len(list(radar_dir.rglob('*.png'))) == 1
     assert len(tile_calls(radar_net)) == 9
     assert len(radar_net['calls']) == 10
 
@@ -116,16 +119,17 @@ def test_viewing_warms_history_then_expiry_prunes_it(make_emitter, radar_net, ra
     marker = tmp_path / 'radar_viewed'
     marker.write_text(str(ae.time.time()))
     radar_net['calls'].clear(); emitter._do_radar()
-    assert len(tile_calls(radar_net)) == 12 * 9
+    assert len(tile_calls(radar_net)) == 6 * 9
     assert all(f['complete'] for f in emitter._radar_frames)
-    assert len(list(radar_dir.glob('*.png'))) == 13
+    assert len(list(radar_dir.rglob('*.png'))) == 7
+    emitter._radar_request_times.clear()
     marker.write_text(str(ae.time.time() - ae.RADAR_VIEW_TTL - 1))
     # Two new manifest frames: even an uncached intermediate frame is skipped.
     radar_net['times'] = radar_net['times'][2:] + [1800007800, 1800008400]
     radar_net['calls'].clear(); emitter._do_radar()
     assert len(tile_calls(radar_net)) == 9
-    assert len(list(radar_dir.glob('*.png'))) == 1
-    assert emitter._radar_latest == '1800008400'
+    assert len(list(radar_dir.rglob('*.png'))) == 8  # retired files have a decode grace period
+    assert emitter._radar_latest.endswith('/1800008400')
     assert all(not f['complete'] for f in emitter._radar_frames[:-1])
     radar_net['calls'].clear(); emitter._do_radar()
     assert not tile_calls(radar_net)  # unchanged latest remains a cache hit
@@ -181,7 +185,6 @@ def test_nexrad_is_caption_only_and_uses_station_unit():
 
 def test_composite_and_one_snapshot(make_emitter, radar_net, radar_dir, monkeypatch, radar_viewed):
     emitter = make_emitter()
-    previous = emitter._radar_result
     publications = []
     original = ae.AlmanacEmitter.__setattr__
     def record(self, key, value):
@@ -191,22 +194,24 @@ def test_composite_and_one_snapshot(make_emitter, radar_net, radar_dir, monkeypa
     monkeypatch.setattr(ae.AlmanacEmitter, '__setattr__', record)
     original_replace = os.replace
     def replace(src, dst):
-        assert emitter._radar_result is previous
+        assert not emitter._radar_result.available or all(
+            (radar_dir / (f['id'] + '.png')).exists() for f in emitter._radar_result.frames if f['complete'])
         assert str(src).endswith('.tmp.' + str(os.getpid()))
         with Image.open(src) as image:
             assert image.size == (480, 480)
         original_replace(src, dst)
     monkeypatch.setattr(os, 'replace', replace)
     emitter._do_radar()
-    assert len(publications) == 1
+    assert len(publications) == 2  # latest published before history
+    assert all(p.latest == p.frames[-1]['id'] and p.frames[-1]['complete'] for p in publications)
     result = emitter._radar_result
-    assert result.available and result.latest == '1800000600'
+    assert result.available and result.latest.endswith('/1800000600')
     assert [f['ts'] for f in result.frames] == radar_net['times']
     assert all(f['complete'] and f['url'] == 'radar/' + f['id'] + '.png' for f in result.frames)
     assert len(tile_calls(radar_net)) == 2 * len(ae._radar_viewport(47.61, -122.33, 7, 480)[0])
     with Image.open(radar_dir / (result.latest + '.png')) as image:
         assert image.getpixel((240, 240)) == (146, 136, 113, 100)  # alpha wasn't squared
-    assert not list(radar_dir.glob('*.tmp.*'))
+    assert not list(radar_dir.rglob('*.tmp.*'))
     payload = emitter._build_payload()['radar']
     assert payload['frameCount'] == 2 and payload['marker'] == dict(x=.5, y=.5)
     assert payload['observedAt'] == datetime.fromtimestamp(result.ts_frame, ae.AlmanacEmitter._station_tz(emitter.app.config)).strftime('%H:%M')
@@ -216,11 +221,11 @@ def test_cache_and_prune(make_emitter, radar_net, radar_dir, radar_viewed):
     emitter = make_emitter(); emitter._do_radar()
     radar_net['calls'].clear(); emitter._do_radar()
     assert not tile_calls(radar_net)
-    assert radar_net['calls'] == [ae.RADAR_MANIFEST_URL]
+    assert radar_net['calls'] == [ae.RADAR_RAINVIEWER_MANIFEST_URL]
     radar_net['times'] = [1800000600, 1800001200]
     emitter._do_radar()
     assert len(tile_calls(radar_net)) == len(ae._radar_viewport(47.61, -122.33, 7, 480)[0])
-    assert sorted(p.stem for p in radar_dir.glob('*.png')) == ['1800000600', '1800001200']
+    assert sorted(p.stem for p in radar_dir.rglob('*.png')) == ['1800000000', '1800000600', '1800001200']  # grace
 
 
 @pytest.mark.parametrize('field', ['Latitude', 'Longitude'])
@@ -247,7 +252,7 @@ def test_pillow_absent(make_emitter, monkeypatch):
 
 
 def test_stale_uses_frame_not_manifest(make_emitter, radar_net, monkeypatch):
-    now = radar_net['times'][-1] + ae.RADAR_STALE_SEC
+    now = radar_net['times'][-1] + ae.RADAR_RAINVIEWER_STALE_SEC
     monkeypatch.setattr(ae.time, 'time', lambda: now)
     emitter = make_emitter(); emitter._do_radar()
     r = emitter._build_payload()['radar']
@@ -265,7 +270,7 @@ def test_never_raises_keeps_last_good_and_warns_once(make_emitter, radar_net, mo
     monkeypatch.setattr(ae.Logger, 'warning', warnings.append)
     monkeypatch.setattr(emitter, '_schedule_retry', lambda *a: retries.append(a))
     def fail(url):
-        if failure == 'manifest' or (failure == 'tile' and url != ae.RADAR_MANIFEST_URL):
+        if failure == 'manifest' or (failure == 'tile' and url != ae.RADAR_RAINVIEWER_MANIFEST_URL):
             raise urllib.error.URLError('offline')
     radar_net['fail'] = fail
     if failure == 'decode': radar_net['tile'] = b'bad PNG'
@@ -286,10 +291,12 @@ def test_partial_latest_withheld_then_retried(make_emitter, radar_net, radar_dir
             failed.append(url); raise urllib.error.HTTPError(url, 404, 'not ready', {}, None)
     radar_net['fail'] = fail
     emitter._do_radar()
-    assert emitter._radar_latest == '1800000600'
-    assert not (radar_dir / '1800001200.png').exists()
-    radar_net['fail'] = None; emitter._do_radar()
-    assert emitter._radar_latest == '1800001200'
+    assert emitter._radar_latest.endswith('/1800000600')
+    assert not list(radar_dir.rglob('1800001200.png'))
+    radar_net['fail'] = None
+    emitter._radar_negative.clear()  # retry after negative cache expiry
+    emitter._do_radar()
+    assert emitter._radar_latest.endswith('/1800001200')
 
 
 def test_radar_schedules_are_registered_and_cancelled(make_emitter, monkeypatch):
@@ -298,7 +305,7 @@ def test_radar_schedules_are_registered_and_cancelled(make_emitter, monkeypatch)
     clock = FakeClock(); monkeypatch.setattr(ae, 'Clock', clock)
     monkeypatch.setattr(ae, 'threading', SimpleNamespace(Thread=HangingThread))
     emitter = make_emitter(); emitter.start()
-    assert sorted(e.timeout for e in clock.events if e.timeout in (60, 300)) == [60, 300]
+    assert sorted(e.timeout for e in clock.events if e.timeout in (60, 180)) == [60, 180]
     emitter._schedule_retry('radar', emitter._check_radar, 120)
     emitter._schedule_retry('radar', emitter._check_radar, 120)
     assert len(emitter._retries) == 1
@@ -307,14 +314,36 @@ def test_radar_schedules_are_registered_and_cancelled(make_emitter, monkeypatch)
     emitter.stop(); assert not clock.events and not emitter._retries
 
 
-@pytest.mark.skipif(not os.environ.get('RADAR_NET_TEST'),
-                    reason='hits RainViewer; opt in with RADAR_NET_TEST=1 (kept out of CI)')
-def test_legend_fidelity_real_universal_blue_tile():
-    """Online integration: exact RGBA stops must occur in ONE real fetched tile.
+# Authoritative RainViewer stops, transcribed from rainviewer_api_colors_table.csv
+# (the "Universal Blue" column). The file lists a colour PER dBZ; the snow ramp is a
+# second block keyed on the same dBZ axis, so its 20 dBZ stop is our snow swatch.
+# Pinning the published table — not a sampled tile — is what makes the fidelity check
+# deterministic: RainViewer's scale is continuous, so a rare anchor intensity (60/65
+# dBZ severe cores) is often simply not falling anywhere on Earth at fetch time, and a
+# live tile then paints 59/64 dBZ instead. That is weather, not a palette mismatch.
+_UNIVERSAL_BLUE_RAIN = {5: '#92887164', 20: '#00a3e0ff', 30: '#005588ff',
+                        40: '#ffaa00ff', 50: '#c10000ff', 60: '#ff77ffff', 65: '#ffffffff'}
+_UNIVERSAL_BLUE_SNOW = {20: '#7fbfffff'}
 
-    A global 512px tile captures the whole intensity range more reliably than
-    a dry station crop. Skip transport outages only, never a palette mismatch.
-    Opt-in (RADAR_NET_TEST=1) so CI stays hermetic and never flakes on the API.
+
+def test_legend_matches_published_universal_blue_scale():
+    """Hermetic: every rendered anchor equals RainViewer's published stop."""
+    for dbz, hexa, _label in ae._RADAR_LEGEND['rain']:
+        assert _UNIVERSAL_BLUE_RAIN[dbz] == hexa, f'{dbz} dBZ legend drift: {hexa}'
+    assert set(d for d, *_ in ae._RADAR_LEGEND['rain']) == set(_UNIVERSAL_BLUE_RAIN)
+    assert ae._RADAR_LEGEND['snow'][0] == _UNIVERSAL_BLUE_SNOW[20]
+
+
+@pytest.mark.skipif(os.environ.get('RADAR_NET_TEST') != '1',
+                    reason='fetches the RainViewer colour table; opt in with RADAR_NET_TEST=1 (kept out of CI)')
+def test_legend_fidelity_against_published_colortable():
+    """Online: the provider still publishes exactly the stops we render.
+
+    Fetches rainviewer_api_colors_table.csv and checks each anchor against the
+    Universal Blue column (rain) and the snow block. Deterministic — it verifies
+    the source of truth, so it catches a real scale change yet never flakes on the
+    weather. Skip transport outages only, never a colour mismatch. Opt-in so CI
+    stays hermetic.
     """
     context = ssl.create_default_context()
     try:
@@ -322,20 +351,28 @@ def test_legend_fidelity_real_universal_blue_tile():
         context = ssl.create_default_context(cafile=certifi.where())
     except ImportError:
         pass
-    def get(url):
-        request = urllib.request.Request(url, headers={'User-Agent': 'WeatherFlow-PiConsole-almanac'})
-        with urllib.request.urlopen(request, timeout=25, context=context) as response:
-            return response.read()
+    url = 'https://www.rainviewer.com/files/rainviewer_api_colors_table.csv'
+    request = urllib.request.Request(url, headers={'User-Agent': 'WeatherFlow-PiConsole-almanac'})
     try:
-        manifest = json.loads(get(ae.RADAR_MANIFEST_URL))
-        path = manifest['radar']['past'][-1]['path']
-        raw = get(f"{manifest['host']}{path}/512/0/0/0/2/1_1.png")
+        with urllib.request.urlopen(request, timeout=25, context=context) as response:
+            rows = response.read().decode().splitlines()
     except (urllib.error.URLError, TimeoutError, OSError) as error:
-        pytest.skip(f'RainViewer offline: {error}')
-    with Image.open(io.BytesIO(raw)) as tile:
-        colors = {rgba for count, rgba in tile.convert('RGBA').getcolors(512 * 512)}
-    for dbz, hexa, label in ae._RADAR_LEGEND['rain']:
-        assert tuple(bytes.fromhex(hexa[1:])) in colors, f'{dbz} dBZ {hexa} absent from real tile'
+        pytest.skip(f'RainViewer colour table offline: {error}')
+    header = rows[0].split(',')
+    blue = header.index('Universal Blue')
+    # The file is two dBZ-keyed blocks (rain, then snow); split on the dBZ reset.
+    rain, snow, prev = {}, {}, None
+    target = rain
+    for row in rows[1:]:
+        cells = row.split(',')
+        dbz = int(cells[0])
+        if prev is not None and dbz < prev:
+            target = snow
+        target[dbz] = cells[blue]
+        prev = dbz
+    for dbz, hexa, _label in ae._RADAR_LEGEND['rain']:
+        assert rain[dbz] == hexa, f'{dbz} dBZ drifted: table {rain[dbz]} vs legend {hexa}'
+    assert snow[20] == ae._RADAR_LEGEND['snow'][0], 'snow stop drifted from the table'
 
 
 def test_cold_start_rate_limit_covers_all_frames(make_emitter, radar_net, monkeypatch, radar_viewed, radar_dir):
@@ -343,17 +380,18 @@ def test_cold_start_rate_limit_covers_all_frames(make_emitter, radar_net, monkey
     starts = []
     original_fetch = urllib.request.urlopen
     def fetch(*args, **kwargs):
-        if args[0].full_url != ae.RADAR_MANIFEST_URL:
+        if '/256/' in args[0].full_url:
             starts.append(clock[0])
         return original_fetch(*args, **kwargs)
     monkeypatch.setattr(ae.time, 'monotonic', lambda: clock[0])
     monkeypatch.setattr(ae.time, 'sleep', lambda seconds: clock.__setitem__(0, clock[0] + seconds))
     monkeypatch.setattr(urllib.request, 'urlopen', fetch)
     radar_net['times'] = [1800000000 + i * 600 for i in range(13)]
+    radar_viewed.write_text(str(ae.time.time()))
     emitter = make_emitter(); emitter._do_radar()
-    assert len(emitter._radar_frames) == 13
+    assert len(emitter._radar_frames) == 7
     assert all(f['complete'] for f in emitter._radar_frames)
-    assert len(list(radar_dir.glob('*.png'))) == 13
-    assert len(radar_net['calls']) == 118
-    assert len(starts) == 13 * len(ae._radar_viewport(47.61, -122.33, 7, 480)[0])
+    assert len(list(radar_dir.rglob('*.png'))) == 7
+    assert len(radar_net['calls']) == 64
+    assert len(starts) == 7 * len(ae._radar_viewport(47.61, -122.33, 7, 480)[0])
     assert all(sum(t <= v < t + 60 for v in starts) <= 90 for t in starts)
