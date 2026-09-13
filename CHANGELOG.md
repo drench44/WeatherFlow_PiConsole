@@ -7,6 +7,14 @@ to shared upstream code that the classic console benefits from too.
 ## 2026-09-13
 
 ### Radar
+- **Stale no longer false-alarms on a healthy 2-minute feed.** The stale flag was a
+  bare 3× cadence (6 min for the mosaic), but the emitter never shows an MRMS frame
+  younger than ~5 min (IEM renders on demand and returns 503 for newer minutes), so
+  the freshest-possible frame already tripped it — the console read STALE, in alarm
+  red, almost constantly. Stale now uses a per-source threshold set above each
+  source's inherent latency (MRMS 10 min, single-site 15, global 20); "stale" once
+  again means the feed actually stopped, not that the source runs its normal few
+  minutes behind. Exposed as `staleSec` so the console stays consistent.
 - **Radar v2: the radar is the star of its tab.** The plate grows from a 480px
   square to the whole 956 × 490 body — twice the echo area, all of it horizontal,
   where weather comes from — and the rail is gone: its eight elements become

@@ -179,11 +179,11 @@ The default preference is **mosaic** when no saved choice exists. A durable
 mosaic without an error card. This resolves “cold start Mosaic” as first use,
 while respecting the requested restart persistence.
 
-| Source | `sourceId` | `provider` | Nominal `cadenceSec` | Display stale at | Zoom bounds |
+| Source | `sourceId` | `provider` | Nominal `cadenceSec` | Display stale at (`staleSec`) | Zoom bounds |
 | --- | --- | --- | --- | --- | --- |
-| IEM MRMS | `iem-mrms-lcref` | `iem` | 120 | 360 seconds | 4–9 |
+| IEM MRMS | `iem-mrms-lcref` | `iem` | 120 | 600 seconds | 4–9 |
 | IEM NEXRAD N0B | `iem-nexrad-n0b` | `iem` | 300 | 900 seconds | 7–10 |
-| RainViewer | `rainviewer` | `rainviewer` | 600 | 1800 seconds | 4–7 |
+| RainViewer | `rainviewer` | `rainviewer` | 600 | 1200 seconds | 4–7 |
 
 Mosaic tries IEM first for CONUS station centers, then RainViewer. A bundled
 coarse land polygon determines CONUS eligibility. Outside CONUS, RainViewer
@@ -330,7 +330,11 @@ entries; `completeFrameCount` counts usable crops. `frameSpacingSec` is median
 complete-frame spacing, not a promise of fixed scan cadence. `observedAt` is
 scan time, `updatedAt` fetch completion time (retained for telemetry, absent
 from the face). A failed fetch changes neither. `ageSec` is scan age;
-`stale` starts at **3×cadence**, inclusive. Header age suffix starts at
+`stale` starts at the source's `staleSec` (a per-source threshold set above that
+source's freshest-possible frame — MRMS is never shown younger than ~5 min
+because IEM 503s newer minutes, so a bare 3×cadence = 6 min would flag every
+healthy scan; `staleSec` is exposed so the console re-derives it consistently and
+a legacy payload falls back to 3×cadence). Header age suffix starts at
 **2×cadence**, floor-rounded to minutes. Nominal cadence belongs only in the
 source caption; scan age belongs only beside AS OF. Never label data LIVE.
 

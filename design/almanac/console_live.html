@@ -2936,7 +2936,9 @@
         JSON.stringify(r.center) === JSON.stringify(radarView.data.center) && r.zoom === radarView.data.zoom &&
         r.observedTs < radarView.good.ts) {
       radarView.data.ageSec = Math.max(radarView.data.ageSec || 0, (d.ts || Date.now()/1000)-radarView.good.ts);
-      radarView.data.stale = radarView.data.ageSec >= 3*(radarView.data.cadenceSec || 600);
+      /* source-tuned staleness (a bare cadence multiple flags a healthy MRMS frame,
+         which is skipped until ~5 min old); fall back only for a legacy payload */
+      radarView.data.stale = radarView.data.ageSec >= (radarView.data.staleSec || 3*(radarView.data.cadenceSec || 600));
       radarState(); return;
     }
     var key = radarPresentationKey(r) + frame.url;

@@ -499,7 +499,7 @@ def check_zoom_site(browser, html, output_dir, theme, site):
             page.keyboard.press('0'); build('auto')
             page.locator('#rad-play').click(); page.wait_for_function('!!radarView.timer')
         # Staleness stays honest, including on the clear mid-ocean plate.
-        emitter._radar_result=emitter._radar_result._replace(cadence=1)  # same scan, clock age crosses 3×cadence
+        emitter._radar_result=emitter._radar_result._replace(stale_sec=1)  # same scan, clock age crosses the source's stale_sec
         emitter._emit(0); poll()
         page.wait_for_function('document.getElementById("rad-plate").dataset.state === "stale"')
         assert page.locator('#rad-updated-row').count() == 0

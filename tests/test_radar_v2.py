@@ -171,11 +171,20 @@ def test_wide_crop_registration_and_basemap():
     assert 'viewBox="0 0 956 490"' in svg
 
 
-@pytest.mark.parametrize('source,age,stale', [('iem-mrms-lcref',359,False),('iem-mrms-lcref',360,True),
-    ('iem-nexrad-n0b',720,False),('iem-nexrad-n0b',900,True),('rainviewer',1799,False),('rainviewer',1800,True)])
-def test_cadence_scaled_stale(make_emitter,hybrid,source,age,stale):
-    emitter=make_emitter();emitter._do_radar();snap=emitter._radar_result._replace(cadence=ae._RADAR_SOURCES[source]['cadence'])
-    assert ae.AlmanacEmitter._radar_payload(snap,snap.ts_frame+age,timezone.utc)['stale'] is stale
+@pytest.mark.parametrize('source', ['iem-mrms-lcref', 'iem-nexrad-n0b', 'rainviewer'])
+def test_stale_uses_source_tuned_threshold_not_bare_cadence(make_emitter, hybrid, source):
+    # Stale is the source's own stale_sec, which sits ABOVE that source's freshest
+    # possible frame — a bare 3*cadence would flag every healthy MRMS scan, since
+    # the adapter skips frames younger than RADAR_IEM_READY_LAG_SEC (IEM 503s them).
+    settings = ae._RADAR_SOURCES[source]
+    ss = settings['stale_sec']
+    emitter = make_emitter(); emitter._do_radar()
+    snap = emitter._radar_result._replace(cadence=settings['cadence'], stale_sec=ss)
+    at = lambda age: ae.AlmanacEmitter._radar_payload(snap, snap.ts_frame + age, timezone.utc)
+    assert at(ss)['staleSec'] == ss
+    assert not at(ss - 1)['stale'] and at(ss)['stale']
+    if source.startswith('iem'):        # the freshest frame we ever show is not stale
+        assert not at(ae.RADAR_IEM_READY_LAG_SEC + settings['cadence'])['stale']
 
 
 @pytest.mark.skipif(os.environ.get('RADAR_NET_TEST')!='1',reason='opt in with RADAR_NET_TEST=1')

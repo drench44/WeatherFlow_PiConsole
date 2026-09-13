@@ -253,14 +253,15 @@ def test_pillow_absent(make_emitter, monkeypatch):
 
 
 def test_stale_uses_frame_not_manifest(make_emitter, radar_net, monkeypatch):
-    now = radar_net['times'][-1] + ae.RADAR_RAINVIEWER_STALE_SEC
-    monkeypatch.setattr(ae.time, 'time', lambda: now)
+    ss = ae.RADAR_RAINVIEWER_STALE_SEC
+    clock = {'now': radar_net['times'][-1] + ss - 1}
+    monkeypatch.setattr(ae.time, 'time', lambda: clock['now'])
     emitter = make_emitter(); emitter._do_radar()
     r = emitter._build_payload()['radar']
-    assert r['ageSec'] == 1200 and not r['stale'] and r['fetchedAt'] == now
-    now += 600
+    assert r['ageSec'] == ss - 1 and not r['stale'] and r['fetchedAt'] == clock['now']
+    clock['now'] += 1                       # one second past the source's stale_sec
     r = emitter._build_payload()['radar']
-    assert r['stale'] and r['ageSec'] == 1800
+    assert r['stale'] and r['ageSec'] == ss and r['staleSec'] == ss
 
 
 @pytest.mark.parametrize('failure', ['manifest', 'tile', 'decode', 'save'])

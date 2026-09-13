@@ -313,8 +313,9 @@ def test_source_stale_thresholds_and_dst_local_labels(make_emitter, hybrid):
     emitter = make_emitter(); emitter._do_radar()
     snap = emitter._radar_result
     tz = ae.AlmanacEmitter._station_tz(emitter.app.config)
-    assert not ae.AlmanacEmitter._radar_payload(snap, snap.ts_frame + 359, tz)['stale']
-    assert ae.AlmanacEmitter._radar_payload(snap, snap.ts_frame + 360, tz)['stale']
+    ss = ae._RADAR_SOURCES['iem-mrms-lcref']['stale_sec']
+    assert not ae.AlmanacEmitter._radar_payload(snap, snap.ts_frame + ss - 1, tz)['stale']
+    assert ae.AlmanacEmitter._radar_payload(snap, snap.ts_frame + ss, tz)['stale']
     times = [int(datetime(2026, 11, 1, h, 30, tzinfo=timezone.utc).timestamp()) for h in (8, 9)]
     dst = snap._replace(frames=tuple(dict(id=str(t), ts=t, complete=True) for t in times))
     assert [f['at'] for f in ae.AlmanacEmitter._radar_payload(dst, times[-1], tz)['frames']] == ['01:30', '01:30']

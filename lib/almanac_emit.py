@@ -1341,7 +1341,13 @@ class AlmanacEmitter:
             scaleBar=snap.scalebar, rings=list(snap.rings or ()),
             frames=[dict(f, at=local(f['ts'])) for f in snap.frames],
             latest=snap.latest, frameCount=len(snap.frames), observedAt=local(snap.ts_frame),
-            observedTs=snap.ts_frame, ageSec=age, stale=age is not None and age >= 3 * snap.cadence,
+            observedTs=snap.ts_frame, ageSec=age, staleSec=snap.stale_sec,
+            # Stale means the feed stopped updating, not that the source runs late.
+            # A per-source threshold (already tuned above each provider's inherent
+            # freshest age: MRMS is skipped until ~5 min old because IEM 503s newer
+            # minutes, so 3*cadence=6 min would flag every healthy frame) — never a
+            # bare cadence multiple.
+            stale=age is not None and age >= snap.stale_sec,
             fetchedAt=snap.ts_fetch, updatedAt=local(snap.ts_fetch), nexrad=snap.nexrad,
             legend=dict(id=legend['id'], colorId=legend['colorId'], colorName=legend['colorName'],
                 rain=[dict(dbz=d, hex=h, label=l) for d, h, l in legend['rain']],
