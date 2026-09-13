@@ -334,8 +334,9 @@ from the face). A failed fetch changes neither. `ageSec` is scan age;
 source's freshest-possible frame — MRMS is never shown younger than ~5 min
 because IEM 503s newer minutes, so a bare 3×cadence = 6 min would flag every
 healthy scan; `staleSec` is exposed so the console re-derives it consistently and
-a legacy payload falls back to 3×cadence). Header age suffix starts at
-**2×cadence**, floor-rounded to minutes. Nominal cadence belongs only in the
+a legacy payload falls back to 3×cadence). Header age suffix starts at **80% of
+`staleSec`** (3×cadence for a legacy payload), floor-rounded to minutes — so a
+routinely-delayed feed reads clean and the suffix forecasts the stale flag. Nominal cadence belongs only in the
 source caption; scan age belongs only beside AS OF. Never label data LIVE.
 
 ### Input, layout and playback

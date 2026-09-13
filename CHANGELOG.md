@@ -7,6 +7,17 @@ to shared upstream code that the classic console benefits from too.
 ## 2026-09-13
 
 ### Radar
+- **Radar top-band cleanup.** The masthead content was overflowing its own 41px
+  reservation and landing on the header line below it (the station subtitle and a
+  30px clock, whose hidden alert/lightning flags pinned an oversized line box). On
+  the radar tab the subtitle is dropped (it's already in the footer and the source
+  caption), the clock drops to 22px with a fixed line-height, and the double-rule
+  tightens under an alert — so nothing overlaps in either alert state. The word
+  "REFLECTIVITY" was printed twice in one band; the legend's duplicate title is
+  gone and the unit now sits inline as "dBZ" (mixed case — it's a unit) before the
+  ramp. The header and the plate chrome share two clean columns instead of a
+  four-step staircase, and the age suffix only appears once a frame is genuinely
+  late (80% of the source's stale window) rather than on every routine MRMS scan.
 - **Stale no longer false-alarms on a healthy 2-minute feed.** The stale flag was a
   bare 3× cadence (6 min for the mosaic), but the emitter never shows an MRMS frame
   younger than ~5 min (IEM renders on demand and returns 503 for newer minutes), so

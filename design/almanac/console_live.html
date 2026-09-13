@@ -548,19 +548,26 @@
 
   /* ═════════ SECONDARY SCREENS ═════════ */
 
-  /* Reserve Fable's 41px masthead including the restored station subtitle. */
+  /* Radar masthead: the 41px reservation is right; the content was overflowing it.
+     The station subtitle is dropped here (it's already in the footer and the source
+     caption), and the clock is chrome on this screen, not the subject — 22px with
+     line-height:1 so the always-present opacity:0 stale/lightning flags stop
+     inflating its line box past the reservation. */
   :root[data-tabs="on"] .page[data-screen="s-radar"] .masthead { height:41px; }
   :root[data-tabs="on"] .page[data-screen="s-radar"] .mast-row { padding:2px 0; line-height:1; }
   :root[data-tabs="on"] .page[data-screen="s-radar"] .mast-station { font-size:18px; }
-  :root[data-tabs="on"] .page[data-screen="s-radar"] .mast-station .sub { font-size:11px; line-height:11px; }
+  :root[data-tabs="on"] .page[data-screen="s-radar"] .mast-station .sub { display:none; }
+  :root[data-tabs="on"] .page[data-screen="s-radar"] .mast-clock { font-size:22px; line-height:1; }
+  :root[data-tabs="on"] .page[data-screen="s-radar"] .mast-stale,
+  :root[data-tabs="on"] .page[data-screen="s-radar"] .mast-flag { font-size:12px; line-height:1; }
   :root[data-tabs="on"] .page[data-screen="s-radar"][data-radar-alerts="on"] .masthead { height:22px; }
   :root[data-tabs="on"] .page[data-screen="s-radar"][data-radar-alerts="on"] .mast-row { padding:0; }
+  :root[data-tabs="on"] .page[data-screen="s-radar"][data-radar-alerts="on"] .scotch { height:4px; }
   :root[data-tabs="on"] .page[data-screen="s-radar"][data-radar-alerts="on"] .mast-station,
   :root[data-tabs="on"] .page[data-screen="s-radar"][data-radar-alerts="on"] .mast-clock { font-size:14px; }
   :root[data-tabs="on"] .page[data-screen="s-radar"][data-radar-alerts="on"] .mast-date { font-size:13px; }
-  :root[data-tabs="on"] .page[data-screen="s-radar"][data-radar-alerts="on"] .mast-station .sub { display:inline; margin-left:10px; letter-spacing:.08em; }
   :root[data-tabs="on"] .page[data-screen="s-radar"] .alert-strip { height:19px; min-height:0; padding:0 5px; margin:0; }
-  #s-radar .sc-head { flex-shrink:0; }
+  #s-radar .sc-head { flex-shrink:0; padding-left:13px; padding-right:13px; }
   #s-radar .sc-body { display: block; gap: 0; padding: 0; }
   .rad-plate { position: relative; width: 956px; height: 490px;
     margin: 0; border: 1px solid var(--rule); background: var(--paper); }
@@ -646,20 +653,22 @@
     font:11.5px/11px var(--sans); letter-spacing:.02em; color:var(--ink-soft); }
   .rad-src-cap a { color:inherit; text-decoration:none; }
   .rad-attrib { position:static; font:inherit; }
-  .rad-legend { position:absolute; right:12px; top:10px; z-index:4; width:372px;
-    padding:5px 0 4px; background:var(--plate-scrim); }
-  .rad-legend-title { font:11.5px/13px var(--sans); letter-spacing:.1em; text-transform:uppercase;
-    color:var(--ink-soft); text-align:right; margin-bottom:4px; }
-  .rad-ramps { display:flex; }
+  .rad-legend { position:absolute; right:12px; top:10px; z-index:4; width:414px;
+    padding:5px 0 4px 8px; background:var(--plate-scrim); }
+  /* the unit prefixes the ramp (mixed case — dBZ is a unit, not a heading); the
+     duplicate "REFLECTIVITY" title is gone, sc-head already says it. */
+  .rad-ramps { display:flex; align-items:center; }
+  .rad-legend-unit { flex:0 0 34px; padding-right:6px; text-align:right; font:11.5px/12px var(--sans);
+    letter-spacing:.04em; color:var(--ink-soft); }
   .rad-ramp { display:flex; height:12px; width:372px; border:1px solid var(--rule); }
   .rad-ramp i, .rad-snow-ramp i { flex:1; }
-  .rad-ticks { display:flex; margin-top:3px; font:11.5px/13px var(--sans); color:var(--ink-soft); font-variant-numeric:tabular-nums; }
+  .rad-ticks { display:flex; margin-top:3px; margin-left:34px; font:11.5px/13px var(--sans); color:var(--ink-soft); font-variant-numeric:tabular-nums; }
   .rad-ticks span { flex:1; text-align:center; }
   .rad-legend[data-snow="on"] .rad-ramp { width:274px; }
   .rad-legend[data-snow="on"] .rad-ticks { width:274px; }
   .rad-snow-ramp { display:none; }
   .rad-legend[data-snow="on"] .rad-snow-ramp { display:flex; width:88px; height:12px; margin-left:10px; border:1px solid var(--rule); }
-  .rad-snow-label { position:absolute; right:8px; bottom:4px; width:88px; text-align:center; font:11.5px/13px var(--sans); color:var(--ink-soft); }
+  .rad-snow-label { position:absolute; right:0; bottom:4px; width:88px; text-align:center; font:11.5px/13px var(--sans); color:var(--ink-soft); }
   .rad-loop { position:absolute; left:12px; bottom:12px; z-index:4; margin:0; }
   .rad-play, .rad-step, .rad-reset { background:var(--plate-scrim); }
   .rad-loop-read { padding:3px 7px; background:var(--plate-scrim); }
@@ -2913,7 +2922,12 @@
     status.append(asof);
 
     if (state === "loading") status.append(document.createTextNode(" · Fetching radar"));
-    if (age >= 2 * (r.cadenceSec || 600)) status.append(document.createTextNode(" · " + Math.floor(age / 60) + " min old"));
+    /* Suffix at 80% of the source's own fresh window (staleSec) — not a bare
+       cadence multiple, which fires on every healthy MRMS frame (skipped until
+       ~5 min old). So a routinely-late feed reads clean, and the suffix becomes
+       the early warning that accent-stale is coming. */
+    var ageFloor = r.staleSec || 3 * (r.cadenceSec || 600);
+    if (age >= 0.8 * ageFloor) status.append(document.createTextNode(" · " + Math.floor(age / 60) + " min old"));
   }
   function radarPresentationKey(r) {
     return JSON.stringify([r.sourceId || "rainviewer", r.legend && (r.legend.id || r.legend.colorId),
@@ -3085,9 +3099,8 @@
     if (r.legend && radarView.legendKey !== legendKey) {
       radarView.legendKey=legendKey;
       var legend=$("rad-legend"); legend.replaceChildren(); legend.dataset.snow=r.legend.snow ? "on" : "off";
-      var title=document.createElement("div"); title.className="rad-legend-title";
-      title.textContent="Reflectivity · dBZ"; legend.append(title);
       var ramps=document.createElement("div"); ramps.className="rad-ramps"; legend.append(ramps);
+      var unit=document.createElement("div"); unit.className="rad-legend-unit"; unit.textContent="dBZ"; ramps.append(unit);
       var ramp=document.createElement("div"); ramp.className="rad-ramp"; ramp.id="rad-ramp"; ramps.append(ramp);
       var ticks=document.createElement("div"); ticks.className="rad-ticks"; ticks.id="rad-ticks"; legend.append(ticks);
       r.legend.rain.forEach(function(stop) {

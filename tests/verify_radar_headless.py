@@ -816,9 +816,11 @@ def check_radar_v2(browser, html, output_dir, theme):
         assert y>=0 and (y+b['height']<=73 or y>=418) and y+b['height']<=490,(selector,b)
         dx=max(x-478,0,478-x-b['width']);dy=max(y-245,0,245-y-b['height'])
         assert dx*dx+dy*dy>150**2,(selector,b)
-    assert page.locator('#rad-legend').bounding_box()['width']==372
+    assert page.locator('#rad-legend').bounding_box()['width']==414
     assert page.locator('#rad-ramp i').count()==7
-    assert page.locator('.mast-station .sub').is_visible()
+    assert page.locator('.rad-legend-unit').inner_text()=='dBZ'          # unit, mixed case, no duplicate title
+    assert page.locator('.rad-legend-title').count()==0
+    assert page.locator('.mast-station .sub').is_hidden()               # station subtitle dropped on the radar tab
     for selector in ('#rad-src-mosaic','#rad-src-site','#rad-play','#rad-zoom-in','#rad-zoom-out'):
         b=page.locator(selector).bounding_box();assert b['width']>=44 and b['height']>=44,(selector,b)
     contrast=page.evaluate('''() => {
@@ -865,8 +867,14 @@ def check_radar_v2(browser, html, output_dir, theme):
     assert page.locator('#rad-echo').evaluate('(e)=>e.style.opacity')==''
     page.emulate_media(reduced_motion='no-preference')
     def push(data):page.evaluate('(d)=>{testPayload=d;render(d)}',data)
+    # Age suffix is gated on 80% of staleSec, not a bare cadence multiple: a routine
+    # MRMS frame (skipped until ~5 min old) reads clean; the suffix forecasts stale.
+    routine=copy.deepcopy(initial);routine['radar'].update(ageSec=360,staleSec=600,stale=False);push(routine)
+    assert 'min old' not in page.locator('#rad-status').inner_text().lower()
+    warn=copy.deepcopy(initial);warn['radar'].update(ageSec=480,staleSec=600,stale=False);push(warn)
+    assert '8 min old' in page.locator('#rad-status').inner_text().lower()
     # Honest age and anti-rewind independent of nominal caption.
-    late=copy.deepcopy(initial);late['radar'].update(ageSec=660,stale=True);push(late)
+    late=copy.deepcopy(initial);late['radar'].update(ageSec=660,staleSec=600,stale=True);push(late)
     assert '11 min old' in page.locator('#rad-status').inner_text().lower()
     backwards=copy.deepcopy(late);backwards['radar']['observedTs']-=120
     backwards['radar']['latest']='rewind';backwards['radar']['frames']=[dict(frame,id='rewind',ts=newest-120)]
