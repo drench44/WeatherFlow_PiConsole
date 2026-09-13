@@ -15,7 +15,8 @@
 # Bind stays on 127.0.0.1 by default (chromium is local; no data leaves the box).
 # Set WFP_BIND=0.0.0.0 to expose /health (and the page) to the LAN for remote
 # monitoring — note that also makes wx.json LAN-readable.
-import http.server, socketserver, json, math, os, time, threading
+import http.server, socketserver, json, math, os, time, threading, re
+from urllib.parse import parse_qs
 
 PORT      = int(os.environ.get("WFP_PORT", "8137"))
 WEB       = os.environ.get("WFP_WEB", ".")
@@ -25,6 +26,9 @@ STALE_SEC = int(os.environ.get("WFP_STALE_SEC", "20"))
 # A station can go silent for minutes while the engine keeps emitting. Long
 # enough not to trip on one dropped Tempest report (they arrive ~60 s apart).
 OBS_STALE_SEC = int(os.environ.get("WFP_OBS_STALE_SEC", "300"))
+
+# Aligned with the emitter shared floor and highest source ceiling.
+RADAR_MIN_ZOOM, RADAR_MAX_DESIRED_ZOOM = 4, 9
 
 LOOPBACK = ("127.0.0.1", "::1", "::ffff:127.0.0.1")
 
@@ -37,6 +41,44 @@ LOOPBACK = ("127.0.0.1", "::1", "::ffff:127.0.0.1")
 _polls      = 0
 _renders    = 0
 _count_lock = threading.Lock()
+
+
+def _write_radar_zoom(values):
+    """Caller holds _count_lock and has checked loopback. Polling cannot fail here."""
+    if len(values) != 1:
+        return
+    value = values[0]
+    if value != 'auto':
+        if not re.fullmatch(r'[0-9]{1,2}', value):
+            return
+        level = int(value)
+        if not RADAR_MIN_ZOOM <= level <= RADAR_MAX_DESIRED_ZOOM:
+            return
+        value = str(level)
+    # The kiosk links this sibling to durable station storage before startup.
+    # Resolve the link so replacement updates its target, not the link.
+    marker = os.path.realpath(os.path.join(os.path.dirname(DATA), 'radar_zoom'))
+    tmp = f"{marker}.tmp.{os.getpid()}"
+    try:
+        try:
+            with open(marker) as f:
+                current = f.read(128)
+                if len(current) < 128 and current.strip() == value:
+                    return
+        except (OSError, UnicodeError):
+            pass
+        with open(tmp, 'w') as f:
+            f.write(value + '\n')
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, marker)
+    except OSError:
+        pass
+    finally:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
 
 
 class Handler(http.server.SimpleHTTPRequestHandler):
@@ -55,6 +97,8 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 _polls += 1
                 if rendered:
                     _renders += 1
+                if self.client_address[0] in LOOPBACK:
+                    _write_radar_zoom(parse_qs(query, keep_blank_values=True).get('radarZoom', []))
                 if viewed_radar:
                     # Share only a timestamp with the emitter. Serialize writers
                     # and replace atomically so it never reads a partial epoch.

@@ -77,7 +77,7 @@ def test_zoom_targets_coverage_with_clamps(lat, expected):
     assert ae._radar_zoom_for(0) > ae._radar_zoom_for(78)
 
 
-def test_zoom_cached_until_latitude_changes(make_emitter, radar_net, monkeypatch):
+def test_zoom_recomputed_each_pass_and_latitude_change(make_emitter, radar_net, monkeypatch):
     calls = []
     original = ae._radar_zoom_for
     def zoom_for(lat):
@@ -86,12 +86,12 @@ def test_zoom_cached_until_latitude_changes(make_emitter, radar_net, monkeypatch
     monkeypatch.setattr(ae, '_radar_zoom_for', zoom_for)
     emitter = make_emitter()
     emitter._do_radar(); emitter._do_radar()
-    assert calls == [47.61]
+    assert calls == [47.61, 47.61]
     emitter.app.config = make_config(Station={'Latitude': '78'})
     radar_net['times'] = [1800001200]
     radar_net['calls'].clear()
     emitter._do_radar()
-    assert calls == [47.61, 78]
+    assert calls == [47.61, 47.61, 78]
     assert emitter._build_payload()['radar']['zoom'] == 6
     assert all('/256/6/' in url for url in tile_calls(radar_net))
 

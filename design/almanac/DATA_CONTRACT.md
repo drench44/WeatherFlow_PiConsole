@@ -225,7 +225,9 @@ the old-location snapshot before acquisition, so a failure cannot mislabel it.
   "historyGaps": false, "historySpanSec": 240, "completeFrameCount": 3,
   "partialCoverage": false,
   "center": {"lat": 47.61, "lon": -122.33},
-  "zoom": 7, "viewport": {"w": 480, "h": 480},
+  "zoom": 7, "zoomAuto": true, "zoomAutoLevel": 7,
+  "zoomMin": 4, "zoomMax": 9, "zoomSource": "MRMS",
+  "zoomCapped": false, "zoomDesired": null, "viewport": {"w": 480, "h": 480},
   "bounds": {"n": 49.36, "s": 45.80, "e": -119.69, "w": -124.97},
   "marker": {"x": 0.5, "y": 0.5},
   "metersPerPixel": 824.5,
@@ -266,8 +268,68 @@ antimeridian crossing. Tile x wraps and tile y clamps at the poles. Distances
 follow `Units/Distance`: `mi`/`miles` becomes `mi`, otherwise `km`. Scale and rings
 retain the existing geodesic calculations. `nexrad` is the closest of 160 bundled
 WSR-88D sites within 285 miles, with station-to-radar bearing; otherwise null.
-Zoom targets 256 km across 480px, clamped to 4–7; its cached choice changes with
-station latitude. No additional mapping/decoding dependency beyond Pillow.
+Auto zoom targets 256 km across 480px, clamped to 4–7 and recomputed each pass.
+A manual preference can range from 4 to 9; each attempted source composites at
+`max(4, min(desired, source.max_zoom))` (MRMS: 9; RainViewer: 7). Source fallback
+recomputes the entire viewport while retaining the same build count/deadline.
+No additional mapping/decoding dependency beyond Pillow.
+
+| Zoom field | Type | Meaning |
+| --- | --- | --- |
+| `zoom` | int | Effective zoom of the published crop |
+| `zoomAuto` | bool | No manual override is in force |
+| `zoomAutoLevel` | int | Latitude-auto level, including when manually pinned to that level |
+| `zoomMin` | int | Shared floor, 4 |
+| `zoomMax` | int | Published source ceiling, MRMS 9 / RainViewer 7 |
+| `zoomSource` | string | `MRMS` or `RainViewer`, for limit captions |
+| `zoomCapped` | bool | Desired manual level exceeds the published source ceiling |
+| `zoomDesired` | int or null | Exact saved manual intent; null means auto |
+
+`zoomDesired` is an additive acknowledgement field: effective z7 alone cannot
+confirm whether a capped z8 or z9 was saved, or whether z7 is manual or automatic.
+The preference is a single line in `radar_zoom`, beside `radar_viewed` and the
+emitter output. Missing, unreadable, malformed, `auto`, and out-of-band values
+select auto. An override is never rewritten by the emitter, including during
+source fallback. A saved z8 clamps to z7 on RainViewer and restores to z8 when
+MRMS succeeds. A failed acquisition retains the complete old presentation,
+including its zoom metadata; it never relabels old pixels with requested geometry.
+
+While Radar is active, pending input appends `&radarZoom=<4..9|auto>` to the
+ordinary `wx.json` poll. The server parses a single value with `parse_qs`, trusts
+only loopback, validates it, and atomically writes only changes. Duplicate,
+malformed, and non-loopback preferences are ignored; I/O errors never interrupt
+polling or affect `/health`. Reset explicitly writes `auto`. No localStorage is
+used. Requests repeat until the decoded payload acknowledges the exact desired
+intent and effective zoom; Auto/Manual and source bounds then follow that payload.
+Rapid presses coalesce to the latest input; a reset superseding an in-flight
+manual request must itself be sent before it can be acknowledged.
+
+The kiosk feed lives in `/tmp`, so the launcher links its `radar_zoom` sibling to
+`${XDG_STATE_HOME:-$HOME/.local/state}/wfpiconsole/radar_zoom`, migrating an existing
+runtime preference on first setup. The server resolves this link before atomic
+replacement (and fsyncs the new file). The link is recreated after reboot; the
+stored intent survives. This is per station installation, like the feed itself.
+Custom server setups must likewise place the sibling on durable storage or link
+it to durable storage to retain it over reboot.
+
+A lifecycle-managed preference stat watcher runs at the emit interval (2 s).
+Changes enter the existing single-flight radar worker; changes during a build
+coalesce until that worker finishes. There is no alternate compositing path or
+budget reset. The 90 requests/minute limit, per-source 429 cooldowns, deadlines,
+frame-build cap and 900-second view TTL all continue to apply. Failures retry on
+the existing schedule; confirmation can take longer under backpressure.
+
+The rail contains 44px minus/plus steppers, Auto/Manual mode, and a reset visible
+in Manual. Pending input dims the mode. Plus is disabled at the live source
+ceiling and minus at the floor. The source ceiling/capped caption explains the
+limit without changing saved intent. Keyboard `+`/`=`, `-`/`−`/`_`, and `0` work
+only on the active Radar tab, respecting text inputs and modified shortcuts.
+Buttons support Tab, Enter and Space with visible focus. The control uses only
+`--rule`, `--ink`, `--ink-soft`, and `--sans` theme tokens; no accent chrome.
+Zoom changes rebuild scale/rings/Range and history from the effective viewport,
+preserving loop pause state; the loop hides until new history is ready. Echoes
+are server-rasterized, never CSS zoomed. Geographic basemap and optional pinch
+interaction are outside this build.
 
 All numeric frame timestamps and `fetchedAt` are UTC epoch seconds. `observedAt`
 is the newest **complete frame's valid time**, while `updatedAt` is the last
@@ -372,3 +434,10 @@ palette agreement, abandoned/failed loads, same-frame refresh, loop cycling and
 pause/idle, clear/stale and legacy payloads. Its 1024×600 layout checks and
 screenshots include alerts, both themes, seven IEM legend rows (plus RainViewer's
 Snow row), Updated and cadence text, keeping all Radar content above y=568.
+
+The zoom verifier additionally drives persistent input through the real loopback
+server and hermetic emitter transport at Seattle, Berlin, Sydney, mid-ocean and
+antimeridian sites, in paper and night themes. Screenshots default to
+`/tmp/wfp-radar-zoom/`. It checks pending/confirmed, Auto/Manual, reset, ceilings,
+source clamp/restore, keyboard/focus, refresh persistence, geometry, pause/history,
+and clear/stale states. These are deterministic UX fixtures, not live weather.

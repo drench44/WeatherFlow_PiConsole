@@ -126,6 +126,14 @@ pkill -f "kiosk/serve.py" 2>/dev/null || true
 sleep 1
 
 mkdir -p "$DATA_DIR" "$WEB"
+# /tmp is cleared at reboot. Keep the channel beside wx.json, backed by durable
+# station-local storage; serve.py atomically replaces the link target.
+RADAR_STATE="${XDG_STATE_HOME:-$HOME/.local/state}/wfpiconsole"
+mkdir -p "$RADAR_STATE"
+if [ ! -e "$RADAR_STATE/radar_zoom" ] && [ -f "$DATA_DIR/radar_zoom" ]; then
+  cp "$DATA_DIR/radar_zoom" "$RADAR_STATE/radar_zoom"
+fi
+ln -sfn "$RADAR_STATE/radar_zoom" "$DATA_DIR/radar_zoom"
 cp -f "$APP/design/almanac/console_live.html" "$WEB/index.html"
 ln -sf "$DATA" "$WEB/wx.json"
 

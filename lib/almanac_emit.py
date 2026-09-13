@@ -108,11 +108,11 @@ _RADAR_SOURCES = {
     'iem-mrms-lcref': dict(provider='iem', attribution='IEM / NOAA MRMS',
         attribution_url='https://mesonet.agron.iastate.edu/ogc/',
         cadence=RADAR_IEM_FRAME_INTERVAL_SEC, stale_sec=RADAR_IEM_STALE_SEC,
-        legend=_RADAR_IEM_LEGEND),
+        legend=_RADAR_IEM_LEGEND, max_zoom=9),
     'rainviewer': dict(provider='rainviewer', attribution='RainViewer',
         attribution_url='https://www.rainviewer.com/',
         cadence=RADAR_RAINVIEWER_FRAME_INTERVAL_SEC, stale_sec=RADAR_RAINVIEWER_STALE_SEC,
-        legend=_RADAR_LEGEND),
+        legend=_RADAR_LEGEND, max_zoom=7),
 }
 # Coarse station-center CONUS land mask (lon, lat), deliberately independent of
 # the nearest-NEXRAD caption. Coast/border detail is approximate, not geocoding.
@@ -660,9 +660,11 @@ def _radar_nexrad(lat, lon, unit):
 # tick reads that one reference once.
 _RadarResult = namedtuple('_RadarResult',
     'available reason frames latest ts_frame center zoom mpp bounds scalebar rings nexrad ts_fetch '
-    'source_id provider attribution attribution_url cadence stale_sec legend partial_coverage',
+    'source_id provider attribution attribution_url cadence stale_sec legend partial_coverage '
+    'max_zoom zoom_desired zoom_auto_level',
     defaults=('rainviewer', 'rainviewer', 'RainViewer', 'https://www.rainviewer.com/',
-              RADAR_RAINVIEWER_FRAME_INTERVAL_SEC, RADAR_RAINVIEWER_STALE_SEC, _RADAR_LEGEND, False))
+              RADAR_RAINVIEWER_FRAME_INTERVAL_SEC, RADAR_RAINVIEWER_STALE_SEC, _RADAR_LEGEND, False,
+              7, None, 7))
 _RADAR_NONE = _RadarResult(False, 'no data yet', (), None, None, None, None, None,
                            None, None, None, None, None)
 
@@ -716,7 +718,7 @@ class AlmanacEmitter:
         self._radar_negative = {}
         self._radar_cooldowns = {}
         self._radar_metadata = {}
-        self._radar_zoom_cache = None  # (latitude, zoom), independent of fetch success
+        self._radar_zoom_stamp = None
         # scheduling registry: EVERY handle we hand to Clock (intervals and
         # one-shots alike) so stop() can cancel all of them, plus the guards
         # that keep one failing provider from stacking work.
@@ -804,6 +806,8 @@ class AlmanacEmitter:
             self._schedule(self._check_forecast, FORECAST_CHECK_INTERVAL, interval=True)
             self._schedule(self._check_radar, 60)
             self._schedule(self._check_radar, RADAR_CHECK_INTERVAL, interval=True)
+            self._radar_zoom_stamp = self._radar_preference_stamp()
+            self._schedule(self._check_radar_zoom, self.interval, interval=True)
             return self._event
 
     def stop(self):
@@ -883,6 +887,21 @@ class AlmanacEmitter:
 
     def _check_radar(self, _dt=None):
         self._spawn('radar', self._do_radar)
+
+    def _radar_preference_stamp(self):
+        try:
+            stat = os.stat(os.path.join(os.path.dirname(self.output_path), 'radar_zoom'))
+            return stat.st_ino, stat.st_mtime_ns, stat.st_size
+        except OSError:
+            return None
+
+    def _check_radar_zoom(self, _dt=None):
+        # Prompt input feedback through the SAME single-flight worker and transport
+        # budgets. While busy, keep only the latest file change for the next tick.
+        stamp = self._radar_preference_stamp()
+        if self._running and 'radar' not in self._inflight and stamp != self._radar_zoom_stamp:
+            self._radar_zoom_stamp = stamp
+            self._check_radar()
 
     def _radar_request(self, source, url, deadline, method='GET', metadata=False):
         """Validated transport; every attempt uses one monotonic rate/cooldown gate."""
@@ -1051,6 +1070,7 @@ class AlmanacEmitter:
             self._radar_result = _RadarResult(True, None, tuple(frames[t] for t in sorted(frames)),
                 latest['id'], newest, ctx['center'], ctx['zoom'], ctx['mpp'], ctx['bounds'],
                 ctx['bar'], ctx['rings'], ctx['nexrad'], fetched, source, **settings,
+                zoom_desired=ctx['desired'], zoom_auto_level=ctx['auto_zoom'],
                 partial_coverage=source == 'iem-mrms-lcref' and any(
                     ctx['bounds'][k] < _RADAR_IEM_DOMAIN[k] if k in ('w', 's') else
                     ctx['bounds'][k] > _RADAR_IEM_DOMAIN[k] for k in ('w', 'e', 's', 'n')))
@@ -1116,10 +1136,18 @@ class AlmanacEmitter:
             except ImportError:
                 self._radar_result = _RADAR_NONE._replace(reason='compositor unavailable')
                 return
-            if self._radar_zoom_cache is None or self._radar_zoom_cache[0] != lat:
-                self._radar_zoom_cache = (lat, _radar_zoom_for(lat))
-            zoom = self._radar_zoom_cache[1]
-            tiles, mpp, bounds, _ = _radar_viewport(lat, lon, zoom, RADAR_VIEWPORT_PX)
+            auto_zoom = _radar_zoom_for(lat)
+            desired = None
+            try:
+                with open(os.path.join(os.path.dirname(self.output_path), 'radar_zoom')) as preference:
+                    raw = preference.read(128)
+                value = raw.strip()
+                if len(raw) < 128 and re.fullmatch(r'[0-9]{1,2}', value):
+                    level = int(value)
+                    if RADAR_MIN_ZOOM <= level <= max(s['max_zoom'] for s in _RADAR_SOURCES.values()):
+                        desired = level
+            except (OSError, ValueError, UnicodeError):
+                pass  # absence/auto/invalid all mean latitude-auto
             try:
                 with open(os.path.join(os.path.dirname(self.output_path), 'radar_viewed')) as marker:
                     viewed_age = time.time() - float(marker.read(128))
@@ -1127,17 +1155,23 @@ class AlmanacEmitter:
             except (OSError, ValueError, UnicodeError):
                 viewed = False
             unit = _radar_distance_unit(config)
-            bar, rings = _radar_scale(mpp, RADAR_VIEWPORT_PX, unit)
-            identity = hashlib.sha256(repr((lat, lon, zoom, RADAR_VIEWPORT_PX, tiles)).encode()).hexdigest()[:20]
-            ctx = dict(center=center, zoom=zoom, tiles=tiles, mpp=mpp, bounds=bounds,
-                bar=bar, rings=rings, nexrad=_radar_nexrad(lat, lon, unit), viewed=viewed,
-                identity=identity, builds=0, deadline=time.monotonic() + RADAR_BUILD_DEADLINE_SEC)
+            # One budget spans both attempts; geometry is source-specific, intent is not.
+            ctx = dict(center=center, nexrad=_radar_nexrad(lat, lon, unit), viewed=viewed,
+                desired=desired, auto_zoom=auto_zoom, builds=0,
+                deadline=time.monotonic() + RADAR_BUILD_DEADLINE_SEC)
             self._radar_negative = {k: v for k, v in self._radar_negative.items() if v > time.monotonic()}
-            adapters = [self._radar_rainviewer_frames]
+            adapters = [('rainviewer', self._radar_rainviewer_frames)]
             if _radar_iem_eligible(lat, lon):
-                adapters.insert(0, self._radar_iem_frames)
+                adapters.insert(0, ('iem-mrms-lcref', self._radar_iem_frames))
             errors = []
-            for adapter in adapters:
+            for source, adapter in adapters:
+                zoom = max(RADAR_MIN_ZOOM, min(desired if desired is not None else auto_zoom,
+                                               _RADAR_SOURCES[source]['max_zoom']))
+                tiles, mpp, bounds, _ = _radar_viewport(lat, lon, zoom, RADAR_VIEWPORT_PX)
+                bar, rings = _radar_scale(mpp, RADAR_VIEWPORT_PX, unit)
+                identity = hashlib.sha256(repr((lat, lon, zoom, RADAR_VIEWPORT_PX, tiles)).encode()).hexdigest()[:20]
+                ctx.update(zoom=zoom, tiles=tiles, mpp=mpp, bounds=bounds, bar=bar, rings=rings,
+                           identity=identity)
                 try:
                     adapter(ctx)
                     try:
@@ -1166,7 +1200,13 @@ class AlmanacEmitter:
             historyGaps=any(g != snap.cadence for g in gaps),
             historySpanSec=complete[-1] - complete[0] if complete else 0,
             completeFrameCount=len(complete), partialCoverage=snap.partial_coverage, center=snap.center,
-            zoom=snap.zoom or RADAR_MAX_ZOOM, viewport=dict(w=RADAR_VIEWPORT_PX, h=RADAR_VIEWPORT_PX),
+            zoom=snap.zoom or RADAR_MAX_ZOOM,
+            zoomAuto=snap.zoom_desired is None, zoomAutoLevel=snap.zoom_auto_level,
+            zoomMin=RADAR_MIN_ZOOM, zoomMax=snap.max_zoom,
+            zoomSource='MRMS' if snap.source_id == 'iem-mrms-lcref' else 'RainViewer',
+            zoomCapped=snap.zoom_desired is not None and snap.zoom_desired > snap.max_zoom,
+            zoomDesired=snap.zoom_desired,
+            viewport=dict(w=RADAR_VIEWPORT_PX, h=RADAR_VIEWPORT_PX),
             bounds=snap.bounds, marker=dict(x=.5, y=.5), metersPerPixel=snap.mpp,
             scaleBar=snap.scalebar, rings=list(snap.rings or ()),
             frames=[dict(f, at=local(f['ts'])) for f in snap.frames],

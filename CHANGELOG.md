@@ -32,6 +32,18 @@ to shared upstream code that the classic console benefits from too.
   cadence, and the legend switches to match whichever source is live (IEM's native
   reflectivity table or RainViewer's Universal Blue). Source hand-offs stage
   atomically so a switch never shows a half-loaded or mislabeled frame.
+- **Persistent radar zoom.** A quiet +/− stepper in the rail with a reset-to-auto,
+  so you can pin the radar closer or wider than the latitude-auto default; the level
+  is saved per station and survives refreshes and reboots (kept in durable state,
+  not tmpfs). The control is honest about each source's real range — RainViewer's
+  free tier caps at zoom 7, the US MRMS feed reaches 9 — so it never offers a step
+  that does nothing, and a level set closer than the live source reaches shows that
+  source's closest view while remembering your intent (a saved zoom 8 shows 7 on
+  RainViewer and restores to 8 when the US feed returns). Keyboard-operable (+/−/0),
+  both themes, no accent on the chrome. Zoom rides a loopback preference the emitter
+  reads, so the plate re-composites server-side at the chosen level (no CSS scaling,
+  no blur); scale bar, range rings, and the loop all follow, and a zoom change
+  respects the same demand-gate, rate limiter, and cooldowns as every other refresh.
 
 ### Core (shared with the classic console)
 - Sager Weathercaster no longer fails on a clear sky: it keyed on CheckWX's
