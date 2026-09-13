@@ -594,64 +594,159 @@ def check_basemap(browser, html, output_dir, theme):
         print(f'BASEMAP PASS: {theme}; active-only fetch, tokens/theme switch, echo stacking, untouched loop DOM, missing/malformed/legacy fallback',flush=True)
 
 
-def check_forecast_seam(browser, html):
-    """The Observations temperature curve must not draw the obs-vs-model gap as a
-    slope. The forecast line starts at the model's OWN value at now (fc0), never at
-    the sensor reading, so a cold/warm model bias shows as a vertical seam, not a
-    phantom drop-and-recover. Regresses the bug a user hit on the live Pi (sensor
-    55°, model 53° -> a fake dip to '53° - 14:00')."""
-    now = int(time.time())
-    midnight = now - now % 86400
-    def payload(temp):
-        # model rises monotonically 53.0 -> 56.5; sensor sits `temp` above/below it.
-        hourly = [[midnight + h * 3600, t] for h, t in
-                  [(11, 52.6), (12, 53.0), (13, 53.4), (14, 54.1), (15, 55.3), (16, 56.5), (17, 56.4)]]
-        nowh = 12.5
-        return dict(ts=now, time='12:30', dayStartTs=midnight, temp=temp,
-                    obsLow=52.6, obsLowTime='06:00', obsHigh=57.0, obsHighTime='00:00',
-                    fcLow=52.0, fcHigh=57.0, fcHourly=hourly, station='Test', tempUnit='°F')
+def forecast_blend_payload():
+    """Generic reproduction of the live 13:03 cold-model report (no station data)."""
+    midnight = 1789257600
+    temperatures = [52.6, 53.0, 53.4, 54.1, 55.3, 56.5, 56.4,
+                    56.2, 56.0, 55.6, 56.1, 54.4, 54.5]
+    return dict(ts=midnight + 13 * 3600 + 3 * 60, time='13:03', dayStartTs=midnight,
+                temp=55.0, obsLow=53.4, obsLowTime='01:39', obsHigh=56.7,
+                obsHighTime='00:00', fcLow=54.0, fcHigh=57.0, station='Test',
+                tempUnit='°F', fcHourly=[[midnight + h * 3600, t]
+                                       for h, t in enumerate(temperatures, 12)])
+
+
+def check_forecast_blend(browser, html, data=None):
+    """Sample the rendered nowcast blend, including the actual live-payload shape.
+
+    Optional data permits verification of a saved real payload without checking its
+    station metadata into the repo. The observed-only golden SVG was captured from
+    5e0c4f4 before v2; it must remain byte-identical in both themes.
+    """
+    data = data or forecast_blend_payload()
+    golden = (Path(__file__).parent / 'fixtures/forecast_observed.svg').read_text()
     context = browser.new_context(viewport={'width': 1024, 'height': 600})
-    context.route('https://seam.test/wx.json**', lambda route: route.fulfill(status=404, body='x'))
-    context.route('https://seam.test/**', lambda route: route.fulfill(body=html, content_type='text/html'))
+    context.route('https://blend.test/**', lambda r: r.fulfill(body=html, content_type='text/html'))
+    context.route('https://blend.test/wx.json**', lambda r: r.fulfill(status=404, body='missing'))
     page = context.new_page()
     errors = []
     page.on('pageerror', lambda e: errors.append(str(e)))
-    page.goto('https://seam.test/index.html?tabs=1')
-    page.wait_for_timeout(300)
-    probe = """(pl) => {
+    page.goto('https://blend.test/index.html?tabs=1')
+    probe = r"""pl => {
         render(pl);
-        const g = document.getElementById('spark-dyn');
-        const fx = g.querySelector('.spark-fx');
-        const seam = g.querySelector('.spark-seam');
-        const labels = [...g.querySelectorAll('.spark-lbl')].map(t => t.textContent);
-        let firstY = null, maxY = null;
+        const g = document.getElementById('spark-dyn'), fx = g.querySelector('.spark-fx');
+        const dot = g.querySelector('.spark-now');
+        const d = fx ? fx.getAttribute('d') : '';
+        const nums = d.match(/-?\d+(?:\.\d+)?/g) || [];
+        const vertices = nums.length ? [[+nums[0], +nums[1]]] : [];
+        const stride = d.includes(' C ') ? 6 : 2;
+        for (let i = 2; i < nums.length; i += stride)
+            vertices.push([+nums[i + stride - 2], +nums[i + stride - 1]]);
+        const samples = [];
         if (fx) {
-            const m = fx.getAttribute('d').match(/^M\\s*[\\d.]+\\s+([\\d.]+)/);
-            firstY = m ? parseFloat(m[1]) : null;
-            const L = fx.getTotalLength(); maxY = 0;
-            for (let i = 0; i <= 60; i++) { const p = fx.getPointAtLength(L * i / 60); if (p.y > maxY) maxY = p.y; }
+            const length = fx.getTotalLength();
+            // Dense sampling catches sub-hour spline retraces, not just vertices.
+            for (let i = 0; i <= 2400; i++) {
+                const p = fx.getPointAtLength(length * i / 2400);
+                if (p.x <= 350 * 17 / 24 + .05) samples.push([p.x, p.y]);
+            }
         }
-        // Y() of the sensor value, to prove the forecast did NOT anchor to it.
-        const nowY = (typeof lastData === 'object') ? null : null;
-        return { hasFx: !!fx, hasSeam: !!seam, firstY, maxY, labels };
+        const low = [...g.querySelectorAll('.spark-pt')].find(e => +e.getAttribute('cx') > 0);
+        const high = [...g.querySelectorAll('.spark-pt')].find(e => +e.getAttribute('cx') === 0);
+        const css = getComputedStyle(document.documentElement);
+        const swatch = document.createElement('span');
+        swatch.style.color = css.getPropertyValue('--ink-soft'); document.body.appendChild(swatch);
+        const ink = getComputedStyle(swatch).color; swatch.remove();
+        return {d, vertices, samples, nowY: +dot.getAttribute('cy'),
+            lowY: +low.getAttribute('cy'), highY: +high.getAttribute('cy'),
+            labels: [...g.querySelectorAll('.spark-lbl')].map(e => e.textContent),
+            high: document.querySelector('[data-k=fcHigh]').textContent,
+            seam: !!g.querySelector('.spark-seam'),
+            stroke: fx ? getComputedStyle(fx).stroke : null, ink,
+            svg: g.closest('svg').outerHTML};
     }"""
-    cold = page.evaluate(probe, payload(55.0))   # sensor warmer than model
-    assert cold['hasFx'] and cold['hasSeam'], f'cold-bias: expected forecast path + seam: {cold}'
-    # the forecast start (fc0~53.05) is the lowest plotted point -> the path only
-    # rises from it; its max y (lowest temp) is at the very start, never a sag beyond.
-    assert cold['maxY'] - cold['firstY'] <= 0.5, f'forecast sags below its start (phantom dip): {cold}'
-    assert not any('14:00' in l for l in cold['labels']), f'phantom low label printed: {cold["labels"]}'
-    assert any(l.startswith('57') for l in cold['labels']), f'high label missing/disagrees: {cold["labels"]}'
-    warm = page.evaluate(probe, payload(51.0))   # sensor cooler than model
-    assert warm['hasSeam'] and warm['maxY'] - warm['firstY'] <= 0.5, f'warm-bias seam/monotonic failed: {warm}'
-    agree = page.evaluate(probe, payload(53.1))   # sensor ~= model now
-    assert not agree['hasSeam'], f'seam should vanish when obs~=model: {agree}'
-    nofc = page.evaluate("(pl) => { render(pl); const g = document.getElementById('spark-dyn'); "
-                         "return { fx: !!g.querySelector('.spark-fx'), seam: !!g.querySelector('.spark-seam') }; }",
-                         {**payload(55.0), 'fcHourly': None})
-    assert not nofc['fx'] and not nofc['seam'], f'no fcHourly must render observed-only: {nofc}'
-    assert errors == [], errors
-    context.close()
+
+    def measure(pl):
+        result = page.evaluate(probe, pl)
+        # Calibrate pixels from two observed facts, independently of the blend's
+        # scale implementation (the now-dot is the authoritative start pixel).
+        scale = (result['lowY'] - result['highY']) / (pl['obsHigh'] - pl['obsLow'])
+        def y(temp):
+            return result['lowY'] - (temp - pl['obsLow']) * scale
+        return result, scale, y
+
+    def rising(result, scale):
+        running_min_y = result['samples'][0][1]
+        retrace = 0
+        for _, y in result['samples']:
+            running_min_y = min(running_min_y, y)
+            retrace = max(retrace, (y - running_min_y) / scale)
+        assert retrace <= .2, f'fabricated dip before peak: {retrace:.4f}°'
+        return retrace
+
+    try:
+        metrics = {}
+        for theme in ('paper', 'night'):
+            page.evaluate('(t) => document.documentElement.dataset.theme = t', theme)
+            cold, scale, y = measure(data)
+            assert cold['vertices'], 'forecast path missing'
+            first_y = cold['vertices'][0][1]
+            assert abs(first_y - cold['nowY']) < .6, (
+                f'forecast must start at sensor: firstY={first_y}, nowY={cold["nowY"]}')
+            assert abs(first_y - 84) > .6, 'forecast start pinned to chart floor'
+            assert abs(first_y - y(53.02)) > .6, 'forecast still anchored at fc0'
+            assert not cold['seam'], 'obsolete seam element remains'
+            assert 'spark-seam' not in html, 'obsolete seam CSS/code remains'
+            metrics[theme] = rising(cold, scale)
+            peak = next(v for v in cold['vertices'] if abs(v[0] - 350 * 17 / 24) < .1)
+            assert abs(peak[1] - y(56.5)) < .15, '17:00 peak differs from model 56.5'
+            assert '57° · 17:00' in cold['labels'] and cold['high'] == '57°' and data['fcHigh'] == 57
+            assert not any('14:00' in label or label.startswith('53°') for label in cold['labels']), cold['labels']
+            assert cold['stroke'] == cold['ink'], (theme, cold['stroke'], cold['ink'])
+
+            warm, warm_scale, warm_y = measure({**data, 'temp': 51.0})
+            assert abs(warm['vertices'][0][1] - warm['nowY']) < .6, 'warm model must start at sensor'
+            rising(warm, warm_scale)
+            assert '57° · 17:00' in warm['labels']
+            # The late model low is ABOVE the drawn start: it must not print as a low.
+            assert not any(label.startswith('54°') for label in warm['labels']), warm['labels']
+            for hour, temp in [(14, 51.674502), (15, 53.070824), (16, 54.977191), (17, 56.5)]:
+                point = next(v for v in warm['vertices'] if abs(v[0] - 350 * hour / 24) < .1)
+                assert abs(point[1] - warm_y(temp)) < .2, (hour, point, temp)
+
+            agree, _, raw_y = measure({**data, 'temp': 53.02})
+            model = [(13.05, 53.02)] + [((ts - data['dayStartTs']) / 3600, temp)
+                for ts, temp in data['fcHourly'] if 13.05 + 1 / 60 < (ts - data['dayStartTs']) / 3600 <= 24]
+            assert len(agree['vertices']) == len(model)
+            for point, (hour, temp) in zip(agree['vertices'], model):
+                assert abs(point[0] - 350 * hour / 24) < .1 and abs(point[1] - raw_y(temp)) < .2, (point, hour, temp)
+            raw_temps = [data['obsLow'], data['obsHigh']] + [t for _, t in model]
+            lo, hi = min(raw_temps), max(raw_temps)
+            raw_points = [[350 * hour / 24, 84 - (temp - lo) / max(1, hi - lo) * 64]
+                          for hour, temp in model]
+            raw_path = page.evaluate('points => smooth(points)', raw_points)
+            assert agree['d'] == raw_path, 'zero bias must produce the exact raw-model path'
+            # Missing sensor disables the blend too. With fc0 already in the raw
+            # range, this independently produces exactly the same forecast path.
+            raw, _, _ = measure({**data, 'temp': None})
+            # nowX falls back to the last observed anchor when temp is absent;
+            # compare all hourly vertices, whose geometry must still be identical.
+            assert agree['vertices'][1:] == raw['vertices'][1:]
+
+            unbracketed, _, _ = measure({**data, 'fcHourly': data['fcHourly'][2:]})
+            assert abs(unbracketed['vertices'][0][0] - 350 * 14 / 24) < .1, 'no bracket must leave a gap'
+            close, _, _ = measure({**data, 'time': '13:58'})
+            assert abs(close['vertices'][0][0] - 350 * 14 / 24) < .1, '2px guard must skip near-coincident start'
+            # A turn within 1.5h retains bias. Its drawn peak rounds to 58, while
+            # the model rounds to 57: the truth gate must suppress the label.
+            soon_data = {**data, 'temp': 57.0, 'fcHourly': [[data['dayStartTs'] + h * 3600, t]
+                for h, t in [(12, 52.6), (13, 53.0), (14, 56.5), (15, 54.0), (16, 53.5)]]}
+            soon, _, soon_y = measure(soon_data)
+            turn = next(v for v in soon['vertices'] if abs(v[0] - 350 * 14 / 24) < .1)
+            assert abs(turn[1] - soon_y(57.66505)) < .2, 'imminent turn must retain the 1.5h horizon floor'
+            assert not any('14:00' in label for label in soon['labels']), soon['labels']
+
+            missing = {k: v for k, v in data.items() if k != 'fcHourly'}
+            variants = [missing] + [{**data, 'fcHourly': hourly}
+                for hourly in (None, [], [[data['dayStartTs'] - 3600, 10]])]
+            for observed_data in variants:
+                observed, _, _ = measure(observed_data)
+                assert not observed['d'] and not observed['seam']
+                assert observed['svg'] == golden, 'observed-only SVG changed from pre-v2'
+        assert errors == [], errors
+        return metrics
+    finally:
+        context.close()
 
 
 def check_cold_load_no_data(browser, html):
@@ -758,7 +853,7 @@ def main():
         report['no-tabs'] = page.evaluate('pollURLs')
         context.close()
         check_cold_load_no_data(browser, html)
-        check_forecast_seam(browser, html)
+        check_forecast_blend(browser, html)
         check_loop(browser, html)
         for theme in ('light', 'night'):
             check_source_switch(browser, html, args.output_dir, theme)
@@ -770,7 +865,7 @@ def main():
     (args.output_dir / 'poll-urls.json').write_text(json.dumps(report, indent=2))
     print('PASS: latest radar light/dark, tab view signal on/off, render heartbeat, other tabs, '
           'no-tabs default, cold-load no-data pose (no design sample values), '
-          'forecast seam (model-anchored start, no phantom dip/label), '
+          'forecast blend (starts at the sensor, converges to the model, no phantom dip/label), '
           'loop (cycle/pause/off-tab idle), hybrid source staging/abandoned loads, '
           'palette fidelity per paint, Updated/relative times, clear/stale/legacy, '
           '1024x600 alert layout in both themes; five-site zoom paper/night, real loopback persistence, '

@@ -19,18 +19,23 @@ to shared upstream code that the classic console benefits from too.
   mis-attributed the stall to wifi bandwidth.)
 
 ### Console
-- **Temperature curve: no more phantom dip at "now".** The hourly forecast line
-  welded its start onto the live sensor reading, then ran to the first future
-  forecast hour — so whenever the sensor and the model disagreed (e.g. sensor
-  55°, model 53° in rain) it drew a drop-and-recover the forecast never predicted,
-  and even printed a phantom low label ("53° · 14:00"). The forecast line now
-  starts at the model's own value at *now* (interpolated, never extrapolated), so
-  its real shape — a smooth rise today — shows truthfully. The obs-vs-model gap is
-  drawn as a short vertical seam at the now-dot (a difference in temperature at one
-  instant, which can't be misread as a trend), and it disappears when the two
-  agree. Forecast extreme labels are judged in the forecast's own frame, so the
-  peak label stays and the phantom low is gone; the printed HIGH/LOW are unchanged
-  and still agree with the curve. Guarded by a new headless check.
+- **Temperature curve: the forecast now begins where the temperature is.** The
+  hourly forecast line used to weld its start onto the sensor reading and then run
+  to the model's first future hour — so whenever the sensor and the model disagreed
+  (sensor 55°, model 53° in rain) it drew a drop-and-recover the forecast never
+  predicted, and printed a phantom low label ("53° · 14:00"). A first fix anchored
+  the forecast at the model's own now-value with a vertical seam; on the live panel
+  that read as a cliff to the chart floor — the same false story. The forecast now
+  starts at the current reading and blends onto the model over the next few hours
+  (a standard nowcast bias correction: the sensor is the better guide near-term,
+  the model for the rest of the day), with a smoothstep decay so there's no kink at
+  the join, and a horizon that ends exactly at the model's first turning point so
+  the drawn peak *is* the model's peak. Result on the day that exposed it: 55.0 →
+  55.1 → 55.1 → 55.6 → 56.5, no dip, and "57° · 17:00" still agrees with HIGH 57°.
+  Extreme labels print only where the drawn and model values round the same, so a
+  label can never contradict the HIGH/LOW row. Observed-only rendering (no hourly
+  data) is byte-identical to before. Guarded by a headless check that fails on the
+  old rendering.
 - **No more phantom forecast on a cold boot.** The page ships as the design
   artboard, and until the first data frame arrived it kept showing the artboard's
   sample values — 64.0°, "Rising 4.6° per hour", **Low 50° / High 82°**, "Clear &

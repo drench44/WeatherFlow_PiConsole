@@ -1,0 +1,16 @@
+<svg class="spark" width="350" height="104" viewBox="0 0 350 104">
+          <defs>
+            <linearGradient id="tempfill" x1="0" y1="0" x2="0" y2="1">
+              <stop offset="0" style="stop-color:var(--accent); stop-opacity:0.20"></stop>
+              <stop offset="1" style="stop-color:var(--accent); stop-opacity:0"></stop>
+            </linearGradient>
+          </defs>
+          <line class="spark-base" x1="0" y1="88" x2="350" y2="88"></line>
+          <line class="spark-tick" x1="0.5" y1="88" x2="0.5" y2="93"></line>
+          <line class="spark-tick" x1="87.5" y1="88" x2="87.5" y2="93"></line>
+          <line class="spark-tick" x1="175" y1="88" x2="175" y2="93"></line>
+          <line class="spark-tick" x1="262.5" y1="88" x2="262.5" y2="93"></line>
+          <line class="spark-tick" x1="349.5" y1="88" x2="349.5" y2="93"></line>
+          <!-- dynamic curve rebuilt from live obs/forecast points -->
+          <g id="spark-dyn"><path fill="url(#tempfill)" d="M 0.0 20.0 C 0.0 20.0 0.0 20.0 0.0 20.0 C 8.0 41.3 5.5 73.5 24.1 84.0 C 53.3 100.5 134.9 63.3 190.3 53.0 L 190.3 88 L 0 88 Z"></path><path class="spark-obs" d="M 0.0 20.0 C 0.0 20.0 0.0 20.0 0.0 20.0 C 8.0 41.3 5.5 73.5 24.1 84.0 C 53.3 100.5 134.9 63.3 190.3 53.0"></path><line class="spark-drop" x1="190.3" y1="58.0" x2="190.3" y2="88"></line><circle class="spark-pt" cx="0.0" cy="20.0" r="2.7"></circle><text class="spark-lbl" x="-5.0" y="14.0" text-anchor="end">56.7° · 00:00</text><circle class="spark-pt" cx="24.1" cy="84.0" r="2.7"></circle><text class="spark-lbl" x="1.0" y="100.0" text-anchor="start">53.4° · 01:39</text><circle class="spark-halo" cx="190.3" cy="53.0" r="8.5"></circle><circle class="spark-now" cx="190.3" cy="53.0" r="4.2"></circle></g>
+        </svg>
