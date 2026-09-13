@@ -115,17 +115,17 @@ def test_emitter_gating_zoom_prune_failure(make_emitter,hybrid,tmp_path,monkeypa
     assert first and first['hash']==old.latest.split('/')[1]
     old_path=Path(ae.RADAR_DIR)/'basemap'/(first['hash']+'.svg')
     unrelated=old_path.parent/'unowned.svg'; unrelated.write_text('untouched')
-    hybrid.mono+=60; (tmp_path/'radar_zoom').write_text('8'); emitter._do_radar()
+    hybrid.mono+=60; (tmp_path/'radar_zoom').write_text('9'); emitter._do_radar()
     new=emitter._radar_result
     assert new.basemap['hash']!=first['hash'] and old_path.exists()
     hybrid.mono+=ae.RADAR_CACHE_GRACE_SEC
     emitter._do_radar()
     assert not old_path.exists() and unrelated.exists()
-    hybrid.mono+=60; hybrid.view(); (tmp_path/'radar_zoom').write_text('9')
+    hybrid.mono+=60; hybrid.view(); (tmp_path/'radar_zoom').write_text('8')
     monkeypatch.setattr(bm,'DATA_PATH',tmp_path/'absent-data.bin')
     emitter._do_radar()
     assert emitter._radar_available and emitter._radar_result.basemap is None
-    assert emitter._radar_zoom==9
+    assert emitter._radar_zoom==8
 
 
 def test_atomic_failure_leaves_no_partial(tmp_path,monkeypatch):

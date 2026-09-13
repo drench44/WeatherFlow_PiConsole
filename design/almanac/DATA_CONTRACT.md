@@ -168,308 +168,238 @@ its next poll only after `render()` returned, and the server credits that mark o
 from a loopback client. The launcher's watchdog reads `renders`, because a request
 count never proved anything reached the screen.
 
-## Radar — hybrid sources and observed loop
+## Radar v2 — sources, geometry and observed playback
 
-The nested `radar` sibling is an independent side artifact. It never changes
-`ts`, `obsAgeSec`, or `/health`. Missing `radar` or `available:false` hides the
-Radar tab and returns an active Radar screen to Observations.
+`radar` is an independent side artifact. It never changes `ts`, `obsAgeSec`, or
+engine `/health`. Missing radar or `available:false` hides the tab. A station
+change clears the prior station's crop before any acquisition attempt.
 
-Every scheduled cycle tries **IEM MRMS lcref first** for eligible CONUS station
-centers, even when RainViewer is currently displayed. A bundled coarse land
-polygon, intersected with the MRMS raster domain, determines eligibility;
-`nexrad` is only a caption. Alaska, Hawaii, territories, Berlin and Sydney use
-RainViewer directly. Coast/border detail in this mask is approximate; it is not
-legal boundary data or a radar visibility guarantee. No runtime geocoding.
+The default preference is **mosaic** when no saved choice exists. A durable
+`site` preference survives restarts; an unavailable saved site falls back to
+mosaic without an error card. This resolves “cold start Mosaic” as first use,
+while respecting the requested restart persistence.
 
-| Source | `sourceId` | `provider` | Native `cadenceSec` | Stale strictly after |
-| --- | --- | --- | --- | --- |
-| IEM / NOAA MRMS | `iem-mrms-lcref` | `iem` | 120 | 600 s |
-| RainViewer | `rainviewer` | `rainviewer` | 600 | 1200 s |
+| Source | `sourceId` | `provider` | Nominal `cadenceSec` | Display stale at | Zoom bounds |
+| --- | --- | --- | --- | --- | --- |
+| IEM MRMS | `iem-mrms-lcref` | `iem` | 120 | 360 seconds | 4–9 |
+| IEM NEXRAD N0B | `iem-nexrad-n0b` | `iem` | 300 | 900 seconds | 7–10 |
+| RainViewer | `rainviewer` | `rainviewer` | 600 | 1800 seconds | 4–7 |
 
-IEM metadata is fetched from
-`https://mesonet.agron.iastate.edu/data/gis/images/4326/mrms/lcref.json` with
-`Cache-Control: no-cache` and conditional validators when supplied. Its
-`meta.end_valid` must be UTC, on an even minute, fresh, and accompanied by
-`product:lcref` and `units:0.5 dBZ`. A cached/304 response still undergoes freshness
-validation. Start at the earlier of that valid time and UTC now minus four
-minutes rounded down to an even minute; probe backward in two-minute steps while
-within the source's freshness threshold. Wall-clock enumeration only identifies
-candidate URLs: a frame is accepted after archive existence and complete tile
-validation, never by relabeling a latest alias.
+Mosaic tries IEM first for CONUS station centers, then RainViewer. A bundled
+coarse land polygon determines CONUS eligibility. Outside CONUS, RainViewer
+is used directly. Single-site eligibility additionally requires the nearest
+bundled NEXRAD within 230 km. This is geographic eligibility, not a guarantee
+that a radar sees every point inside that circle. `nexrad` still reports the
+nearest site within 285 miles; `distanceMeters` provides the unrounded value
+used to decide eligibility.
 
-Each uncached slot first checks the original archive with HEAD:
+### Acquisition and stability
+
+MRMS metadata:
+`https://mesonet.agron.iastate.edu/data/gis/images/4326/mrms/lcref.json`.
+`meta.end_valid` must be UTC, an even minute, fresh, with `product:lcref` and
+`units:0.5 dBZ`. Conditional requests/304 retain validators and revalidate age.
+Candidates start at `min(end_valid, floor((now-300)/120)*120)`. The five-minute
+readiness lag avoids IEM's as-yet-unrendered newest tiles. It is acquisition
+latency, not a substituted valid time: every accepted timestamp has a complete
+matching crop. The UI still reports actual age and may correctly mark MRMS stale.
+
+Each uncached MRMS candidate first probes the original archive with HEAD:
 `https://mesonet.agron.iastate.edu/archive/data/YYYY/MM/DD/GIS/mrms/lcref_YYYYMMDDHHMM.png`.
-Its XYZ tiles come from
+Tiles use
 `https://mesonet.agron.iastate.edu/cache/tile.py/1.0.0/mrms::lcref-YYYYMMDDHHMM/z/x/y.png`.
-UTC date rollover applies to both paths. Live original PNG dimensions verified
-2026-09-13 were 7000×3500, at .01 degrees/cell; its world file starts at pixel
-center (-129.995, 54.995), giving outer bounds -130/-60 longitude and 20/55 latitude.
-A viewport crossing those bounds carries `partialCoverage:true`. Opaque solid-red
-IEM placeholders are rejected. Valid transparent crops are accepted as no echo.
+UTC rollover applies to both paths. MRMS's native raster covers longitude
+−130…−60, latitude 20…55; crossing that domain sets `partialCoverage:true`.
 
-Any usable fresh complete IEM latest wins, even with partial/missing history.
-If none can be acquired within the primary budget, RainViewer is attempted in
-the same cycle. RainViewer uses its public weather-map manifest's `radar.past`,
-256px tiles, color 2, options `1_1`; nowcast is ignored. No snapshot or animation
-mixes source pixels. If both providers fail, retain the last-good snapshot,
-including source, legend, observation and refresh times. A station change clears
-the old-location snapshot before acquisition, so a failure cannot mislabel it.
+The transport uses standard-library `http.client.HTTPSConnection`, with one
+persistent connection per host per worker pass. Each host is resolved once
+with `AF_INET`; successful addresses and resolver exceptions are cached for that
+pass. Connections use the resolved IP while retaining the original TLS SNI,
+certificate hostname verification, and HTTP Host. Reconnects reuse cached DNS.
+Connections close in the worker's `finally` block. A synchronous system DNS
+lookup itself cannot be interrupted by socket timeout; an over-budget lookup
+is rejected when it returns and is never repeated within the pass.
+
+All metadata, HEAD, tile, conditional and failing requests share a rolling
+90-request/minute monotonic limiter across adapters. Per-source 429 cooldowns
+honor numeric or HTTP-date `Retry-After`. Maximum request timeout is 10 s,
+primary acquisition budget 25 s, full build budget 150 s, maximum 20 uncached
+frame attempts per pass. No deadline was raised for v2. An HTTP error, invalid
+PNG, incorrect dimensions, oversized body (>2 MiB), or solid opaque red IEM
+placeholder stops that candidate immediately. Transparent data is a valid
+clear frame. Negative cache TTL is 120 s; only complete 256×256 tiles contribute
+to an atomically published crop. Native alpha is preserved without a paste mask.
+
+Every adapter failure logs WARNING with source, exception, candidate timestamps
+and elapsed time. A successful source change logs INFO `radar source SWITCH`.
+A failed IEM pass retains a complete IEM frame under 600 s old at the same
+station/zoom, without advancing its fetch or observation time. Otherwise it
+tries RainViewer. A regressed same-source/station/zoom timestamp is rejected.
+Both adapters failing retains the last complete presentation and retries on the
+existing lifecycle-managed schedule. Radar failures never alter engine health.
+
+### Verified single-site archive
+
+[IEM's RIDGE documentation](https://mesonet.agron.iastate.edu/GIS/ridge.phtml)
+documents real scan listing and immutable timestamped XYZ tiles. Live curl
+verification on 2026-09-13 established that **the listing takes `ATX`, not `KATX`,
+and current reflectivity is `N0B`**; the current N0Q listing was empty.
+
+Listing:
+`https://mesonet.agron.iastate.edu/json/radar.py?operation=list&radar=ATX&product=N0B&start=2026-09-13T20:55Z&end=2026-09-13T21:55Z`
+returns `{"scans":[{"ts":"2026-09-13T20:59Z"}, ...]}`.
+Tiles:
+`https://mesonet.agron.iastate.edu/cache/tile.py/1.0.0/ridge::ATX-N0B-202609132133/8/41/89.png`
+and the `202609132140` version both returned real 256×256 PNGs with different
+SHA-256 hashes. The `-0` suffix is a latest alias, **not an animation index**.
+No frame is synthesized from latest aliases or guessed volume intervals.
+
+The adapter requests UTC scans, validates timestamps, tries the newest complete
+scan, and fills only listed history within one hour. History is capped at 31
+source entries; the browser's separate memory cap is 16 decoded frames. A
+nominal ~5 min volume can vary with scan mode; the live example was 6–7 min.
+Two consecutive listed scan gaps over eight minutes set `scanningSlowly:true`.
+`latestOnly:false` is honest here: historical scans were verified tile-fetchable.
+A failed site acquisition publishes a mosaic with the site option disabled and
+`reason:"not reporting"`.
+
+Native indexed source PNG:
+`https://mesonet.agron.iastate.edu/archive/data/2026/09/13/GIS/ridge/ATX/N0B/ATX_N0B_202609132140.png`.
+N0B's two reserved codes give `dBZ=index/2-33`; representative stops at
+5/20/30/40/50/60/70 are `#6c7daa`, `#52d6a2`, `#0c9110`, `#d6c704`,
+`#ff8000`, `#ffffff`, `#b200ff`. These match the native PNG and
+[IEM's reflectivity curve](https://github.com/akrherz/iem/blob/main/scripts/ridge/ReflectivityColorCurveManager.xml).
+The product has its own `legend.id=iem-nexrad-n0b-v1` and `snow:null`.
+
+MRMS retains its seven native representative stops and
+`legend.id=iem-mrms-lcref-v1`. RainViewer retains Universal Blue (`colorId:2`),
+its seven rain stops, and its snow color; native RGBA is unchanged in both themes.
+Opt-in `RADAR_NET_TEST=1` tests verify all three source palettes.
+
+### Payload and zoom
+
+Existing snapshot fields remain: `available`, `reason`, `sourceId`, `provider`,
+`attribution`, `attributionUrl`, `cadenceSec`, `frameSpacingSec`, `historyGaps`,
+`historySpanSec`, `completeFrameCount`, `partialCoverage`, `center`, `zoom`,
+`zoomAuto`, `zoomAutoLevel`, `zoomMin`, `zoomMax`, `zoomSource`, `zoomCapped`,
+`zoomDesired`, `viewport`, `bounds`, `marker`, `metersPerPixel`, `scaleBar`,
+`rings`, `frames`, `latest`, `frameCount`, `observedAt`, `observedTs`, `updatedAt`,
+`fetchedAt`, `ageSec`, `stale`, `legend`, `nexrad`, and optional `basemap`.
+
+Additions:
 
 ```jsonc
-"radar": {
-  "available": true, "reason": null,
-  "sourceId": "iem-mrms-lcref", "provider": "iem",
-  "attribution": "IEM / NOAA MRMS",
-  "attributionUrl": "https://mesonet.agron.iastate.edu/ogc/",
-  "cadenceSec": 120, "frameSpacingSec": 120,
-  "historyGaps": false, "historySpanSec": 240, "completeFrameCount": 3,
-  "partialCoverage": false,
-  "center": {"lat": 47.61, "lon": -122.33},
-  "zoom": 7, "zoomAuto": true, "zoomAutoLevel": 7,
-  "zoomMin": 4, "zoomMax": 9, "zoomSource": "MRMS",
-  "zoomCapped": false, "zoomDesired": null, "viewport": {"w": 480, "h": 480},
-  "bounds": {"n": 49.36, "s": 45.80, "e": -119.69, "w": -124.97},
-  "basemap": {"hash": "<viewport-hash>", "url": "radar/basemap/<viewport-hash>.svg",
-              "coast": true, "roads": "dense"},
-  "marker": {"x": 0.5, "y": 0.5},
-  "metersPerPixel": 824.5,
-  "scaleBar": {"distDisp": "50 mi", "meters": 80467.2, "pixels": 97.59, "unit": "mi"},
-  "rings": [{"label": "50 mi", "px": 97.59}, {"label": "100 mi", "px": 195.18}],
-  "frames": [
-    // Oldest to newest, <= one hour. Incomplete entries have no URL.
-    // ID includes product/palette revision, viewport hash and epoch seconds.
-    {"id": "iem-mrms-lcref-v1/<viewport-hash>/1789243200",
-     "ts": 1789243200, "at": "13:00", "complete": true,
-     "url": "radar/iem-mrms-lcref-v1/<viewport-hash>/1789243200.png"}
-    // ... remaining history entries omitted in this illustrative example
-  ],
-  "latest": "iem-mrms-lcref-v1/<viewport-hash>/1789243200",
-  "frameCount": 31, // includes incomplete slots; completeFrameCount counts usable crops
-  "observedAt": "13:00", "observedTs": 1789243200,
-  "updatedAt": "13:04", "fetchedAt": 1789243440,
-  "ageSec": 240, "stale": false,
-  "legend": {
-    "id": "iem-mrms-lcref-v1", "colorId": null, "colorName": "IEM MRMS reflectivity",
-    "rain": [
-      {"dbz": 11, "hex": "#a4a4ff", "label": "Weak"},
-      {"dbz": 25, "hex": "#3366cc", "label": ""},
-      {"dbz": 35, "hex": "#00cc00", "label": ""},
-      {"dbz": 45, "hex": "#ffcc00", "label": ""},
-      {"dbz": 55, "hex": "#d90000", "label": ""},
-      {"dbz": 65, "hex": "#cc00cc", "label": ""},
-      {"dbz": 71, "hex": "#ffffff", "label": "Strong"}
-    ],
-    "snow": null
-  },
-  "nexrad": {"id": "KATX", "name": "Seattle", "distanceDisp": "41 mi", "bearing": "N"}
-}
+"sourceMode": "mosaic", // authoritative selected presentation: mosaic | site
+"siteId": null,         // selected site's ICAO when sourceMode=site
+"sources": [
+  {"mode":"mosaic", "available":true},
+  {"mode":"site", "siteId":"KATX", "available":true, "reason":null}
+],
+"scanningSlowly": false,
+"latestOnly": false,
+"viewport": {"w":956, "h":490}
 ```
 
-Geometry above is illustrative. Bounds use inverse Mercator; `e < w` denotes an
-antimeridian crossing. Tile x wraps and tile y clamps at the poles. Distances
-follow `Units/Distance`: `mi`/`miles` becomes `mi`, otherwise `km`. Scale and rings
-retain the existing geodesic calculations. `nexrad` is the closest of 160 bundled
-WSR-88D sites within 285 miles, with station-to-radar bearing; otherwise null.
-Auto zoom targets 256 km across 480px, clamped to 4–7 and recomputed each pass.
-A manual preference can range from 4 to 9; each attempted source composites at
-`max(4, min(desired, source.max_zoom))` (MRMS: 9; RainViewer: 7). Source fallback
-recomputes the entire viewport while retaining the same build count/deadline.
-No additional mapping/decoding dependency beyond Pillow.
+An unavailable site has reason `"no site in range"` or `"not reporting"`.
+`nexrad` adds numeric `distanceMeters`; `id`, `name`, `distanceDisp`, `bearing`
+are unchanged. `sources` describes selection options, not a network-health probe
+for an unselected site. Actual reporting failure is discovered when selected.
+The RainViewer presentation hides the picker; a CONUS mosaic without an eligible
+site shows disabled `NO SITE`.
 
-| Zoom field | Type | Meaning |
-| --- | --- | --- |
-| `zoom` | int | Effective zoom of the published crop |
-| `zoomAuto` | bool | No manual override is in force |
-| `zoomAutoLevel` | int | Latitude-auto level, including when manually pinned to that level |
-| `zoomMin` | int | Shared floor, 4 |
-| `zoomMax` | int | Published source ceiling, MRMS 9 / RainViewer 7 |
-| `zoomSource` | string | `MRMS` or `RainViewer`, for limit captions |
-| `zoomCapped` | bool | Desired manual level exceeds the published source ceiling |
-| `zoomDesired` | int or null | Exact saved manual intent; null means auto |
+Auto targets 200,000 m across the **490px short axis**:
+`round(log2(156543.03392*cos(lat)/(200000/490)))`, bounded 4–9 before each
+source's own limits. Duvall resolves to z8, approximately 393×201 km, with a
+25-mile scale bar. RainViewer clamps auto to z7. Manual desired zoom persists
+independently of effective source bounds, allowing 4–10. `zoomCapped` is true
+when the desired manual or auto level differs from the effective level,
+including clamping to single-site's lower bound. `zoomSource` is MRMS,
+NEXRAD, or RainViewer. Captions explain manual clamping and auto source limits.
 
-`zoomDesired` is an additive acknowledgement field: effective z7 alone cannot
-confirm whether a capped z8 or z9 was saved, or whether z7 is manual or automatic.
-The preference is a single line in `radar_zoom`, beside `radar_viewed` and the
-emitter output. Missing, unreadable, malformed, `auto`, and out-of-band values
-select auto. An override is never rewritten by the emitter, including during
-source fallback. A saved z8 clamps to z7 on RainViewer and restores to z8 when
-MRMS succeeds. A failed acquisition retains the complete old presentation,
-including its zoom metadata; it never relabels old pixels with requested geometry.
+Both axes, station center, effective zoom, and tile placements determine crop
+identity. Single-site identity additionally includes ICAO to prevent same-minute
+collisions between nearby radars. XYZ x wraps at the antimeridian and y clamps
+at the poles. Bounds are inverse Mercator (`e<w` denotes wrapping). Marker is
+`{x:.5,y:.5}` = (478,245); tiles, SVG and overlays share this geometry. The scale
+bar uses at most 25% of the short axis; ring labels are omitted outside y76–412.
 
-While Radar is active, pending input appends `&radarZoom=<4..9|auto>` to the
-ordinary `wx.json` poll. The server parses a single value with `parse_qs`, trusts
-only loopback, validates it, and atomically writes only changes. Duplicate,
-malformed, and non-loopback preferences are ignored; I/O errors never interrupt
-polling or affect `/health`. Reset explicitly writes `auto`. No localStorage is
-used. Requests repeat until the decoded payload acknowledges the exact desired
-intent and effective zoom; Auto/Manual and source bounds then follow that payload.
-Rapid presses coalesce to the latest input; a reset superseding an in-flight
-manual request must itself be sent before it can be acknowledged.
+Frames are oldest-to-newest, at most one hour. Each has `id`, UTC epoch `ts`,
+station-local `at`, and `complete`; only complete frames carry `url`.
+`latest` identifies the newest complete scan. `frameCount` includes incomplete
+entries; `completeFrameCount` counts usable crops. `frameSpacingSec` is median
+complete-frame spacing, not a promise of fixed scan cadence. `observedAt` is
+scan time, `updatedAt` fetch completion time (retained for telemetry, absent
+from the face). A failed fetch changes neither. `ageSec` is scan age;
+`stale` starts at **3×cadence**, inclusive. Header age suffix starts at
+**2×cadence**, floor-rounded to minutes. Nominal cadence belongs only in the
+source caption; scan age belongs only beside AS OF. Never label data LIVE.
 
-The kiosk feed lives in `/tmp`, so the launcher links its `radar_zoom` sibling to
-`${XDG_STATE_HOME:-$HOME/.local/state}/wfpiconsole/radar_zoom`, migrating an existing
-runtime preference on first setup. The server resolves this link before atomic
-replacement (and fsyncs the new file). The link is recreated after reboot; the
-stored intent survives. This is per station installation, like the feed itself.
-Custom server setups must likewise place the sibling on durable storage or link
-it to durable storage to retain it over reboot.
+### Input, layout and playback
 
-A lifecycle-managed preference stat watcher runs at the emit interval (2 s).
-Changes enter the existing single-flight radar worker; changes during a build
-coalesce until that worker finishes. There is no alternate compositing path or
-budget reset. The 90 requests/minute limit, per-source 429 cooldowns, deadlines,
-frame-build cap and 900-second view TTL all continue to apply. Failures retry on
-the existing schedule; confirmation can take longer under backpressure.
+Loopback `wx.json` polls may send `radarZoom=auto|4..10` and
+`radarSource=mosaic|site`. Duplicate, invalid and non-loopback values are ignored.
+The server writes changed values atomically with fsync, preserving durable
+symlink targets. The launcher links both markers to
+`${XDG_STATE_HOME:-$HOME/.local/state}/wfpiconsole/`, migrating existing runtime
+preferences. A two-second preference stat watcher uses the same single-flight
+worker and existing budgets. Inputs coalesce while a build is active. A request
+is acknowledged only by the decoded authoritative payload, never by an old poll.
 
-The rail contains 44px minus/plus steppers, Auto/Manual mode, and a reset visible
-in Manual. Pending input dims the mode. Plus is disabled at the live source
-ceiling and minus at the floor. The source ceiling/capped caption explains the
-limit without changing saved intent. Keyboard `+`/`=`, `-`/`−`/`_`, and `0` work
-only on the active Radar tab, respecting text inputs and modified shortcuts.
-Buttons support Tab, Enter and Space with visible focus. The control uses only
-`--rule`, `--ink`, `--ink-soft`, and `--sans` theme tokens; no accent chrome.
-Zoom changes rebuild scale/rings/Range and history from the effective viewport,
-preserving loop pause state; the loop hides until new history is ready. Echoes
-are server-rasterized, never CSS zoomed. Geographic basemap and optional pinch
-interaction are outside this build.
+The plate fills the 956×490 body at x34,y76 on the 1024×600 tabbed artboard.
+The 25px secondary header and 34px gutters remain. The masthead subtitle is
+restored; alert cases use an inline subtitle and compact masthead/alert band.
+No rail, Range, Updated or Frames rows remain. Source picker/caption live at
+top-left, continuous 372px horizontal legend at top-right, loop/track at
+bottom-left, zoom at bottom-right. Snow uses 274+10+88px. Controls have >=44px
+hit areas. Chrome is confined to y0–72/y418–490, clear of the r150 station disc.
+The zoom note begins at y418 so it obeys the protected-band invariant.
+Scrims use flat paper .82 / night .78 alpha, never filters; chrome has no accent.
 
-All numeric frame timestamps and `fetchedAt` are UTC epoch seconds. `observedAt`
-is the newest **complete frame's valid time**, while `updatedAt` is the last
-successful active-source refresh completion time, formatted station-local HH:MM.
-`frames[].at` is independently formatted with the station timezone, including
-DST changes. `ageSec`/`stale` use frame time and the active source's threshold.
-A successful unchanged metadata check with a matching cached crop advances
-`fetchedAt`/`updatedAt`, but not `observedTs`/`observedAt`. Failed refreshes advance
-neither. If a newer IEM slot fails and back-probing finds the same displayed
-frame, it keeps its previous refresh time. Pure backfill publications reuse the
-latest acquisition's refresh completion time, even if filling history is slow.
+A new latest image decodes before committing pixels, geometry, legend and scan
+time together. Active source switches also stage up to eight newest-ending
+frames (or the available shorter history) before releasing the previous source. Generation fences reject abandoned callbacks. While switching,
+the previous presentation stays visible. Same-source backward timestamps retain
+the newer presentation and update its true age. A failed image load retains
+old metadata, marks it stale, and backs off before retrying.
 
-`frameSpacingSec` is the median positive gap between complete frame timestamps,
-null with fewer than two frames. `historySpanSec` and `completeFrameCount` report
-actual usable history. `historyGaps` marks non-native spacing within that history;
-missing leading history alone is warm-up, not an internal gap. `frameCount`
-retains its inclusive semantics. Both sources are bounded by
-`RADAR_HISTORY_SEC=3600` relative to their accepted latest frame (31 native IEM
-slots or normally seven RainViewer frames). Missing slots have no invented scans.
+Playback draws pre-decoded ImageBitmaps onto one canvas. The visible canvas has
+no `src`; a tick neither fetches nor decodes. A monotonic requestAnimationFrame
+clock uses 110ms steps and an 1100ms newest hold. RainViewer short loops use
+`clamp(2400/frameCount,110,180)` ms (the design's explicit formula). A 120ms
+opacity dip marks rewind; no crossfade blends scans. A contiguous ready suffix
+ending at newest starts when eight frames are ready (or a smaller supplied
+history finishes decoding), then extends as older frames become ready.
+Buffering disables Play and displays `Buffering · N of M`. Partial history
+reports its actual oldest time; no duplicate/padded scans. The browser retains
+at most **16 956×490 bitmaps (~29 MiB)** plus its static newest image/canvas.
+Leaving the tab closes all history bitmaps; returning decodes the active history.
 
-IEM's seven representative RGB stops were verified against the
-[IEM native colortable](https://mesonet.agron.iastate.edu/GIS/rasters.php?rid=4)
-on 2026-09-13 and independently matched the downloaded original PNG's indexed
-palette. Their indices are 86, 114, 134, 154, 174, 194 and 206, with
-`dBZ = index/2 - 32`. They are sampled native colors, not bin boundaries or an
-interpolated replacement palette. `rain` is a legacy field name for reflectivity;
-MRMS does not supply precipitation type, so `snow:null` hides the Snow legend row.
-RainViewer retains `legend.id=rainviewer-universal-blue-v1`, `colorId:2`,
-`colorName:Universal Blue`, rain stops 5 `#92887164`, 20 `#00a3e0ff`,
-30 `#005588ff`, 40 `#ffaa00ff`, 50 `#c10000ff`, 60 `#ff77ffff`,
-65 `#ffffffff`, and Snow `#7fbfffff`. Native RGBA stays identical in both themes;
-pasting without an alpha mask preserves translucent echoes. Both provider
-legend-fidelity network tests require `RADAR_NET_TEST=1`; normal pytest is hermetic.
+Play/Pause and station-local `HH:MM · −N min` / `HH:MM · newest` follow the drawn
+scan, with a hairline progress track. One supplied frame is static; clear data
+reads `No echoes · clear` with track/play hidden. Hidden pages idle. Reduced
+motion shows newest with a Play button; a tap runs one complete sweep and stops
+on newest, with wrap dip and track transition disabled. The loop never changes
+`#rad-base`, whose SVG is fetched once per hash into a bounded 16-viewport cache.
 
-The worker starts after 60 seconds and checks every `RADAR_CHECK_INTERVAL=180`
-seconds. Lifecycle-managed failures and unfinished viewed history retry after
-120 seconds, coalescing through the existing worker/retry registry. Every HTTP
-attempt (metadata, archive HEAD, tiles, failures and conditional requests) uses
-one rolling `RADAR_REQUESTS_PER_MIN=90` limiter shared across both providers.
-HTTP timeout is at most 10 seconds, primary acquisition budget 25 seconds,
-overall build deadline 150 seconds, and at most 20 uncached frame build attempts
-per pass. Budgets and provider cooldowns use monotonic time. A 429 stops that
-provider's burst and honors numeric or HTTP-date `Retry-After`; fallback may
-proceed within the shared limit. Failed slots are negatively cached for 120
-seconds. Complete cached crops imply positive archive availability.
+### Offline basemap and cache
 
-The limiter yields work to a later scheduled pass rather than sleeping inside
-the worker when its window is full. Latest is published promptly before
-newest-to-oldest backfill, and every publication is a complete `_RadarResult`
-assignment with source metadata attached. No incomplete PNG becomes a cache hit.
-Cache paths are `radar/<source-product-palette-revision>/<viewport-hash>/<ts>.png`;
-the hash includes station coordinates, crop tile placement, zoom and size.
-Writes use a same-directory temporary PNG and `os.replace`. Only owned source
-namespaces are pruned after success. Retired displayed files receive at least
-120 seconds of decode grace; unrelated PNGs and legacy timestamp-only files are
-left alone. Total failure keeps the last-good files. `WFP_RADAR_DIR` (default
-`~/almanac_web/radar`) must remain below the existing static web root.
+Optional `basemap` carries `hash`, `url`, `coast`, `roads`. It uses the same
+956×490 viewport, clipping/projecting both axes independently. Geographic paths
+contain only validated semantic classes and integer SVG path data. Theme tokens
+supply all pigment, including system dark mode. Missing/malformed artifacts
+retain the graticule without changing radar availability. Generation is lazy
+while `radar_viewed` is in `[0,900)` seconds, and warm files are reused off-tab.
 
-History demand is unchanged. While Radar is active, `wx.json` polls append
-`&view=radar`, independently of `r=1`. The trusted loopback signal writes
-`radar_viewed` beside the emitter's output path. Its age must be in `[0,900)`;
-missing, malformed, non-finite, future and expired markers mean unviewed. The
-marker is read before any unchanged-frame fast path. Unviewed cycles only
-maintain the latest crop; opening the tab warms history on the next cycle even
-if the latest timestamp is unchanged. For a nine-tile crop, cold unviewed IEM
-costs 11 requests (metadata + archive HEAD + nine tile GETs), RainViewer costs
-10; warm unchanged checks cost one metadata request and no HEADs/tile GETs.
-Viewed cold IEM history spans multiple passes under the shared request ceiling.
+PNG and SVG writes are atomic. Retired generations receive 120 seconds of decode
+grace, then owned namespaces are pruned; unrelated files are untouched. Full
+hour history is acquired only while viewed. At the wider crop, a frame commonly
+needs 12–15 tiles, so cold history spans several rate-limited passes. Scheduled
+checks remain 180s and retries 120s. `WFP_RADAR_DIR` stays below the static root.
 
-The console stages a new presentation until its newest image decodes, then
-switches the decoded image node, geometry, legend, source attribution and times
-in one turn. Source/product, legend revision, viewport and frame identity form
-the presentation key. Generation tokens fence latest/history callbacks; late
-loads from abandoned generations cannot overwrite the display. While staging
-or after failure, the old presentation stays intact and its loop stops. A
-failed load marks retained data stale; retry delay is 120 seconds. A successful
-same-frame refresh updates metadata without replacing/downloading the image.
-Only one accepted generation's decoded history is retained.
-
-Three times have three homes, using existing theme tokens:
-
-- Header `AS OF HH:MM`: newest complete frame; label 11.5px sans caps, value 17px
-  serif tabular. Fixed during playback, also visible in clear/stale states.
-- Rail `UPDATED HH:MM`: successful refresh, replacing the redundant Observed
-  row. `FRAMES · <span> · <spacing>` reports actual loop span and median spacing,
-  with `History loading`/gaps when appropriate. Fewer than two complete frames
-  say `Source cadence ~2 min` (or `~10 min`). `Past hour` requires a full hour.
-- Play/Pause caption: `−N min ──── newest` during playback, relative to the newest
-  frame, never “now”. Pausing holds that selected frame and displays its own
-  absolute station-local time, preferring `frames[].at`.
-
-The loop steps every 550ms, holding newest 1500ms, and idles off-tab, when the
-page is hidden, under reduced motion, on stale data, or without echo-bearing
-history. Transparent latest crops say “No echoes shown”; this does not claim
-coverage. Stale echoes retain their palette at .55 opacity, with the existing
-accent reserved for stale status. Legacy payloads without the new fields retain
-the RainViewer legend/view, hide unavailable Updated/cadence rows, and use the
-previous frame-time derivation when `frames[].at` is missing.
-
-`tests/verify_radar_headless.py` checks source-switch staging, per-paint image
-palette agreement, abandoned/failed loads, same-frame refresh, loop cycling and
-pause/idle, clear/stale and legacy payloads. Its 1024×600 layout checks and
-screenshots include alerts, both themes, seven IEM legend rows (plus RainViewer's
-Snow row), Updated and cadence text, keeping all Radar content above y=568.
-
-The zoom verifier additionally drives persistent input through the real loopback
-server and hermetic emitter transport at Seattle, Berlin, Sydney, mid-ocean and
-antimeridian sites, in paper and night themes. Screenshots default to
-`/tmp/wfp-radar-zoom/`. It checks pending/confirmed, Auto/Manual, reset, ceilings,
-source clamp/restore, keyboard/focus, refresh persistence, geometry, pause/history,
-and clear/stale states. These are deterministic UX fixtures, not live weather.
-
-### Offline geographic basemap
-
-Optional `radar.basemap` contains `hash`, `url`, `coast` and `roads`. The hash
-is the echo viewport identity (station latitude/longitude, effective zoom,
-480px size and tile offsets), shared across providers at the same zoom. The
-relative URL is `radar/basemap/<hash>.svg`. `coast` means any visible ocean or
-lake; false leaves the plate ground as land. `roads` is `dense` when a visible
-North America supplement road survives clipping, `sparse` for global roads
-only, or `none`. These hints never alter the reflectivity legend.
-
-The SVG is generated lazily on a viewed radar worker cycle using the same
-`radar_viewed` TTL as history warm-up. Existing files may be reused off-tab; no
-new file is generated then. Files are atomically published and retired with
-the same decode grace as echo crops, within the owned `radar/basemap` namespace.
-Basemap failure omits this optional object, preserves radar, and never changes
-engine `/health`. Missing object, failed fetch, or malformed SVG leaves the
-existing graticule. A successful empty SVG is valid for bare land.
-
-The browser fetches only while Radar is active, once per hash in its bounded
-16-viewport cache (including failures). It imports only validated class/path
-nodes into `#rad-base`. Geometry keys include the basemap hash; frame animation
-never fetches, replaces or mutates the basemap. Ocean/lake/coast/admin0/admin1/road
-classes resolve exclusively through existing theme tokens, including system
-dark mode. No baked colours, accent, raster recolouring or runtime geo dependency.
-
-Basemap: Natural Earth (public domain). Source layers, simplification, artifact
-format and reproducible build commands: [tools/RADAR_BASEMAP.md](../../tools/RADAR_BASEMAP.md).
-The standalone headless verifier now defaults to `/tmp/wfp-radar-basemap/`,
-including paper/night before/after, missing/legacy and five-site screenshots.
+Basemap: Natural Earth (public domain). Artifact provenance and reproducible
+build: [tools/RADAR_BASEMAP.md](../../tools/RADAR_BASEMAP.md).
+`tests/verify_radar_headless.py` defaults to `/tmp/wfp-radar-v2/`, retaining
+cold-load, forecast-blend, both-theme source/zoom/basemap checks and adding
+measured rAF intervals, hold, decode/src instrumentation, source picker states,
+protected-zone geometry, touch targets and scrim contrast. Browser measurements
+do not establish Pi hardware performance; the panel still needs human validation.

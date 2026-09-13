@@ -16,7 +16,8 @@ CLASSES = ('bm-ocean', 'bm-lake', 'bm-coast', 'bm-admin0', 'bm-admin1', 'bm-road
 
 def clip_polygon(points, size):
     """Sutherland–Hodgman, against the four edges of the plate."""
-    for axis, bound, sign in ((0,0,1), (0,size,-1), (1,0,1), (1,size,-1)):
+    width, height = (size, size) if isinstance(size, (int, float)) else size
+    for axis, bound, sign in ((0,0,1), (0,width,-1), (1,0,1), (1,height,-1)):
         if not points:
             break
         output = []
@@ -37,9 +38,10 @@ def clip_polygon(points, size):
 
 def clip_segment(a, b, size):
     """Liang–Barsky; None for a segment wholly outside the plate."""
+    width, height = (size, size) if isinstance(size, (int, float)) else size
     dx, dy = b[0]-a[0], b[1]-a[1]
     lo, hi = 0., 1.
-    for p, q in ((-dx,a[0]), (dx,size-a[0]), (-dy,a[1]), (dy,size-a[1])):
+    for p, q in ((-dx,a[0]), (dx,width-a[0]), (-dy,a[1]), (dy,height-a[1])):
         if p == 0:
             if q < 0:
                 return None
@@ -133,10 +135,11 @@ def render(lat, lon, zoom, bounds, size=480, data_path=None):
     path = str(data_path or DATA_PATH)
     quant, _, _ = _index(path)
     cx,cy = world_point(lat,lon,zoom)
-    left,top = cx-size/2,cy-size/2
+    width, height = (size, size) if isinstance(size, (int, float)) else size
+    left,top = cx-width/2,cy-height/2
     # Derive unwrapped longitudes from the crop itself, including -180 windows.
     world = 256*2**zoom
-    west,east = left/world*360-180,(left+size)/world*360-180
+    west,east = left/world*360-180,(left+width)/world*360-180
     layers = [[] for _ in CLASSES]
 
     def projected(points, x, y):
@@ -170,7 +173,7 @@ def render(lat, lon, zoom, bounds, size=480, data_path=None):
     for cls, pieces in zip(CLASSES,layers):
         if pieces:
             paths.append(f'<path class="{cls}" d="{"".join(pieces)}"/>')
-    svg = f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {size} {size}">' + ''.join(paths) + '</svg>\n'
+    svg = f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {width} {height}">' + ''.join(paths) + '</svg>\n'
     return svg, dict(coast=bool(layers[0] or layers[1]),
         roads='dense' if layers[6] else 'sparse' if layers[5] else 'none')
 
@@ -184,7 +187,7 @@ def ensure(ctx, radar_dir):
         with target.open() as stream:
             metadata = json.loads(stream.readline()[4:-4])
     elif ctx['viewed']:
-        svg, metadata = render(ctx['center']['lat'],ctx['center']['lon'],ctx['zoom'],ctx['bounds'])
+        svg, metadata = render(ctx['center']['lat'],ctx['center']['lon'],ctx['zoom'],ctx['bounds'],ctx.get('viewport', 480))
         target.parent.mkdir(parents=True,exist_ok=True)
         temp = None
         try:

@@ -17,7 +17,7 @@ from tests.test_freshness_health import _load_serve, _payload, _get, serve_at  #
 
 
 @pytest.mark.parametrize('value,desired', [(None, None), ('auto', None), ('garbage', None),
-    ('', None), ('3', None), ('10', None), ('-1', None), ('7.0', None), ('NaN', None),
+    ('', None), ('3', None), ('11', None), ('-1', None), ('7.0', None), ('NaN', None),
     ('8\n9', None), (b'\xff', None), ('8' * 200, None), ('8' + ' ' * 128 + 'junk', None), ('4', 4), ('6', 6),
     ('7', 7), ('8', 8), ('9\n', 9)])
 def test_override_validation_and_restart(make_emitter, hybrid, tmp_path, value, desired):
@@ -30,7 +30,7 @@ def test_override_validation_and_restart(make_emitter, hybrid, tmp_path, value, 
         assert r['available']
         assert r['zoom'] == (desired if desired is not None else ae._radar_zoom_for(47.61))
         assert r['zoomDesired'] == desired and r['zoomAuto'] is (desired is None)
-        assert r['zoomAutoLevel'] == 7 and r['zoomMin'] == 4 and r['zoomMax'] == 9
+        assert r['zoomAutoLevel'] == 8 and r['zoomMin'] == 4 and r['zoomMax'] == 9
         assert not r['zoomCapped'] and r['zoomSource'] == 'MRMS'
     if value is not None:
         assert pref.read_bytes() == (value if isinstance(value, bytes) else value.encode())
@@ -48,7 +48,7 @@ def test_source_clamp_restore_sticky_and_reset(make_emitter, hybrid, tmp_path):
     original = emitter._radar_result
     assert original.zoom == 8
     hybrid.failure = lambda req, _: (_ for _ in ()).throw(urllib.error.URLError('primary down')) if 'iastate.edu' in req.full_url else None
-    hybrid.calls.clear(); emitter._do_radar()
+    hybrid.mono=241; hybrid.calls.clear(); emitter._do_radar()
     fallback = emitter._build_payload()['radar']
     assert fallback['zoom'] == fallback['zoomMax'] == 7
     assert fallback['zoomSource'] == 'RainViewer' and fallback['zoomCapped']
@@ -56,13 +56,13 @@ def test_source_clamp_restore_sticky_and_reset(make_emitter, hybrid, tmp_path):
     assert all('/256/7/' in c[2] for c in hybrid.calls if '/256/' in c[2])
     assert pref.read_text() == '8\n'
     emitter._do_radar(); assert emitter._build_payload()['radar']['zoomCapped']
-    hybrid.failure = None; hybrid.calls.clear(); emitter._do_radar()
+    hybrid.failure = None; hybrid.mono=0; hybrid.calls.clear(); emitter._do_radar()
     restored = emitter._build_payload()['radar']
     assert restored['zoom'] == 8 and restored['zoomMax'] == 9 and not restored['zoomCapped']
     assert restored['latest'] == original.latest and len(hybrid.calls) == 1  # warm z8 restored
     pref.write_text('auto\n'); emitter._do_radar()
     reset = emitter._build_payload()['radar']
-    assert reset['zoom'] == reset['zoomAutoLevel'] == 7 and reset['zoomAuto']
+    assert reset['zoom'] == reset['zoomAutoLevel'] == 8 and reset['zoomAuto']
     assert reset['zoomDesired'] is None and pref.read_text() == 'auto\n'
 
 
@@ -73,7 +73,7 @@ def test_zoom_cache_identity_rebuild_and_retirement(make_emitter, hybrid, tmp_pa
     old = emitter._radar_result
     old_files = [Path(ae.RADAR_DIR) / (f['id'] + '.png') for f in old.frames if f['complete']]
     hybrid.mono += 60
-    (tmp_path / 'radar_zoom').write_text('8')
+    (tmp_path / 'radar_zoom').write_text('9')
     emitter._do_radar(); new = emitter._radar_result
     assert old.latest.split('/')[1] != new.latest.split('/')[1]
     assert new.ts_frame == old.ts_frame and new.mpp == pytest.approx(old.mpp / 2)
@@ -83,12 +83,15 @@ def test_zoom_cache_identity_rebuild_and_retirement(make_emitter, hybrid, tmp_pa
     before = new_latest.stat().st_mtime_ns
     if viewed:
         # Complete the viewed history before testing a fully warm pass.
-        for _ in range(5):
+        for _ in range(6):
+            hybrid.now -= 60
             hybrid.mono += 60; emitter._do_radar()
         assert all(f['complete'] for f in emitter._radar_frames)
     else:
         assert sum(f['complete'] for f in new.frames) == 1
         hybrid.mono += ae.RADAR_CACHE_GRACE_SEC
+    if viewed:
+        hybrid.mono += 120  # retirement grace uses wall time
     hybrid.calls.clear(); emitter._do_radar()
     assert len(hybrid.calls) == 1 and hybrid.calls[0][2] == ae.RADAR_IEM_METADATA_URL
     assert new_latest.stat().st_mtime_ns == before
@@ -114,13 +117,13 @@ def test_unused_history_expires_and_zoom_only_builds_latest(make_emitter, radar_
     radar_net['calls'].clear(); emitter._do_radar()
     r = emitter._build_payload()['radar']
     assert r['zoom'] == 6 and r['completeFrameCount'] == 1
-    assert len(tile_calls(radar_net)) == len(ae._radar_viewport(47.61, -122.33, 6, 480)[0])
+    assert len(tile_calls(radar_net)) == len(ae._radar_viewport(47.61, -122.33, 6, 956, 490)[0])
     assert all('/256/6/' in c for c in tile_calls(radar_net))
     radar_net['calls'].clear(); emitter._do_radar()
     assert not tile_calls(radar_net)
 
 
-@pytest.mark.parametrize('retry', ['180', 'Sun, 13 Sep 2026 00:09:00 GMT'])
+@pytest.mark.parametrize('retry', ['180', 'Sun, 13 Sep 2026 00:11:00 GMT'])
 def test_zoom_during_429_obeys_source_cooldown(make_emitter, hybrid, tmp_path, retry):
     def fail(req, _):
         if 'iastate.edu' in req.full_url:
@@ -173,7 +176,7 @@ def test_zoom_total_deadline_and_failure_keeps_geometry(make_emitter, hybrid, tm
     hybrid.failure = lambda *_: setattr(hybrid, 'mono', hybrid.mono + 1)
     emitter._do_radar()
     assert hybrid.mono - start == ae.RADAR_BUILD_DEADLINE_SEC
-    assert emitter._radar_zoom == 9 and emitter._radar_mpp == pytest.approx(before.mpp / 4)
+    assert emitter._radar_zoom == 9 and emitter._radar_mpp == pytest.approx(before.mpp / 2)
     previous = emitter._radar_result
     (tmp_path / 'radar_zoom').write_text('4')
     hybrid.failure = lambda *_: (_ for _ in ()).throw(urllib.error.URLError('outage'))
@@ -203,7 +206,7 @@ def test_extreme_zoom_geometry(lat, lon, zoom, unit, factor):
 
 @pytest.mark.parametrize('query,expected', [('radarZoom=4','4'), ('radarZoom=%38','8'),
     ('radarZoom=9','9'), ('radarZoom=auto','auto'), ('radarZoom=3',None),
-    ('radarZoom=10',None), ('radarZoom=7.0',None), ('radarZoom=',None),
+    ('radarZoom=11',None), ('radarZoom=10','10'), ('radarZoom=7.0',None), ('radarZoom=',None),
     ('radarZoom=8&radarZoom=9',None), ('radarZoom=auto&radarZoom=',None),
     ('x=radarZoom%3D8',None), ('radarZoom=8junk',None), ('radarZoom=%FF',None)])
 @pytest.mark.parametrize('address', ['127.0.0.1', '::1', '::ffff:127.0.0.1', '198.51.100.1'])

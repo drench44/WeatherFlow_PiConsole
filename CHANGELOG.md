@@ -7,6 +7,44 @@ to shared upstream code that the classic console benefits from too.
 ## 2026-09-13
 
 ### Radar
+- **Radar v2: the radar is the star of its tab.** The plate grows from a 480px
+  square to the whole 956 × 490 body — twice the echo area, all of it horizontal,
+  where weather comes from — and the rail is gone: its eight elements become
+  four quiet overlays confined to the top and bottom bands (nothing within 150px
+  of the station marker), the dBZ legend turns into a horizontal ramp with ticks,
+  and RANGE/UPDATED/FRAMES rows are cut (the scale bar states distance; scan time
+  and lateness live only in the "As of" line). Overlays sit on a flat, theme-aware
+  scrim (no filters — the Pi's GPU can't afford them) that clears WCAG 4.5:1 over the
+  worst-case echo colours in both themes; no accent on any chrome.
+- **Smooth playback.** Frames are pre-decoded to bitmaps and drawn on a canvas by a
+  clock-referenced animation frame — a tick does no fetch, no decode, no image-src
+  write and never touches the basemap. About nine frames a second (110 ms) with a
+  1.1 s hold on the newest, hard cuts between scans (a crossfade would paint a state
+  the radar never observed), one 120 ms dip on the wrap. Buffering is a visible
+  state ("Buffering · N of M"); partial history loops what exists and labels its true
+  start; reduced-motion gets a static newest frame and a one-sweep play button. To fit
+  the wider plate on a Pi the decoded loop holds the last 16 frames (~32 min on the
+  2-minute feed), and the caption reports the span it actually shows.
+- **Tighter, source-aware default zoom.** Auto now targets 200 km across the plate's
+  height (zoom 8 at mid-latitudes — half the ground scale of before, with the same
+  horizontal reach), and may go finer where the live source can render it: the US
+  mosaic to 9, a single site to 10, the global fallback stays at 7 with the existing
+  "closest view" note.
+- **Single-site NEXRAD, switchable.** A `MOSAIC | KATX` picker on the plate swaps the
+  composite for the nearest radar's own super-resolution base reflectivity (IEM's
+  per-scan RIDGE tiles, animated over real scan times, ~5-minute volumes, native
+  palette verified against IEM's colour curve). The picker is honest about its
+  states — pending, no site in range, site not reporting, hidden entirely on the
+  global fallback, a failed switch reverts with a note — the choice persists across
+  restarts, and stale is judged per source (three scans, not a fixed clock).
+- **The 2-minute feed now actually keeps up.** Root causes fixed, not a deadline
+  raised: one TLS connection and one DNS lookup per host per pass instead of a fresh
+  handshake per tile (a 9-tile frame in ~1.2 s, down from ~3 s on a good link and far
+  worse on the Pi), the not-yet-rendered freshest minutes are skipped and a bad tile
+  ends its candidate immediately, a failed pass keeps the last good frame instead of
+  flapping to the 10-minute source, a newer scan can never be replaced by an older
+  one, and every fallback and source switch is now logged with its cause. The "As
+  of" line carries an age suffix only when a frame is late (≥ 2 × cadence).
 - **Diagnosed why the 2-minute US feed loses to the fallback on IPv6-broken
   networks.** IEM's host advertises an IPv6 address; where IPv6 is a black hole
   (as on the test Pi — `curl -6` times out, `curl -4` answers in 0.23s), Python's

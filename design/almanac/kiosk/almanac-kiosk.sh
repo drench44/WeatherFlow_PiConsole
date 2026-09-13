@@ -134,6 +134,10 @@ if [ ! -e "$RADAR_STATE/radar_zoom" ] && [ -f "$DATA_DIR/radar_zoom" ]; then
   cp "$DATA_DIR/radar_zoom" "$RADAR_STATE/radar_zoom"
 fi
 ln -sfn "$RADAR_STATE/radar_zoom" "$DATA_DIR/radar_zoom"
+if [ ! -e "$RADAR_STATE/radar_source" ] && [ -f "$DATA_DIR/radar_source" ]; then
+  cp "$DATA_DIR/radar_source" "$RADAR_STATE/radar_source"
+fi
+ln -sfn "$RADAR_STATE/radar_source" "$DATA_DIR/radar_source"
 cp -f "$APP/design/almanac/console_live.html" "$WEB/index.html"
 ln -sf "$DATA" "$WEB/wx.json"
 

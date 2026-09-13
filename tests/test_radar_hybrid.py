@@ -26,7 +26,7 @@ def png(color=(0, 204, 0, 255), size=(256, 256)):
 @pytest.fixture
 def hybrid(tmp_path, monkeypatch):
     latest = int(datetime(2026, 9, 13, 0, 2, tzinfo=timezone.utc).timestamp())
-    state = SimpleNamespace(latest=latest, rv=latest - 120, now=latest + 240,
+    state = SimpleNamespace(latest=latest, rv=latest - 120, now=latest + 360,
         mono=0., calls=[], failure=None, tile=png(), metadata=None, conditional=False)
     monkeypatch.setattr(ae, 'RADAR_DIR', str(tmp_path / 'radar'))
     monkeypatch.setattr(ae.time, 'time', lambda: state.now + state.mono)
@@ -60,7 +60,7 @@ def hybrid(tmp_path, monkeypatch):
         response.headers = {'ETag': '"radar-test"'}
         return response
 
-    monkeypatch.setattr(urllib.request, 'urlopen', fetch)
+    monkeypatch.setattr(ae.RadarSession, 'open', lambda self, *a, **k: fetch(*a, **k))
     state.view = lambda: (tmp_path / 'radar_viewed').write_text(str(ae.time.time()))
     return state
 
@@ -185,13 +185,14 @@ def test_failed_advertised_frame_does_not_advance_updated(make_emitter, hybrid):
 def test_cache_identity_source_viewport_and_total_outage(make_emitter, hybrid):
     emitter = make_emitter(); emitter._do_radar()
     iem = emitter._radar_result
-    hybrid.rv = hybrid.latest  # same timestamp, different palette
+    hybrid.rv = hybrid.latest
+    hybrid.mono = 241  # MRMS is now beyond its 600s retention window
     hybrid.failure = lambda req, _: (_ for _ in ()).throw(urllib.error.URLError('IEM')) if 'iastate.edu' in req.full_url else None
     emitter._do_radar()
     rv = emitter._radar_result
     assert rv.ts_frame == iem.ts_frame and rv.latest != iem.latest
     assert os.path.isfile(os.path.join(ae.RADAR_DIR, iem.latest + '.png'))
-    hybrid.failure = None
+    hybrid.failure = None; hybrid.mono = 0
     emitter.app.config = make_config(Station={'Longitude': '-122.34'})
     emitter._do_radar()
     moved = emitter._radar_result
@@ -212,7 +213,7 @@ def test_cold_warm_unviewed_counts_history_limit_and_atomic(make_emitter, hybrid
             for f in value.frames:
                 if f['complete']:
                     with Image.open(os.path.join(ae.RADAR_DIR, f['id'] + '.png')) as image:
-                        assert image.size == (480, 480)
+                        assert image.size == (956, 490)
             assert value.legend is ae._RADAR_IEM_LEGEND
             snapshots.append(value)
         original(self, key, value)
@@ -220,8 +221,9 @@ def test_cold_warm_unviewed_counts_history_limit_and_atomic(make_emitter, hybrid
     emitter._do_radar()
     assert len(hybrid.calls) == 90  # metadata + HEADs + tile GETs, including partial attempt
     assert sum(f['complete'] for f in snapshots[0].frames) == 1  # publish before backfill
-    assert sum(f['complete'] for f in snapshots[-1].frames) == 8
-    for _ in range(3):
+    assert sum(f['complete'] for f in snapshots[-1].frames) == 6
+    for _ in range(6):
+        hybrid.now -= 60  # hold wall clock; this test exercises monotonic backfill budgets
         hybrid.mono += 60
         emitter._do_radar()
     r = emitter._build_payload()['radar']
@@ -230,14 +232,14 @@ def test_cold_warm_unviewed_counts_history_limit_and_atomic(make_emitter, hybrid
     assert r['frames'][-1]['ts'] - r['frames'][0]['ts'] == 3600
     starts = [c[3] for c in hybrid.calls]
     assert all(sum(t <= v < t + 60 for v in starts) <= 90 for t in starts)
-    hybrid.mono += 60; hybrid.calls.clear(); emitter._do_radar()
+    hybrid.now -= 60; hybrid.mono += 60; hybrid.calls.clear(); emitter._do_radar()
     assert len(hybrid.calls) == 1  # warm check: zero archive HEADs or tile GETs
     assert not list(Path(ae.RADAR_DIR).rglob('*.tmp.*'))
 
 
 def test_unviewed_counts_and_open_warms_unchanged(make_emitter, hybrid):
     emitter = make_emitter(); emitter._do_radar()
-    assert len(hybrid.calls) == 11  # 1 metadata, 1 archive HEAD, 9 tile GETs
+    assert len(hybrid.calls) == 14  # metadata + HEAD + 12 covering tiles
     assert sum(f['complete'] for f in emitter._radar_frames) == 1
     hybrid.calls.clear(); emitter._do_radar()
     assert len(hybrid.calls) == 1
@@ -257,7 +259,7 @@ def test_build_limit_and_real_gap_spacing(make_emitter, hybrid, monkeypatch):
     r = emitter._build_payload()['radar']
     assert r['completeFrameCount'] == 2 and r['historyGaps']
     assert r['frameSpacingSec'] == 240 and r['cadenceSec'] == 120
-    assert len(hybrid.calls) == 22  # metadata + 2 complete crops (20) + failed archive (1)
+    assert len(hybrid.calls) == 28  # metadata + 2 complete crops (20) + failed archive (1)
 
 
 def test_negative_archive_cache_and_expiry(make_emitter, hybrid):
@@ -311,8 +313,8 @@ def test_source_stale_thresholds_and_dst_local_labels(make_emitter, hybrid):
     emitter = make_emitter(); emitter._do_radar()
     snap = emitter._radar_result
     tz = ae.AlmanacEmitter._station_tz(emitter.app.config)
-    assert not ae.AlmanacEmitter._radar_payload(snap, snap.ts_frame + 600, tz)['stale']
-    assert ae.AlmanacEmitter._radar_payload(snap, snap.ts_frame + 601, tz)['stale']
+    assert not ae.AlmanacEmitter._radar_payload(snap, snap.ts_frame + 359, tz)['stale']
+    assert ae.AlmanacEmitter._radar_payload(snap, snap.ts_frame + 360, tz)['stale']
     times = [int(datetime(2026, 11, 1, h, 30, tzinfo=timezone.utc).timestamp()) for h in (8, 9)]
     dst = snap._replace(frames=tuple(dict(id=str(t), ts=t, complete=True) for t in times))
     assert [f['at'] for f in ae.AlmanacEmitter._radar_payload(dst, times[-1], tz)['frames']] == ['01:30', '01:30']
@@ -355,7 +357,7 @@ def test_total_deadline_and_backfill_keep_refresh_completion(make_emitter, hybri
     emitter = make_emitter(); emitter._do_radar()
     assert hybrid.mono == ae.RADAR_BUILD_DEADLINE_SEC
     assert emitter._radar_result.source_id == 'iem-mrms-lcref'
-    assert emitter._radar_ts_fetch == hybrid.now + 11  # metadata + HEAD + nine tiles
+    assert emitter._radar_ts_fetch == hybrid.now + 14  # metadata + HEAD + nine tiles
     assert 1 < sum(f['complete'] for f in emitter._radar_frames) < 31
     assert all(c[3] < ae.RADAR_BUILD_DEADLINE_SEC for c in hybrid.calls)
 

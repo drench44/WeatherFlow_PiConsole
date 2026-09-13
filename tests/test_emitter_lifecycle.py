@@ -161,6 +161,7 @@ def test_a_day_of_forecast_failures_stays_one_retry_chain(make_emitter, clock, m
         raise OSError('network is down')
 
     monkeypatch.setattr(urllib.request, 'urlopen', refuse)
+    monkeypatch.setattr(ae.RadarSession, 'open', refuse)
     emitter = make_emitter(scn.all_none())
     attempts = []
     fetch = emitter._do_forecast

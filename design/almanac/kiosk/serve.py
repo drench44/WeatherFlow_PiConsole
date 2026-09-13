@@ -28,7 +28,7 @@ STALE_SEC = int(os.environ.get("WFP_STALE_SEC", "20"))
 OBS_STALE_SEC = int(os.environ.get("WFP_OBS_STALE_SEC", "300"))
 
 # Aligned with the emitter shared floor and highest source ceiling.
-RADAR_MIN_ZOOM, RADAR_MAX_DESIRED_ZOOM = 4, 9
+RADAR_MIN_ZOOM, RADAR_MAX_DESIRED_ZOOM = 4, 10
 
 LOOPBACK = ("127.0.0.1", "::1", "::ffff:127.0.0.1")
 
@@ -44,11 +44,22 @@ _count_lock = threading.Lock()
 
 
 def _write_radar_zoom(values):
+    return _write_radar_preference('radar_zoom', values)
+
+
+def _write_radar_source(values):
+    return _write_radar_preference('radar_source', values)
+
+
+def _write_radar_preference(name, values):
     """Caller holds _count_lock and has checked loopback. Polling cannot fail here."""
     if len(values) != 1:
         return
     value = values[0]
-    if value != 'auto':
+    if name == 'radar_source':
+        if value not in ('mosaic', 'site'):
+            return
+    elif value != 'auto':
         if not re.fullmatch(r'[0-9]{1,2}', value):
             return
         level = int(value)
@@ -57,7 +68,7 @@ def _write_radar_zoom(values):
         value = str(level)
     # The kiosk links this sibling to durable station storage before startup.
     # Resolve the link so replacement updates its target, not the link.
-    marker = os.path.realpath(os.path.join(os.path.dirname(DATA), 'radar_zoom'))
+    marker = os.path.realpath(os.path.join(os.path.dirname(DATA), name))
     tmp = f"{marker}.tmp.{os.getpid()}"
     try:
         try:
@@ -98,7 +109,9 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 if rendered:
                     _renders += 1
                 if self.client_address[0] in LOOPBACK:
-                    _write_radar_zoom(parse_qs(query, keep_blank_values=True).get('radarZoom', []))
+                    params = parse_qs(query, keep_blank_values=True)
+                    _write_radar_zoom(params.get('radarZoom', []))
+                    _write_radar_source(params.get('radarSource', []))
                 if viewed_radar:
                     # Share only a timestamp with the emitter. Serialize writers
                     # and replace atomically so it never reads a partial epoch.
