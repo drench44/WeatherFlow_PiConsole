@@ -594,6 +594,66 @@ def check_basemap(browser, html, output_dir, theme):
         print(f'BASEMAP PASS: {theme}; active-only fetch, tokens/theme switch, echo stacking, untouched loop DOM, missing/malformed/legacy fallback',flush=True)
 
 
+def check_forecast_seam(browser, html):
+    """The Observations temperature curve must not draw the obs-vs-model gap as a
+    slope. The forecast line starts at the model's OWN value at now (fc0), never at
+    the sensor reading, so a cold/warm model bias shows as a vertical seam, not a
+    phantom drop-and-recover. Regresses the bug a user hit on the live Pi (sensor
+    55°, model 53° -> a fake dip to '53° - 14:00')."""
+    now = int(time.time())
+    midnight = now - now % 86400
+    def payload(temp):
+        # model rises monotonically 53.0 -> 56.5; sensor sits `temp` above/below it.
+        hourly = [[midnight + h * 3600, t] for h, t in
+                  [(11, 52.6), (12, 53.0), (13, 53.4), (14, 54.1), (15, 55.3), (16, 56.5), (17, 56.4)]]
+        nowh = 12.5
+        return dict(ts=now, time='12:30', dayStartTs=midnight, temp=temp,
+                    obsLow=52.6, obsLowTime='06:00', obsHigh=57.0, obsHighTime='00:00',
+                    fcLow=52.0, fcHigh=57.0, fcHourly=hourly, station='Test', tempUnit='°F')
+    context = browser.new_context(viewport={'width': 1024, 'height': 600})
+    context.route('https://seam.test/wx.json**', lambda route: route.fulfill(status=404, body='x'))
+    context.route('https://seam.test/**', lambda route: route.fulfill(body=html, content_type='text/html'))
+    page = context.new_page()
+    errors = []
+    page.on('pageerror', lambda e: errors.append(str(e)))
+    page.goto('https://seam.test/index.html?tabs=1')
+    page.wait_for_timeout(300)
+    probe = """(pl) => {
+        render(pl);
+        const g = document.getElementById('spark-dyn');
+        const fx = g.querySelector('.spark-fx');
+        const seam = g.querySelector('.spark-seam');
+        const labels = [...g.querySelectorAll('.spark-lbl')].map(t => t.textContent);
+        let firstY = null, maxY = null;
+        if (fx) {
+            const m = fx.getAttribute('d').match(/^M\\s*[\\d.]+\\s+([\\d.]+)/);
+            firstY = m ? parseFloat(m[1]) : null;
+            const L = fx.getTotalLength(); maxY = 0;
+            for (let i = 0; i <= 60; i++) { const p = fx.getPointAtLength(L * i / 60); if (p.y > maxY) maxY = p.y; }
+        }
+        // Y() of the sensor value, to prove the forecast did NOT anchor to it.
+        const nowY = (typeof lastData === 'object') ? null : null;
+        return { hasFx: !!fx, hasSeam: !!seam, firstY, maxY, labels };
+    }"""
+    cold = page.evaluate(probe, payload(55.0))   # sensor warmer than model
+    assert cold['hasFx'] and cold['hasSeam'], f'cold-bias: expected forecast path + seam: {cold}'
+    # the forecast start (fc0~53.05) is the lowest plotted point -> the path only
+    # rises from it; its max y (lowest temp) is at the very start, never a sag beyond.
+    assert cold['maxY'] - cold['firstY'] <= 0.5, f'forecast sags below its start (phantom dip): {cold}'
+    assert not any('14:00' in l for l in cold['labels']), f'phantom low label printed: {cold["labels"]}'
+    assert any(l.startswith('57') for l in cold['labels']), f'high label missing/disagrees: {cold["labels"]}'
+    warm = page.evaluate(probe, payload(51.0))   # sensor cooler than model
+    assert warm['hasSeam'] and warm['maxY'] - warm['firstY'] <= 0.5, f'warm-bias seam/monotonic failed: {warm}'
+    agree = page.evaluate(probe, payload(53.1))   # sensor ~= model now
+    assert not agree['hasSeam'], f'seam should vanish when obs~=model: {agree}'
+    nofc = page.evaluate("(pl) => { render(pl); const g = document.getElementById('spark-dyn'); "
+                         "return { fx: !!g.querySelector('.spark-fx'), seam: !!g.querySelector('.spark-seam') }; }",
+                         {**payload(55.0), 'fcHourly': None})
+    assert not nofc['fx'] and not nofc['seam'], f'no fcHourly must render observed-only: {nofc}'
+    assert errors == [], errors
+    context.close()
+
+
 def check_cold_load_no_data(browser, html):
     """Cold boot / engine down: with no wx.json the page must paint the no-data
     pose, never the design artboard's sample values (64.0°, High 82°, "Clear &
@@ -698,6 +758,7 @@ def main():
         report['no-tabs'] = page.evaluate('pollURLs')
         context.close()
         check_cold_load_no_data(browser, html)
+        check_forecast_seam(browser, html)
         check_loop(browser, html)
         for theme in ('light', 'night'):
             check_source_switch(browser, html, args.output_dir, theme)
@@ -709,6 +770,7 @@ def main():
     (args.output_dir / 'poll-urls.json').write_text(json.dumps(report, indent=2))
     print('PASS: latest radar light/dark, tab view signal on/off, render heartbeat, other tabs, '
           'no-tabs default, cold-load no-data pose (no design sample values), '
+          'forecast seam (model-anchored start, no phantom dip/label), '
           'loop (cycle/pause/off-tab idle), hybrid source staging/abandoned loads, '
           'palette fidelity per paint, Updated/relative times, clear/stale/legacy, '
           '1024x600 alert layout in both themes; five-site zoom paper/night, real loopback persistence, '

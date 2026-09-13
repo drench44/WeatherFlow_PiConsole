@@ -191,6 +191,9 @@
   .spark-tick { stroke: var(--rule); stroke-width: 1; }
   .spark-obs  { fill: none; stroke: var(--ink); stroke-width: 3.4; }
   .spark-fx   { fill: none; stroke: var(--ink-soft); stroke-width: 2.6; stroke-dasharray: 0.5 4; stroke-linecap: round; }
+  /* the obs-vs-forecast disagreement at now, stated vertically (a gap in temp,
+     not a slope in time) so it can never read as a predicted trend */
+  .spark-seam { stroke: var(--ink-soft); stroke-width: 1.4; stroke-dasharray: 0.5 3; stroke-linecap: round; opacity: 0.55; }
   .spark-lbl  { fill: var(--ink-soft); font-size: 11.5px; letter-spacing: 0.04em; }
   .spark-pt   { fill: var(--paper); stroke: var(--ink); stroke-width: 1.7; }
   .spark-drop { stroke: var(--rule-faint); stroke-width: 1; }
@@ -2051,23 +2054,37 @@
        the minute and so prints exact hours as :59. (obsTs is deliberately not
        used: it is the sensor's epoch and can trail the wall clock by minutes.)
        A list left over from an old fetch maps outside 0..24 and drops out. */
-    var fcPts = [];
+    var fcAll = [], fcPts = [];
     if (isNum(data.ts) && data.fcHourly && data.fcHourly.length) {
       var midnight = isNum(data.dayStartTs) ? data.dayStartTs : data.ts - nowH * 3600;
       for (var i = 0; i < data.fcHourly.length; i++) {
         var p = data.fcHourly[i];
         if (!p || !isNum(p[0]) || !isNum(p[1])) continue;
         var ph = (p[0] - midnight) / 3600;
-        if (ph <= nowH + 1 / 60 || ph > 24) continue;      /* still ahead, still today */
-        fcPts.push({ h: ph, T: p[1] });
+        if (ph < 0 || ph > 24) continue;                   /* today only */
+        fcAll.push({ h: ph, T: p[1] });
       }
-      fcPts.sort(function (a, b) { return a.h - b.h; });
+      fcAll.sort(function (a, b) { return a.h - b.h; });
+      fcPts = fcAll.filter(function (o) { return o.h > nowH + 1 / 60; });  /* still ahead */
+    }
+    /* fc0: what the FORECAST itself says the temperature is right now. Bracketed
+       interpolation only — never extrapolated past the ends of its own data. The
+       forecast line anchors HERE, not on the sensor reading, so the model's cold
+       (or warm) bias against the live sensor is never drawn as a change over time. */
+    var fc0 = null;
+    for (var fk = 0; fk < fcAll.length - 1; fk++) {
+      var fa = fcAll[fk], fb = fcAll[fk + 1];
+      if (fa.h <= nowH && nowH <= fb.h) {
+        fc0 = (fb.h - fa.h < 1e-6) ? fa.T : fa.T + (fb.T - fa.T) * (nowH - fa.h) / (fb.h - fa.h);
+        break;
+      }
     }
 
     /* vertical scale spans exactly what gets drawn — nothing is placed by a
        number the curve doesn't carry */
     var temps = [data.obsLow, data.obsHigh, data.temp].filter(isNum)
                   .concat(fcPts.map(function (o) { return o.T; }));
+    if (isNum(fc0) && fcPts.length) temps.push(fc0);   /* the scale must span where the forecast line starts */
     if (temps.length < 2) return;
     var tmin = Math.min.apply(null, temps), tmax = Math.max.apply(null, temps);
     if (tmax - tmin < 1) { tmax = tmin + 1; }
@@ -2101,9 +2118,26 @@
        HIGH above the chart still say what the day holds, and the chart invents
        neither a value nor an hour for them. */
     if (fcPts.length) {
-      var fc = [[nowX, nowY]];
+      /* The forecast line begins where the FORECAST is (fc0), not where the sensor
+         is (nowY). Welding it to nowY drew the model's bias as a drop-and-recover
+         the model never predicted. */
+      var fcStartT = isNum(fc0) ? fc0 : fcPts[0].T;
+      var fcStartX = isNum(fc0) ? nowX : X(fcPts[0].h);
+      var fcStartY = Y(fcStartT);
+      var fc = [];
+      /* a start within ~2px of the first real hour adds only a degenerate chord */
+      if (isNum(fc0) && X(fcPts[0].h) - nowX >= 2) fc.push([nowX, fcStartY]);
       fcPts.forEach(function (o) { fc.push([X(o.h), Y(o.T)]); });
       el("path", { class: "spark-fx", d: smooth(fc) }, g);
+      /* the seam: obs and model disagree by a readable amount — stated vertically,
+         at one instant, where it cannot be mistaken for a trend. Skipped when the
+         gap is small enough that the now-halo already covers it. */
+      var gapPx = fcStartY - nowY;
+      if (Math.abs(gapPx) >= 12) {
+        var seamDir = gapPx > 0 ? 1 : -1;
+        el("line", { class: "spark-seam", x1: fcStartX.toFixed(1), y1: (nowY + 9 * seamDir).toFixed(1),
+                     x2: fcStartX.toFixed(1), y2: (fcStartY - 3 * seamDir).toFixed(1) }, g);
+      }
     }
 
     /* observed solid on top */
@@ -2183,9 +2217,12 @@
       var t = lbl(x, above ? Y(o.T) - 6 : 100, a, Math.round(o.T) + "° · " + fcClock(o.h));
       if (collides(t)) drop(t);              /* the observed fact keeps the space */
     }
-    var nowT = nowObj.T;
-    if (fcHi && fcHi.T - nowT >= 0.5 && X(fcHi.h) - nowX >= 12) fcLabel(fcHi, true);
-    if (fcLo && nowT - fcLo.T >= 0.5 && X(fcLo.h) - nowX >= 12) fcLabel(fcLo, false);
+    /* forecast extremes judged in the forecast's OWN frame ("does the model rise
+       or fall from where the model is now"), not against the sensor — the sensor's
+       bias is not a prediction, and comparing to it printed the phantom dip in type. */
+    var fcRef = isNum(fc0) ? fc0 : fcPts.length ? fcPts[0].T : nowObj.T;
+    if (fcHi && fcHi.T - fcRef >= 0.5 && X(fcHi.h) - nowX >= 12) fcLabel(fcHi, true);
+    if (fcLo && fcRef - fcLo.T >= 0.5 && X(fcLo.h) - nowX >= 12) fcLabel(fcLo, false);
 
     /* now marker: halo + vermilion dot */
     el("circle", { class: "spark-halo", cx: nowX.toFixed(1), cy: nowY.toFixed(1), r: 8.5 }, g);
