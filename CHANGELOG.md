@@ -44,6 +44,21 @@ to shared upstream code that the classic console benefits from too.
   reads, so the plate re-composites server-side at the chosen level (no CSS scaling,
   no blur); scale bar, range rings, and the loop all follow, and a zoom change
   respects the same demand-gate, rate limiter, and cooldowns as every other refresh.
+- **Geographic basemap under the echoes.** The radar plate now shows real geography
+  — coastline and water, country and state/province borders, and major roads — as
+  hairline themed lines beneath the reflectivity, RadarScope-style, so a storm reads
+  against the land instead of an abstract grid. It's drawn from bundled Natural Earth
+  1:10m vector data (public domain, ~3.6 MB), so it needs no API key and works
+  offline, anywhere on Earth — a landlocked station shows borders and roads, a coastal
+  one shows the shoreline, mid-ocean stays calm water. The emitter projects and clips
+  the geography to the exact station-centered viewport (pixel-registered to the
+  echoes) and writes a class-tagged SVG the console colors entirely through its own
+  palette tokens, so both light and dark are correct with no accent on the map
+  furniture. It's generated once per viewport (never per animation frame), only while
+  the tab is watched, cached and pruned like the echo frames, and it falls back to the
+  old graticule if anything is missing — radar never breaks. The abstract lat/lon grid
+  gives way to the basemap when it's present. Build tooling and provenance live in
+  `tools/RADAR_BASEMAP.md`.
 
 ### Core (shared with the classic console)
 - Sager Weathercaster no longer fails on a clear sky: it keyed on CheckWX's

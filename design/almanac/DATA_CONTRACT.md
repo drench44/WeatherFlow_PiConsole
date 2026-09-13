@@ -229,6 +229,8 @@ the old-location snapshot before acquisition, so a failure cannot mislabel it.
   "zoomMin": 4, "zoomMax": 9, "zoomSource": "MRMS",
   "zoomCapped": false, "zoomDesired": null, "viewport": {"w": 480, "h": 480},
   "bounds": {"n": 49.36, "s": 45.80, "e": -119.69, "w": -124.97},
+  "basemap": {"hash": "<viewport-hash>", "url": "radar/basemap/<viewport-hash>.svg",
+              "coast": true, "roads": "dense"},
   "marker": {"x": 0.5, "y": 0.5},
   "metersPerPixel": 824.5,
   "scaleBar": {"distDisp": "50 mi", "meters": 80467.2, "pixels": 97.59, "unit": "mi"},
@@ -441,3 +443,33 @@ antimeridian sites, in paper and night themes. Screenshots default to
 `/tmp/wfp-radar-zoom/`. It checks pending/confirmed, Auto/Manual, reset, ceilings,
 source clamp/restore, keyboard/focus, refresh persistence, geometry, pause/history,
 and clear/stale states. These are deterministic UX fixtures, not live weather.
+
+### Offline geographic basemap
+
+Optional `radar.basemap` contains `hash`, `url`, `coast` and `roads`. The hash
+is the echo viewport identity (station latitude/longitude, effective zoom,
+480px size and tile offsets), shared across providers at the same zoom. The
+relative URL is `radar/basemap/<hash>.svg`. `coast` means any visible ocean or
+lake; false leaves the plate ground as land. `roads` is `dense` when a visible
+North America supplement road survives clipping, `sparse` for global roads
+only, or `none`. These hints never alter the reflectivity legend.
+
+The SVG is generated lazily on a viewed radar worker cycle using the same
+`radar_viewed` TTL as history warm-up. Existing files may be reused off-tab; no
+new file is generated then. Files are atomically published and retired with
+the same decode grace as echo crops, within the owned `radar/basemap` namespace.
+Basemap failure omits this optional object, preserves radar, and never changes
+engine `/health`. Missing object, failed fetch, or malformed SVG leaves the
+existing graticule. A successful empty SVG is valid for bare land.
+
+The browser fetches only while Radar is active, once per hash in its bounded
+16-viewport cache (including failures). It imports only validated class/path
+nodes into `#rad-base`. Geometry keys include the basemap hash; frame animation
+never fetches, replaces or mutates the basemap. Ocean/lake/coast/admin0/admin1/road
+classes resolve exclusively through existing theme tokens, including system
+dark mode. No baked colours, accent, raster recolouring or runtime geo dependency.
+
+Basemap: Natural Earth (public domain). Source layers, simplification, artifact
+format and reproducible build commands: [tools/RADAR_BASEMAP.md](../../tools/RADAR_BASEMAP.md).
+The standalone headless verifier now defaults to `/tmp/wfp-radar-basemap/`,
+including paper/night before/after, missing/legacy and five-site screenshots.

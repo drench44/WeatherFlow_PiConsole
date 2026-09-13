@@ -576,6 +576,13 @@
   #rad-status[data-state="stale"] { color: var(--accent); }
   .rad-attrib { position: absolute; right: 12px; bottom: 9px; z-index: 2;
     font: 11.5px var(--sans); color: var(--ink-soft); }
+  /* Basemap: Natural Earth (public domain). All pigment comes from theme tokens. */
+  .rad-base .bm-ocean,
+  .rad-base .bm-lake   { fill: var(--water-tint); fill-rule: evenodd; stroke: none; }
+  .rad-base .bm-coast  { fill: none; stroke: var(--water); stroke-opacity:.45; stroke-width:1; }
+  .rad-base .bm-admin0 { fill: none; stroke: var(--ink-soft); stroke-opacity:.5; stroke-width:1; }
+  .rad-base .bm-admin1 { fill: none; stroke: var(--rule-faint); stroke-width:1; stroke-dasharray:4 3; }
+  .rad-base .bm-road   { fill: none; stroke: var(--ink-soft); stroke-opacity:.32; stroke-width:1; }
   .rad-base line { stroke: var(--rule-faint); stroke-width: 1; }
   .rad-over text { fill: var(--ink-soft); font: 11.5px var(--sans); }
   .rad-over .rad-cross { stroke: var(--rule); stroke-width: 1; }
@@ -1203,6 +1210,7 @@
     /* the radar loop runs only while its tab is open (idle off-tab, Pi-friendly) */
     if (typeof radarLoopSync === "function" && radarView) {
       radarView.active = (id === "s-radar");
+      radarBasemapSync();
       radarLoopSync();
     }
   }
@@ -2796,18 +2804,60 @@
     };
     image.src = frame.url;
   }
+  var radarBasemaps = new Map();
+  function radarGraticule() {
+    var base = $("rad-base"); base.replaceChildren();
+    delete base.dataset.basemapHash;
+    for (var i = 80; i < 480; i += 80) {
+      el("line", {x1:i, y1:0, x2:i, y2:480}, base);
+      el("line", {x1:0, y1:i, x2:480, y2:i}, base);
+    }
+  }
+  function radarBasemapSync() {
+    var r = radarView.data;
+    if (!radarView.active || !r) return;
+    var bm = r.basemap;
+    if (!bm || !/^[a-f0-9]{20}$/.test(bm.hash) || bm.url !== "radar/basemap/" + bm.hash + ".svg") return;
+    var entry = radarBasemaps.get(bm.hash);
+    if (entry) {
+      if (entry.nodes && $("rad-base").dataset.basemapHash !== bm.hash) {
+        $("rad-base").replaceChildren.apply($("rad-base"), entry.nodes.map(function(n) { return n.cloneNode(true); }));
+        $("rad-base").dataset.basemapHash = bm.hash;
+      }
+      return;
+    }
+    entry = {nodes:null}; radarBasemaps.set(bm.hash, entry);
+    // Bounded viewport cache, including failed fetches; never fetch on a loop tick.
+    if (radarBasemaps.size > 16) radarBasemaps.delete(radarBasemaps.keys().next().value);
+    fetch(bm.url).then(function(response) {
+      if (!response.ok) throw new Error("basemap missing");
+      return response.text();
+    }).then(function(text) {
+      var svg = new DOMParser().parseFromString(text, "image/svg+xml");
+      var root = svg.documentElement;
+      if (root.localName !== "svg" || root.getAttribute("viewBox") !== "0 0 480 480" || svg.querySelector("parsererror"))
+        throw new Error("invalid basemap");
+      // Import only the class/path contract. No style, scripts, links or colours.
+      entry.nodes = Array.from(root.children).map(function(node) {
+        var cls = node.getAttribute("class"), path = node.getAttribute("d");
+        if (node.localName !== "path" || !/^bm-(ocean|lake|coast|admin0|admin1|road)$/.test(cls) ||
+            !path || !/^[MLZ0-9, \-]+$/.test(path)) throw new Error("invalid basemap path");
+        var safe = document.createElementNS("http://www.w3.org/2000/svg", "path");
+        safe.setAttribute("class", cls); safe.setAttribute("d", path); return safe;
+      });
+      if (radarView.active && radarView.data && radarView.data.basemap && radarView.data.basemap.hash === bm.hash)
+        radarBasemapSync();
+    }).catch(function() { entry.nodes = null; }); // keep the existing graticule
+  }
   function radarCommit(d) {
     var r = d.radar;
     radarView.data = r;
     radarZoomRender();
-    var key = JSON.stringify([r.zoom, r.metersPerPixel, r.bounds, r.marker, r.rings, r.scaleBar]);
+    var key = JSON.stringify([r.zoom, r.metersPerPixel, r.bounds, r.marker, r.rings, r.scaleBar, r.basemap && r.basemap.hash]);
     if (radarView.geometry !== key) {
       radarView.geometry = key;
-      var base = $("rad-base"), over = $("rad-over"); base.replaceChildren(); over.replaceChildren();
-      for (var i = 80; i < 480; i += 80) {
-        el("line", {x1:i, y1:0, x2:i, y2:480}, base);
-        el("line", {x1:0, y1:i, x2:480, y2:i}, base);
-      }
+      var over = $("rad-over"); over.replaceChildren();
+      radarGraticule();
       var x = r.marker.x * 480, y = r.marker.y * 480;
       (r.rings || []).forEach(function (ring) {
         el("circle", {class:"ring", cx:x, cy:y, r:ring.px}, over);
@@ -2822,6 +2872,7 @@
         el("text", {x:20, y:457}, over).textContent = r.scaleBar.distDisp;
       }
     }
+    radarBasemapSync();
     $("rad-place").textContent = d.station || "—";
     var rings = r.rings || [];
     $("rad-range").textContent = rings.length ? rings[rings.length-1].label : r.scaleBar.distDisp;

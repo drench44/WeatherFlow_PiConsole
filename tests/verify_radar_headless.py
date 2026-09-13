@@ -1,7 +1,7 @@
 """Direct Python Playwright check; run from the repo root (no local server needed).
 
 ./venv-test/bin/python -m tests.verify_radar_headless [--browser /path/to/chromium]
-Screenshots and recorded fetch URLs go to --output-dir (default /tmp/wfp-radar-zoom).
+Screenshots and recorded fetch URLs go to --output-dir (default /tmp/wfp-radar-basemap).
 Kept separate from pytest so the unit suite does not require a browser install.
 """
 import argparse
@@ -424,6 +424,9 @@ def check_zoom_site(browser, html, output_dir, theme, site):
             page.wait_for_function('document.getElementById("rad-plate").dataset.state === "clear"')
             assert 'no echoes shown' in page.locator('#rad-status').inner_text().lower()
         shot('auto')
+        build()
+        page.wait_for_function('document.getElementById("rad-base").dataset.basemapHash === radarView.data.basemap.hash')
+        shot('basemap')
         # Steppers are native, focusable buttons; keyboard activation is real.
         page.keyboard.press('Tab')  # establish keyboard modality for :focus-visible
         page.locator('#rad-zoom-out').focus()
@@ -510,10 +513,91 @@ def check_zoom_site(browser, html, output_dir, theme, site):
         context.close()
         print(f'UX PASS: {name} ({theme})', flush=True)
 
+def check_basemap(browser, html, output_dir, theme):
+    """Real local SVG fetches, missing/legacy fallback, token and DOM invariants."""
+    with zoom_site_server(html, ZOOM_SITES[0]) as (emitter, state, root, url):
+        context = browser.new_context(viewport={'width':1024,'height':600}, device_scale_factor=2)
+        context.add_init_script("""window.mapURLs=[]; const original=window.fetch;
+            window.fetch=function(u,o){if(String(u).includes('basemap/'))mapURLs.push(String(u));return original(u,o);};""")
+        page=context.new_page(); errors=[]
+        page.on('pageerror',lambda error:errors.append(str(error)))
+        page.goto(url+f'/index.html?tabs=1&theme={theme}')
+        page.locator('.tab[data-screen="s-radar"]').click()
+        page.wait_for_function('radarView.data && !radarView.pending')
+        assert page.locator('#rad-base line').count()==10
+        assert not page.evaluate('mapURLs.length')
+        page.screenshot(path=str(output_dir/f'basemap-{theme}-before.png'))
+        page.locator('.tab[data-screen="s-obs"]').click()
+        # A viewed heartbeat already exists; worker emits geometry while another
+        # tab is active. The browser must defer fetching it until radar reopens.
+        (root/'radar_viewed').write_text(str(time.time()))
+        emitter._do_radar(); emitter._emit(0)
+        page.wait_for_function('!polling'); page.evaluate('poll()'); page.wait_for_function('!polling')
+        assert emitter._radar_result.basemap
+        assert not page.evaluate('mapURLs.length')
+        page.locator('.tab[data-screen="s-radar"]').click()
+        page.wait_for_function('document.getElementById("rad-base").dataset.basemapHash')
+        assert page.locator('#rad-base line').count()==0
+        for cls in ('bm-ocean','bm-coast','bm-road'):
+            assert page.locator('#rad-base .'+cls).count()>0
+        assert page.evaluate("""() => [...document.querySelectorAll('#rad-base path')].every(
+            p=>p.getAttributeNames().sort().join(',')==='class,d')""")
+        assert page.evaluate("""() => [...document.styleSheets].flatMap(s=>[...s.cssRules]).filter(
+            r=>r.selectorText && r.selectorText.includes('.bm-')).every(r=>!r.cssText.includes('--accent'))""")
+        assert page.locator('#rad-base').evaluate('(e)=>+getComputedStyle(e).zIndex') < page.locator('#rad-echo').evaluate('(e)=>+getComputedStyle(e).zIndex')
+        def colors():
+            return page.evaluate("""() => ['.bm-ocean','.bm-coast','.bm-road'].map((c,i)=> {
+                let e=document.querySelector('#rad-base '+c), p=document.createElementNS('http://www.w3.org/2000/svg','path');
+                p.style[i?'stroke':'fill']='var('+['--water-tint','--water','--ink-soft'][i]+')';
+                e.parentNode.append(p); let expected=getComputedStyle(p)[i?'stroke':'fill'];p.remove();
+                let actual=getComputedStyle(e)[i?'stroke':'fill'];if(actual!==expected)throw Error('wrong token');return actual;
+            })""")
+        first=colors()
+        page.evaluate("document.documentElement.dataset.theme = document.documentElement.dataset.theme === 'night' ? 'paper' : 'night'")
+        assert colors()!=first
+        page.evaluate('(t)=>document.documentElement.dataset.theme=t',theme)
+        if theme=='night':
+            page.emulate_media(color_scheme='dark')
+            page.evaluate('document.documentElement.removeAttribute("data-theme")')
+            assert colors()==first
+            page.evaluate('document.documentElement.dataset.theme="night"')
+        page.wait_for_function('!!radarView.timer')
+        page.evaluate("""window.baseMutations=0;window.baseNode=document.getElementById('rad-base').firstChild;
+            window.mapObserver=new MutationObserver(m=>baseMutations+=m.length);
+            mapObserver.observe(document.getElementById('rad-base'),{subtree:true,childList:true,attributes:true});
+            window.mapFetchCount=mapURLs.length;window.echoBefore=radarView.current.id;""")
+        page.wait_for_function('radarView.current.id !== echoBefore')
+        assert page.evaluate('baseMutations===0 && mapURLs.length===mapFetchCount && baseNode===document.getElementById("rad-base").firstChild')
+        page.evaluate('mapObserver.disconnect()')
+        page.screenshot(path=str(output_dir/f'basemap-{theme}-after.png'))
+        assert page.evaluate('mapURLs.length')==1
+        # Both malformed and missing artifacts degrade to the exact old graticule.
+        for suffix,body in (('e','<svg>broken'),('f',None)):
+            fake=suffix*20
+            r=dict(emitter._radar_result.basemap,hash=fake,url='radar/basemap/'+fake+'.svg')
+            if body:
+                page.route('**/'+fake+'.svg',lambda route:route.fulfill(body=body,content_type='image/svg+xml'))
+            emitter._radar_result=emitter._radar_result._replace(basemap=r)
+            emitter._emit(0)
+            page.wait_for_function('!polling');page.evaluate('poll()');page.wait_for_function('!polling')
+            page.wait_for_function('(h)=>radarBasemaps.has(h)',arg=fake)
+            page.wait_for_timeout(150)
+            assert page.locator('#rad-base line').count()==10
+            assert page.locator('#rad-echo').evaluate('(e)=>!e.hidden && e.complete')
+        page.screenshot(path=str(output_dir/f'basemap-{theme}-missing.png'))
+        emitter._radar_result=emitter._radar_result._replace(basemap=None);emitter._emit(0)
+        page.wait_for_function('!polling');page.evaluate('poll()');page.wait_for_function('!polling')
+        assert page.locator('#rad-base line').count()==10
+        page.screenshot(path=str(output_dir/f'basemap-{theme}-legacy.png'))
+        assert errors==[],errors
+        context.close()
+        print(f'BASEMAP PASS: {theme}; active-only fetch, tokens/theme switch, echo stacking, untouched loop DOM, missing/malformed/legacy fallback',flush=True)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--browser')
-    parser.add_argument('--output-dir', type=Path, default=Path('/tmp/wfp-radar-zoom'))
+    parser.add_argument('--output-dir', type=Path, default=Path('/tmp/wfp-radar-basemap'))
     args = parser.parse_args()
     args.output_dir.mkdir(parents=True, exist_ok=True)
     html = (Path(__file__).resolve().parents[1] / 'design/almanac/console_live.html').read_text()
@@ -587,6 +671,7 @@ def main():
         for theme in ('light', 'night'):
             check_source_switch(browser, html, args.output_dir, theme)
         for theme in ('paper', 'night'):
+            check_basemap(browser, html, args.output_dir, theme)
             for site in ZOOM_SITES:
                 check_zoom_site(browser, html, args.output_dir, theme, site)
         browser.close()

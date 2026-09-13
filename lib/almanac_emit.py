@@ -43,6 +43,8 @@ from threading import RLock as _RLock   # kept apart from `threading`, which tes
 import time
 import pytz
 
+from lib.radar_geometry import world_point
+
 # ==============================================================================
 # CONFIGURATION
 # ==============================================================================
@@ -594,8 +596,7 @@ def _radar_viewport(lat, lon, zoom, size):
     lat = max(-85.05112878, min(85.05112878, lat))
     n = 2 ** zoom
     world = n * 256
-    cx = (lon + 180) / 360 * world
-    cy = (1 - math.asinh(math.tan(math.radians(lat))) / math.pi) / 2 * world
+    cx, cy = world_point(lat, lon, zoom)
     left, top = cx - size / 2, cy - size / 2
     tiles = [(tx % n, ty, int(tx * 256 - left), int(ty * 256 - top))
              for ty in range(max(0, math.floor(top / 256)),
@@ -661,10 +662,10 @@ def _radar_nexrad(lat, lon, unit):
 _RadarResult = namedtuple('_RadarResult',
     'available reason frames latest ts_frame center zoom mpp bounds scalebar rings nexrad ts_fetch '
     'source_id provider attribution attribution_url cadence stale_sec legend partial_coverage '
-    'max_zoom zoom_desired zoom_auto_level',
+    'max_zoom zoom_desired zoom_auto_level basemap',
     defaults=('rainviewer', 'rainviewer', 'RainViewer', 'https://www.rainviewer.com/',
               RADAR_RAINVIEWER_FRAME_INTERVAL_SEC, RADAR_RAINVIEWER_STALE_SEC, _RADAR_LEGEND, False,
-              7, None, 7))
+              7, None, 7, None))
 _RADAR_NONE = _RadarResult(False, 'no data yet', (), None, None, None, None, None,
                            None, None, None, None, None)
 
@@ -1064,6 +1065,12 @@ class AlmanacEmitter:
             self._schedule_retry('radar', self._check_radar, RADAR_RETRY_SEC)
         if newest < advertised and previous.source_id == source and previous.ts_frame == newest:
             fetched = previous.ts_fetch  # a failed newer frame is not a successful refresh
+        try:
+            from lib.radar_basemap import ensure
+            ctx['basemap'] = ensure(ctx, RADAR_DIR)
+        except Exception as error:
+            ctx['basemap'] = None
+            Logger.warning(f'almanac_emit: basemap unavailable - {error}')
         def publish():
             if source == 'iem-mrms-lcref' and time.time() - newest > settings['stale_sec']:
                 return False
@@ -1071,6 +1078,7 @@ class AlmanacEmitter:
                 latest['id'], newest, ctx['center'], ctx['zoom'], ctx['mpp'], ctx['bounds'],
                 ctx['bar'], ctx['rings'], ctx['nexrad'], fetched, source, **settings,
                 zoom_desired=ctx['desired'], zoom_auto_level=ctx['auto_zoom'],
+                basemap=ctx.get('basemap'),
                 partial_coverage=source == 'iem-mrms-lcref' and any(
                     ctx['bounds'][k] < _RADAR_IEM_DOMAIN[k] if k in ('w', 's') else
                     ctx['bounds'][k] > _RADAR_IEM_DOMAIN[k] for k in ('w', 'e', 's', 'n')))
@@ -1107,6 +1115,21 @@ class AlmanacEmitter:
                 path = os.path.join(RADAR_DIR, f['id'] + '.png')
                 if os.path.isfile(path):
                     os.utime(path, (time.time(), time.time()))
+        current_map = self._radar_result.basemap
+        old_map = previous.basemap
+        map_root = os.path.join(RADAR_DIR, 'basemap')
+        map_keep = current_map['hash'] if current_map else None
+        if old_map and old_map['hash'] != map_keep:
+            retired = os.path.join(map_root, old_map['hash'] + '.svg')
+            if os.path.isfile(retired):
+                os.utime(retired, (time.time(), time.time()))
+        if os.path.isdir(map_root):
+            for name in os.listdir(map_root):
+                if not re.fullmatch(r'[0-9a-f]{20}\.svg', name):
+                    continue
+                path = os.path.join(map_root, name)
+                if name[:-4] != map_keep and time.time() - os.path.getmtime(path) >= RADAR_CACHE_GRACE_SEC:
+                    os.unlink(path)
         for source in _RADAR_SOURCES.values():
             root = os.path.join(RADAR_DIR, source['legend']['id'])
             for directory, _, names in os.walk(root):
@@ -1194,7 +1217,8 @@ class AlmanacEmitter:
         gaps = [b - a for a, b in zip(complete, complete[1:]) if b > a]
         legend = snap.legend
         age = int(now - snap.ts_frame) if snap.ts_frame is not None else None
-        return dict(available=snap.available, reason=snap.reason,
+        return dict(**({'basemap': snap.basemap} if snap.basemap else {}),
+            available=snap.available, reason=snap.reason,
             sourceId=snap.source_id, attribution=snap.attribution, attributionUrl=snap.attribution_url,
             provider=snap.provider, cadenceSec=snap.cadence, frameSpacingSec=median(gaps) if gaps else None,
             historyGaps=any(g != snap.cadence for g in gaps),
