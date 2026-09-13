@@ -82,8 +82,17 @@ until a power-cycle. Two things guard against it:
    pins `wifi.powersave = 2` for every profile. `dmesg | grep power_mgmt` should end
    with `power save disabled`.
 2. **A keepalive timer** (`wifi-keepalive.sh` / `.service` / `.timer` in this directory)
-   pings the default gateway every minute and, after three consecutive failures,
-   re-associates through NetworkManager (cycling the radio if that fails). Install:
+   pings another always-on LAN host every minute and, after three consecutive
+   failures, re-associates through NetworkManager. It probes a *peer*, not the
+   gateway, because the gateway can still answer while the Pi is cut off from
+   other LAN clients. The peer is site-specific and is not baked into the script:
+   set it before enabling the timer, e.g.
+
+   ```
+   echo 'WIFI_PEER=<ip-of-another-always-on-lan-host>' | sudo tee /etc/default/wifi-keepalive
+   ```
+
+   With `WIFI_PEER` unset the check logs that and exits without probing. Install:
 
    ```
    sudo install -m 0755 wifi-keepalive.sh /usr/local/sbin/

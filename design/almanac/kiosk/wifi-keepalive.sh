@@ -7,7 +7,10 @@
 # Configure via /etc/default/wifi-keepalive or a systemd Environment override.
 set -eu
 IFACE="${WIFI_IFACE:-wlan0}"
-PEER="${WIFI_PEER:-192.168.0.215}"
+# The peer is site-specific (another always-on LAN host), so it is never baked
+# in here: set WIFI_PEER in /etc/default/wifi-keepalive. Unset means "nothing to
+# probe" — the check exits cleanly rather than guessing a host.
+PEER="${WIFI_PEER:-}"
 FAIL_LIMIT="${WIFI_FAIL_LIMIT:-3}"
 # A peer outage must not cause repeated wifi bounces every three minutes.
 COOLDOWN="${WIFI_RECOVERY_COOLDOWN:-900}"
@@ -19,6 +22,10 @@ if [[ ! "$FAIL_LIMIT" =~ ^[1-9][0-9]{0,5}$ ]] ||
    [[ ! "$COOLDOWN" =~ ^[1-9][0-9]{0,5}$ ]]; then
   log "invalid WIFI_FAIL_LIMIT or WIFI_RECOVERY_COOLDOWN; refusing recovery"
   exit 1
+fi
+if [ -z "$PEER" ]; then
+  log "WIFI_PEER is not set (configure it in /etc/default/wifi-keepalive); nothing to probe"
+  exit 0
 fi
 # Serialize timer and manual invocations, including the recovery wait.
 exec 9>/run/wifi-keepalive.lock
