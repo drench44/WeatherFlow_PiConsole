@@ -4,6 +4,20 @@ Changes in this fork's Almanac work, newest first. The upstream WeatherFlow
 PiConsole keeps its own release notes; entries under **Core** below are fixes
 to shared upstream code that the classic console benefits from too.
 
+## 2026-09-13
+
+### Console
+- **No more phantom forecast on a cold boot.** The page ships as the design
+  artboard, and until the first data frame arrived it kept showing the artboard's
+  sample values — 64.0°, "Rising 4.6° per hour", **Low 50° / High 82°**, "Clear &
+  Sunny", a July date, sunrise 05:43 — as if they were real, behind only a small
+  STALE mark. On a freshly rebooted Pi (or with the engine down) that read as a
+  plausible, wildly wrong forecast. The console now paints its no-data pose
+  (dashes everywhere, gauges neutral) before the first poll, using the same
+  missing-value rules every panel already follows, so it never shows a number it
+  hasn't received. The headless verifier now guards this (a cold load with no
+  `wx.json` must show no sample values).
+
 ## 2026-09-12
 
 ### Console

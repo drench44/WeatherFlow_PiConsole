@@ -594,6 +594,36 @@ def check_basemap(browser, html, output_dir, theme):
         print(f'BASEMAP PASS: {theme}; active-only fetch, tokens/theme switch, echo stacking, untouched loop DOM, missing/malformed/legacy fallback',flush=True)
 
 
+def check_cold_load_no_data(browser, html):
+    """Cold boot / engine down: with no wx.json the page must paint the no-data
+    pose, never the design artboard's sample values (64.0°, High 82°, "Clear &
+    Sunny", a July date) that ship in the markup. Guards the render({}) that runs
+    before the first poll — without it those read as a real report behind only a
+    small STALE mark."""
+    context = browser.new_context(viewport={'width': 1024, 'height': 600})
+    # Playwright runs the LAST registered matching route first: page first, wx.json last.
+    context.route('https://cold.test/**', lambda route: route.fulfill(body=html, content_type='text/html'))
+    context.route('https://cold.test/wx.json**', lambda route: route.fulfill(status=404, body='missing'))
+    page = context.new_page()
+    errors = []
+    page.on('pageerror', lambda error: errors.append(str(error)))
+    page.goto('https://cold.test/index.html?tabs=1')
+    page.wait_for_timeout(300)   # well before any poll could settle
+    shown = page.evaluate("""() => {
+        const t = k => (document.querySelector('[data-k=' + k + ']') || {}).textContent;
+        return {temp: t('temp'), hi: t('fcHigh'), lo: t('fcLow'), date: t('date'),
+                cond: t('conditions'), trend: document.getElementById('trend-word').textContent};
+    }""")
+    assert all(v == '—' for v in shown.values()), f'design placeholders leaked on cold load: {shown}'
+    body = page.evaluate('document.body.innerText').lower()
+    for sample in ('82°', '64.0', 'clear & sunny', '31 jul', '4.6°'):
+        assert sample not in body, f'design sample value {sample!r} visible with no data'
+    page.wait_for_timeout(2500)  # freshness settles: a never-loaded page must read as stale
+    assert page.locator('#staleflag').evaluate('e => e.classList.contains("on")'), 'no-data page not marked stale'
+    assert errors == [], errors
+    context.close()
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--browser')
@@ -667,6 +697,7 @@ def main():
         assert errors == [], errors
         report['no-tabs'] = page.evaluate('pollURLs')
         context.close()
+        check_cold_load_no_data(browser, html)
         check_loop(browser, html)
         for theme in ('light', 'night'):
             check_source_switch(browser, html, args.output_dir, theme)
@@ -677,7 +708,8 @@ def main():
         browser.close()
     (args.output_dir / 'poll-urls.json').write_text(json.dumps(report, indent=2))
     print('PASS: latest radar light/dark, tab view signal on/off, render heartbeat, other tabs, '
-          'no-tabs default, loop (cycle/pause/off-tab idle), hybrid source staging/abandoned loads, '
+          'no-tabs default, cold-load no-data pose (no design sample values), '
+          'loop (cycle/pause/off-tab idle), hybrid source staging/abandoned loads, '
           'palette fidelity per paint, Updated/relative times, clear/stale/legacy, '
           '1024x600 alert layout in both themes; five-site zoom paper/night, real loopback persistence, '
           'pending/confirmed/coalescing/reset, keyboard/focus, bounds/caps/restore, geometry/paused history, '

@@ -2988,6 +2988,12 @@
         if (gen === pollGen) { polling = false; updateFreshness(); }
       });
   }
+  /* Paint the no-data state BEFORE the first frame. The markup ships with the
+     design artboard's sample values (64.0°, High 82°, "Clear & Sunny", a July
+     date...); on a cold boot or with the engine down those would otherwise read
+     as a real report behind only a small STALE mark. Every renderer already maps
+     a missing key to DASH, so an empty payload is the honest initial pose. */
+  render({});
   poll();
   setInterval(poll, POLL_MS);
   setInterval(updateFreshness, 1000);   /* independent of any fetch ever settling */
