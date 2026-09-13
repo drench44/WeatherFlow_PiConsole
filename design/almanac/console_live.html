@@ -570,13 +570,19 @@
   #s-radar .sc-head { flex-shrink:0; padding-left:13px; padding-right:13px; }
   #s-radar .sc-body { display: block; gap: 0; padding: 0; }
   .rad-plate { position: relative; width: 956px; height: 490px;
-    margin: 0; border: 1px solid var(--rule); background: var(--paper); }
+    margin: 0; border: 1px solid var(--rule); background: var(--paper); touch-action:none; overflow:hidden; }
   .rad-plate::before { content: ""; position: absolute; inset: 4px;
     border: 1px solid var(--rule-faint); pointer-events: none; z-index: 3; }
   :root:not([data-theme="night"]) .rad-plate { box-shadow: inset 0 0 0 480px rgba(38,34,24,0.035); }
   @media (prefers-color-scheme: dark) {
     :root:not([data-theme="paper"]):not([data-theme="light"]) .rad-plate { box-shadow: none; }
   }
+  .rad-stack { position:absolute; inset:0; transform-origin:0 0; pointer-events:none; }
+  .rad-recenter { position:absolute; left:calc(50% + 38px); bottom:12px; z-index:4; transform:translateX(-50%); }
+  .rad-recenter[hidden], .rad-updating[hidden] { display:none; }
+  .rad-updating { position:absolute; left:50%; top:76px; transform:translateX(-50%); z-index:4;
+    padding:3px 7px; background:var(--plate-scrim); color:var(--ink-soft); font:12px var(--sans); }
+  .rad-over .rad-station-accent { fill:none; stroke:var(--accent); stroke-width:1.5; }
   .rad-base, .rad-echo, .rad-over { position: absolute; inset: 0; width: 100%; height: 100%; }
   .rad-base { z-index: 0; }
   .rad-echo { z-index: 1; }
@@ -1147,9 +1153,13 @@
     <div class="sc-head"><span class="sc-title">Radar · Reflectivity</span><span class="sc-status" id="rad-status">As of <span id="rad-asof"></span></span></div>
     <div class="sc-body">
       <figure class="rad-plate" id="rad-plate" data-state="loading">
-        <svg class="rad-base" id="rad-base" viewBox="0 0 956 490" aria-hidden="true"></svg>
+        <div class="rad-stack" id="rad-stack">
+        <svg class="rad-base" id="rad-base" viewBox="0 0 956 490" preserveAspectRatio="none" aria-hidden="true"></svg>
         <canvas class="rad-echo" id="rad-echo" width="956" height="490" aria-label="Radar reflectivity" hidden></canvas>
-        <svg class="rad-over" id="rad-over" viewBox="0 0 956 490" aria-label="Station, range rings and distance scale"></svg>
+        <svg class="rad-over" id="rad-over" viewBox="0 0 956 490" preserveAspectRatio="none" aria-label="Station, range rings and distance scale"></svg>
+        </div>
+        <button class="rad-step rad-recenter" id="rad-recenter" type="button" aria-label="Recenter on station" hidden>↩</button>
+        <span class="rad-updating" id="rad-updating" role="status" hidden>Updating</span>
         <div class="rad-src" id="rad-src" data-mode="mosaic" data-state="confirmed" role="group" aria-label="Radar source">
           <button class="rad-seg" id="rad-src-mosaic" type="button" aria-pressed="true">Mosaic</button>
           <button class="rad-seg" id="rad-src-site" type="button" aria-pressed="false" disabled>No site</button>
@@ -1248,9 +1258,10 @@
     /* the radar loop runs only while its tab is open (idle off-tab, Pi-friendly) */
     if (typeof radarLoopSync === "function" && radarView) {
       radarView.active = (id === "s-radar");
-      if (!radarView.active) radarRelease();
+      if (!radarView.active) { radarGestureCancel(); radarRelease(); }
       else if (radarView.data) radarPreload(radarView.data);
       radarBasemapSync();
+      radarIdleSync(false);
       radarLoopSync();
     }
   }
@@ -2752,6 +2763,12 @@
     if (step !== 0 && target === current) return;
     if (step === 0 && (radarZoom.desired === "auto" || (radarZoom.desired === null && r.zoomAuto))) return;
     radarZoom.desired = target; radarZoom.sent = false;
+    if (radarGesture.state==='committing') {
+      // Stepper/wheel supersede the same intent a pinch writes.
+      var scale=2**((target==='auto' ? r.zoomAutoLevel : target)-r.zoom);
+      radarTransform(scale,(1-scale)*$('rad-plate').clientWidth/2,(1-scale)*$('rad-plate').clientHeight/2,true);
+      radarGesturePending();
+    }
     radarZoomRender(); // rapid input coalesces into the next ordinary active poll
   }
   $("rad-zoom-in").addEventListener("click", function () { radarZoomChange(1); });
@@ -2763,6 +2780,214 @@
     var step = {"+":1, "=":1, "-":-1, "−":-1, "_":-1, "0":0}[e.key];
     if (step !== undefined) { e.preventDefault(); radarZoomChange(step); }
   });
+
+  // Exact Mercator mirror of lib/radar_geometry.py (independent CSS axes).
+  var RAD_MAX_LAT = 85.05112878;
+  function radarWorldPoint(lat, lon, zoom) {
+    lat = Math.max(-RAD_MAX_LAT, Math.min(RAD_MAX_LAT, lat));
+    var world = 256 * 2 ** zoom;
+    return [(lon + 180) / 360 * world,
+            (1 - Math.asinh(Math.tan(lat * Math.PI / 180)) / Math.PI) / 2 * world];
+  }
+  function radarWorldInverse(x, y, zoom) {
+    var world = 256 * 2 ** zoom;
+    return {lat:Math.atan(Math.sinh(Math.PI * (1 - 2 * y / world))) * 180 / Math.PI,
+            lon:x / world * 360 - 180};
+  }
+  var radarCenter = {desired:null, sent:false};
+  var radarGesture = {state:'idle', pointers:new Map(), scale:1, x:0, y:0,
+                      idleTimer:null, updateTimer:null, springTimer:null, wheelTimer:null};
+  var RAD_CONTROLS = '.rad-src,.rad-src-cap,.rad-legend,.rad-loop,.rad-zoom,.rad-recenter';
+  function radarCenterMatches(r, desired) {
+    return desired === null || (desired === 'station' ? r.centered !== false :
+      Math.abs(r.center.lat-desired.lat)<1e-8 && Math.abs(r.center.lon-desired.lon)<1e-8);
+  }
+  function radarIntentMatches(r) {
+    var z=radarZoom.desired;
+    return radarCenterMatches(r,radarCenter.desired) && (z===null ||
+      (z==='auto' ? r.zoomAuto : !r.zoomAuto && r.zoomDesired===z && r.zoom===clamp(z,r.zoomMin,r.zoomMax)));
+  }
+  function radarIdleSync(reset) {
+    if (reset) { clearTimeout(radarGesture.idleTimer); radarGesture.idleTimer=null; }
+    if (!radarView.active || document.hidden || !radarView.data || radarView.data.centered!==false) {
+      clearTimeout(radarGesture.idleTimer); radarGesture.idleTimer=null; return;
+    }
+    if (!radarGesture.idleTimer && !radarGesture.pointers.size) {
+      radarGesture.idleTimer=setTimeout(function() {
+        radarGesture.idleTimer=null; radarRecenter();
+      },90000);
+    }
+  }
+  function radarCenterRender() {
+    var r=radarView.data;
+    if (radarCenter.desired!==null && radarCenter.sent && radarCenterMatches(r,radarCenter.desired)) {
+      radarCenter.desired=null; radarCenter.sent=false;
+    }
+    $('rad-recenter').hidden=!r || r.centered!==false;
+    radarIdleSync(false);
+  }
+  function radarTransform(s,x,y,spring) {
+    var g=radarGesture, stack=$('rad-stack');
+    clearTimeout(g.springTimer); g.springTimer=null;
+    stack.style.transition=spring && !radarReduced() ? 'transform 160ms ease-out' : '';
+    g.scale=s; g.x=x; g.y=y;
+    stack.style.transform=s===1 && x===0 && y===0 ? '' : 'translate('+x+'px,'+y+'px) scale('+s+')';
+    if (stack.style.transition) g.springTimer=setTimeout(function() {
+      stack.style.transition=''; g.springTimer=null;
+    },170);
+  }
+  function radarGestureFence() {
+    // Invalidate pending image/history decodes using the existing generation guards.
+    ++radarView.generation; radarView.pending=null; radarView.wantedKey=null;
+    radarView.loadKey=null; radarView.loadToken=null;
+    radarStopLoop(true);
+  }
+  function radarGestureReset(spring) {
+    var g=radarGesture;
+    clearTimeout(g.updateTimer); g.updateTimer=null;
+    $('rad-updating').hidden=true; $('rad-plate').setAttribute('aria-busy','false');
+    g.state='idle'; radarTransform(1,0,0,spring);
+    radarIdleSync(false); radarLoopSync();
+  }
+  function radarGestureCancel() {
+    var g=radarGesture;
+    var ids=Array.from(g.pointers.keys()); g.pointers.clear();
+    ids.forEach(function(id) {
+      if ($('rad-plate').hasPointerCapture(id)) $('rad-plate').releasePointerCapture(id);
+    });
+    if (g.state==='gesturing' && g.before) {
+      Object.assign(radarZoom,g.before.zoom); Object.assign(radarCenter,g.before.center);
+    } clearTimeout(g.wheelTimer); g.wheelTimer=null;
+    clearTimeout(g.idleTimer); g.idleTimer=null;
+    // Posted intent may already be building. Cancel only the preview, never pretend
+    // an external write was undone; the next visible payload remains authoritative.
+    if (g.state!=='idle') radarGestureFence();
+    radarGestureReset(false); radarZoomRender();
+  }
+  function radarGesturePending() {
+    var g=radarGesture;
+    if (radarCenter.desired===null && radarZoom.desired===null) { radarGestureReset(true); return; }
+    g.state='committing'; radarGestureFence();
+    $('rad-plate').setAttribute('aria-busy','true');
+    clearTimeout(g.updateTimer);
+    g.updateTimer=setTimeout(function() { $('rad-updating').hidden=false; },2500);
+    radarZoomRender(); radarIdleSync(true);
+  }
+  function radarRecenter() {
+    if (!radarView.active || document.hidden || !radarView.data) return;
+    radarCenter.desired='station'; radarCenter.sent=false;
+    radarGesturePending();
+  }
+  $('rad-recenter').addEventListener('click',radarRecenter);
+  function radarEffectiveZoom() {
+    var r=radarView.data, z=radarZoom.desired;
+    return z===null ? r.zoom : z==='auto' ? r.zoomAutoLevel : clamp(z,r.zoomMin,r.zoomMax);
+  }
+  function radarEffectiveCenter() {
+    var r=radarView.data, c=radarCenter.desired;
+    return c && c!=='station' ? c : c==='station' ? radarStationCenter() : r.center;
+  }
+  function radarStationCenter() {
+    var r=radarView.data;
+    if (r.centered!==false) return r.center;
+    // Only used for the soft distance cap/recenter preview; actual pan conversion
+    // always starts at the exact payload/desired center, never at the marker.
+    var w=radarWorldPoint(r.center.lat,r.center.lon,r.zoom);
+    return radarWorldInverse(w[0]+(r.marker.x-.5)*956,w[1]+(r.marker.y-.5)*490,r.zoom);
+  }
+  function radarPan(dx,dy,start) {
+    var plate=$('rad-plate'), sx=plate.clientWidth/956, sy=plate.clientHeight/490;
+    var world=256*2**start.zoom, c=radarWorldPoint(start.center.lat,start.center.lon,start.zoom);
+    var station=radarStationCenter(), home=radarWorldPoint(station.lat,station.lon,start.zoom);
+    var nx=c[0]-dx/sx, ny=c[1]-dy/sy;
+    var vx=nx-home[0], vy=ny-home[1], distance=Math.hypot(vx,vy), cap=1.5*Math.hypot(956,490);
+    if (distance>cap) { nx=home[0]+vx*cap/distance; ny=home[1]+vy*cap/distance; }
+    // Keep the entire committed crop inside the world; preview alone resists.
+    nx=clamp(nx,478,world-478); ny=clamp(ny,245,world-245);
+    var legalX=(c[0]-nx)*sx, legalY=(c[1]-ny)*sy;
+    var center=radarWorldInverse(nx,ny,start.zoom); center.lat=clamp(center.lat,-RAD_MAX_LAT,RAD_MAX_LAT);
+    return {center:center,x:legalX,y:legalY,previewX:legalX+.3*(dx-legalX),previewY:legalY+.3*(dy-legalY)};
+  }
+  function radarGestureStartMode() {
+    var g=radarGesture, pts=Array.from(g.pointers.values());
+    g.start={scale:g.scale,x:g.x,y:g.y,zoom:radarEffectiveZoom(),center:radarEffectiveCenter()};
+    g.mode=pts.length>=2 ? 'pinch' : 'pan';
+    g.start.point=pts[0]; g.moved=false; g.pan=null;
+    if (g.mode==='pinch') {
+      g.start.distance=Math.max(1,Math.hypot(pts[1].x-pts[0].x,pts[1].y-pts[0].y));
+      var box=$('rad-plate').getBoundingClientRect();
+      g.start.mid={x:(pts[0].x+pts[1].x)/2-box.left-$('rad-plate').clientLeft,
+                   y:(pts[0].y+pts[1].y)/2-box.top-$('rad-plate').clientTop};
+      g.rawScale=1;
+    }
+  }
+  function radarGestureFinishMode() {
+    var g=radarGesture, st=g.start, r=radarView.data;
+    if (!g.moved) return;
+    if (g.mode==='pan' && g.pan) {
+      radarCenter.desired=g.pan.center; radarCenter.sent=false;
+      radarTransform(st.scale,st.x+g.pan.x,st.y+g.pan.y,true);
+    } else if (g.mode==='pinch') {
+      var target=clamp(st.zoom+Math.round(Math.log2(g.rawScale)),r.zoomMin,r.zoomMax);
+      if (target!==st.zoom) { radarZoom.desired=target; radarZoom.sent=false; }
+      var scale=2**(target-st.zoom), mid=st.mid;
+      radarTransform(st.scale*scale,mid.x+(st.x-mid.x)*scale,mid.y+(st.y-mid.y)*scale,true);
+    }
+  }
+  $('rad-plate').addEventListener('pointerdown',function(e) {
+    radarIdleSync(true);
+    if (e.target.closest(RAD_CONTROLS) || !radarView.active || document.hidden || !radarView.good ||
+        $('rad-zoom').hidden || (e.pointerType==='mouse' && e.button!==0)) return;
+    var g=radarGesture;
+    if (g.pointers.size>=2) return;
+    e.preventDefault();
+    if (g.pointers.size) radarGestureFinishMode();
+    else {
+      g.before={zoom:Object.assign({},radarZoom),center:Object.assign({},radarCenter)};
+      radarGestureFence(); clearTimeout(g.updateTimer); $('rad-updating').hidden=true;
+    }
+    g.state='gesturing'; g.pointers.set(e.pointerId,{x:e.clientX,y:e.clientY});
+    // Synthetic PointerEvents have no UA-active pointer; real touches/mouse capture.
+    try { $('rad-plate').setPointerCapture(e.pointerId); } catch(error) { if (error.name!=='NotFoundError') throw error; }
+    radarGestureStartMode(); radarIdleSync(true);
+  });
+  $('rad-plate').addEventListener('pointermove',function(e) {
+    var g=radarGesture; if (!g.pointers.has(e.pointerId)) return;
+    e.preventDefault(); g.pointers.set(e.pointerId,{x:e.clientX,y:e.clientY}); radarIdleSync(true);
+    var pts=Array.from(g.pointers.values()), st=g.start;
+    if (g.mode==='pan') {
+      var dx=pts[0].x-st.point.x,dy=pts[0].y-st.point.y;
+      if (!g.moved && Math.hypot(dx,dy)<3) return;
+      g.moved=true; g.pan=radarPan(dx,dy,st);
+      radarTransform(st.scale,st.x+g.pan.previewX,st.y+g.pan.previewY,false);
+    } else {
+      g.moved=true; g.rawScale=Math.max(.01,Math.hypot(pts[1].x-pts[0].x,pts[1].y-pts[0].y)/st.distance);
+      var r=radarView.data, legal=clamp(g.rawScale,2**(r.zoomMin-st.zoom),2**(r.zoomMax-st.zoom));
+      var scale=legal+.3*(g.rawScale-legal), mid=st.mid;
+      radarTransform(st.scale*scale,mid.x+(st.x-mid.x)*scale,mid.y+(st.y-mid.y)*scale,false);
+    }
+  },{passive:false});
+  $('rad-plate').addEventListener('pointerup',function(e) {
+    var g=radarGesture; if (!g.pointers.has(e.pointerId)) return;
+    radarGestureFinishMode(); g.pointers.delete(e.pointerId);
+    if ($('rad-plate').hasPointerCapture(e.pointerId)) $('rad-plate').releasePointerCapture(e.pointerId);
+    if (g.pointers.size) radarGestureStartMode();
+    else radarGesturePending();
+  });
+  $('rad-plate').addEventListener('pointercancel',radarGestureCancel);
+  $('rad-plate').addEventListener('lostpointercapture',function(e) {
+    if (radarGesture.pointers.has(e.pointerId)) radarGestureCancel();
+  });
+  $('rad-plate').addEventListener('wheel',function(e) {
+    if (!radarView.active || e.target.closest(RAD_CONTROLS)) return;
+    e.preventDefault(); radarIdleSync(true);
+    if (!e.deltaY || radarGesture.pointers.size) return;
+    clearTimeout(radarGesture.wheelTimer);
+    var step=e.deltaY<0 ? 1 : -1;
+    radarGesture.wheelTimer=setTimeout(function() {
+      radarGesture.wheelTimer=null; radarZoomChange(step);
+    },120);
+  },{passive:false});
 
   /* Pre-decoded observed scans, hard-cut on a monotonic rAF clock.
      At 956×490, sixteen bitmaps use ~29 MiB; no image work on a tick. */
@@ -2840,7 +3065,7 @@
   }
   function radarCouldLoop() {
     var ready=radarReady();
-    return radarView.active && !radarView.pending && !radarView.failed && !document.hidden &&
+    return radarGesture.state==='idle' && radarView.active && !radarView.pending && !radarView.failed && !document.hidden &&
       ready.length >= 2 && ready.some(f => f.hasEcho) && !radarView.data.stale;
   }
   function radarStopLoop(showLatest) {
@@ -2898,7 +3123,10 @@
     else radarView.paused=!radarView.paused;
     radarLoopSync();
   });
-  document.addEventListener("visibilitychange",radarLoopSync);
+  document.addEventListener("visibilitychange",function() {
+    if (document.hidden) radarGestureCancel();
+    radarIdleSync(false); radarLoopSync();
+  });
   window.matchMedia("(prefers-reduced-motion: reduce)").addEventListener("change",function() {
     radarView.singleSweep=false; radarStopLoop(true); radarLoopSync();
   });
@@ -2944,6 +3172,10 @@
       if ($("s-radar").classList.contains("active")) activate("s-obs");
       return;
     }
+    // Freeze the complete presentation, including same-frame polls, under fingers.
+    // Reject superseded centers/zooms before they can change generation or pixels.
+    if (radarGesture.state==='gesturing' ||
+        (radarGesture.state==='committing' && !radarIntentMatches(r))) return;
     var frame = (r.frames || []).find(function (f) { return f.id === r.latest && f.complete && f.url; });
     if (!frame) return;
     if (radarView.data && radarView.good && r.sourceId === radarView.data.sourceId &&
@@ -3073,8 +3305,11 @@
   function radarCommit(d) {
     var r = d.radar;
     radarView.data = r;
-    radarZoomRender();
-    var key = JSON.stringify([r.zoom, r.metersPerPixel, r.bounds, r.marker, r.rings, r.scaleBar, r.basemap && r.basemap.hash]);
+    var settled=radarGesture.state==='committing' && radarIntentMatches(r) &&
+      radarView.good && radarView.good.id===r.latest && !radarView.pending;
+    radarZoomRender(); radarCenterRender();
+    if (settled) radarGestureReset(false);
+    var key = JSON.stringify([r.centered, r.zoom, r.metersPerPixel, r.bounds, r.marker, r.rings, r.scaleBar, r.basemap && r.basemap.hash]);
     if (radarView.geometry !== key) {
       radarView.geometry = key;
       var over = $("rad-over"); over.replaceChildren();
@@ -3084,7 +3319,8 @@
         el("circle", {class:"ring", cx:x, cy:y, r:ring.px}, over);
         if (y - ring.px - 5 >= 76 && y - ring.px - 5 <= 412) el("text", {x:x+8, y:y-ring.px-5}, over).textContent = ring.label;
       });
-      el("path", {class:"rad-cross", d:"M"+(x-18)+","+y+"h36 M"+x+","+(y-18)+"v36"}, over);
+      if (r.centered!==false) el("path", {class:"rad-cross", d:"M"+(x-18)+","+y+"h36 M"+x+","+(y-18)+"v36"}, over);
+      if (r.centered===false) el("circle", {class:"rad-station-accent", cx:x, cy:y, r:10}, over);
       el("circle", {class:"rad-station", cx:x, cy:y, r:6}, over);
       el("circle", {class:"rad-dot", cx:x, cy:y, r:2}, over);
       if (r.scaleBar && r.scaleBar.pixels) {
@@ -3164,9 +3400,15 @@
     var ack = reportRender; reportRender = false;
     var radarActive = $("s-radar").classList.contains("active");
     var zoomQuery = "";
-    if (radarActive && radarZoom.desired !== null) {
+    if (radarActive && radarGesture.state!=='gesturing' && radarZoom.desired !== null) {
       zoomQuery = "&radarZoom=" + encodeURIComponent(radarZoom.desired);
       radarZoom.sent = true;
+    }
+    if (radarActive && radarGesture.state!=='gesturing' && radarCenter.desired !== null) {
+      var center=radarCenter.desired;
+      zoomQuery += "&radarCenter=" + encodeURIComponent(center==='station' ? center :
+        center.lat.toFixed(10)+','+center.lon.toFixed(10));
+      radarCenter.sent=true;
     }
     if (radarActive && radarSource.desired !== null) {
       zoomQuery += "&radarSource=" + radarSource.desired; radarSource.sent=true;

@@ -7,6 +7,22 @@ to shared upstream code that the classic console benefits from too.
 ## 2026-09-13
 
 ### Radar
+- **Touch: pinch to zoom, drag to pan.** On the Pi's touchscreen (and with a mouse
+  or trackpad in a browser) a two-finger pinch scales the whole plate live about your
+  fingers and, on release, snaps to the nearest zoom level — the same remembered zoom
+  the +/− stepper sets, capped per source with a rubber-band at the limits. A
+  one-finger drag moves the map 1:1 with no inertia (every pan is a real
+  re-composite around the lifted point, so momentum would be dishonest); on release
+  the offset converts to a lat/lon through the exact Mercator projection the emitter
+  uses, and the emitter re-centers the crop there — basemap, rings, scale bar and
+  echoes all follow, and the scale stays truthful as latitude changes. Your station's
+  marker moves to its true position with an accent ring, the meaningless plate-center
+  crosshair goes away while panned, and a quiet "Recenter on station" button appears
+  (it also auto-recenters after 90 s idle). Pan is deliberately transient — a wall
+  display wakes on its own station — while zoom persists. The control clusters never
+  start a gesture, the page never scrolls or browser-zooms, the loop freezes on the
+  newest frame during a gesture and resumes when the new frame lands, and
+  reduced-motion turns the spring-backs into snaps.
 - **Radar top-band cleanup.** The masthead content was overflowing its own 41px
   reservation and landing on the header line below it (the station subtitle and a
   30px clock, whose hidden alert/lightning flags pinned an oversized line box). On

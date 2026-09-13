@@ -17,6 +17,7 @@
 # monitoring — note that also makes wx.json LAN-readable.
 import http.server, socketserver, json, math, os, time, threading, re
 from urllib.parse import parse_qs
+from decimal import Decimal
 
 PORT      = int(os.environ.get("WFP_PORT", "8137"))
 WEB       = os.environ.get("WFP_WEB", ".")
@@ -47,6 +48,10 @@ def _write_radar_zoom(values):
     return _write_radar_preference('radar_zoom', values)
 
 
+def _write_radar_center(values):
+    return _write_radar_preference('radar_center', values)
+
+
 def _write_radar_source(values):
     return _write_radar_preference('radar_source', values)
 
@@ -56,7 +61,16 @@ def _write_radar_preference(name, values):
     if len(values) != 1:
         return
     value = values[0]
-    if name == 'radar_source':
+    if name == 'radar_center':
+        if value != 'station':
+            if not re.fullmatch(r'-?\d{1,3}(\.\d+)?,-?\d{1,3}(\.\d+)?', value, re.ASCII):
+                return
+            lat, lon = map(float, value.split(','))
+            if not (-85.05112878 <= lat <= 85.05112878 and -180 <= lon <= 180):
+                return
+            # Keep canonical floats in the decimal grammar (str() can emit 1e-10).
+            value = ','.join(format(Decimal(str(n)), 'f') for n in (lat, lon))
+    elif name == 'radar_source':
         if value not in ('mosaic', 'site'):
             return
     elif value != 'auto':
@@ -68,13 +82,19 @@ def _write_radar_preference(name, values):
         value = str(level)
     # The kiosk links this sibling to durable station storage before startup.
     # Resolve the link so replacement updates its target, not the link.
-    marker = os.path.realpath(os.path.join(os.path.dirname(DATA), name))
+    marker = os.path.join(os.path.dirname(DATA), name)
+    # Pan belongs to tmpfs. Never follow a durable link, even if one was
+    # accidentally installed: atomic replacement replaces the link itself.
+    if name != 'radar_center':
+        marker = os.path.realpath(marker)
     tmp = f"{marker}.tmp.{os.getpid()}"
     try:
         try:
             with open(marker) as f:
-                current = f.read(128)
-                if len(current) < 128 and current.strip() == value:
+                limit = 1024 if name == 'radar_center' else 128
+                current = f.read(limit)
+                if (len(current) < limit and current.strip() == value
+                        and not (name == 'radar_center' and os.path.islink(marker))):
                     return
         except (OSError, UnicodeError):
             pass
@@ -111,6 +131,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 if self.client_address[0] in LOOPBACK:
                     params = parse_qs(query, keep_blank_values=True)
                     _write_radar_zoom(params.get('radarZoom', []))
+                    _write_radar_center(params.get('radarCenter', []))
                     _write_radar_source(params.get('radarSource', []))
                 if viewed_radar:
                     # Share only a timestamp with the emitter. Serialize writers

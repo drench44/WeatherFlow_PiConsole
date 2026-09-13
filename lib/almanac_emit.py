@@ -44,7 +44,7 @@ from threading import RLock as _RLock   # kept apart from `threading`, which tes
 import time
 import pytz
 
-from lib.radar_geometry import world_point
+from lib.radar_geometry import world_point, plate_point, parse_center
 from lib.radar_http import RadarSession
 
 # ==============================================================================
@@ -680,10 +680,10 @@ def _radar_nexrad(lat, lon, unit):
 _RadarResult = namedtuple('_RadarResult',
     'available reason frames latest ts_frame center zoom mpp bounds scalebar rings nexrad ts_fetch '
     'source_id provider attribution attribution_url cadence stale_sec legend partial_coverage '
-    'max_zoom zoom_desired zoom_auto_level basemap source_mode site_id sources scanning_slowly',
+    'max_zoom zoom_desired zoom_auto_level basemap source_mode site_id sources scanning_slowly marker centered',
     defaults=('rainviewer', 'rainviewer', 'RainViewer', 'https://www.rainviewer.com/',
               RADAR_RAINVIEWER_FRAME_INTERVAL_SEC, RADAR_RAINVIEWER_STALE_SEC, _RADAR_LEGEND, False,
-              7, None, 7, None, 'mosaic', None, (), False))
+              7, None, 7, None, 'mosaic', None, (), False, None, True))
 _RADAR_NONE = _RadarResult(False, 'no data yet', (), None, None, None, None, None,
                            None, None, None, None, None)
 
@@ -909,7 +909,7 @@ class AlmanacEmitter:
 
     def _radar_preference_stamp(self):
         stamps = []
-        for name in ('radar_zoom', 'radar_source'):
+        for name in ('radar_zoom', 'radar_source', 'radar_center'):
             try:
                 stat = os.stat(os.path.join(os.path.dirname(self.output_path), name))
                 stamps.append((stat.st_ino, stat.st_mtime_ns, stat.st_size))
@@ -1150,6 +1150,7 @@ class AlmanacEmitter:
                 latest['id'], newest, ctx['center'], ctx['zoom'], ctx['mpp'], ctx['bounds'],
                 ctx['bar'], ctx['rings'], ctx['nexrad'], fetched, source, **settings,
                 zoom_desired=ctx['desired'], zoom_auto_level=ctx['auto_zoom'],
+                marker=ctx['marker'], centered=ctx['centered'],
                 basemap=ctx.get('basemap'), source_mode='site' if source == 'iem-nexrad-n0b' else 'mosaic',
                 site_id=ctx['nexrad']['id'] if source == 'iem-nexrad-n0b' else None,
                 sources=tuple(ctx.get('sources', ())), scanning_slowly=ctx.get('scanning_slowly', False),
@@ -1226,15 +1227,27 @@ class AlmanacEmitter:
                 self._radar_result = _RADAR_NONE._replace(reason='no location')
                 return
             previous = self._radar_result
+            station_lat, station_lon = lat, lon
+            station = (lat, lon)
+            if getattr(self, '_radar_station', station) != station:
+                self._radar_result = _RADAR_NONE  # a changed station must never inherit old pixels
+            self._radar_station = station
+            try:
+                with open(os.path.join(os.path.dirname(self.output_path), 'radar_center')) as preference:
+                    raw = preference.read(1024)
+                override = parse_center(raw.strip()) if len(raw) < 1024 else None
+                if override is not None:
+                    lat, lon = override
+            except (OSError, ValueError, UnicodeError):
+                pass  # absent/station/invalid: station crop
             center = dict(lat=lat, lon=lon)
-            if self._radar_result.center is not None and self._radar_result.center != center:
-                self._radar_result = _RADAR_NONE  # never relabel the previous station's crop
+            centered = lat == station_lat and lon == station_lon
             try:
                 from PIL import Image  # noqa: F401
             except ImportError:
                 self._radar_result = _RADAR_NONE._replace(reason='compositor unavailable')
                 return
-            auto_zoom = _radar_zoom_for(lat)
+            auto_zoom = _radar_zoom_for(station_lat)
             desired = None
             try:
                 with open(os.path.join(os.path.dirname(self.output_path), 'radar_zoom')) as preference:
@@ -1254,15 +1267,15 @@ class AlmanacEmitter:
                 viewed = False
             unit = _radar_distance_unit(config)
             # One budget spans both attempts; geometry is source-specific, intent is not.
-            ctx = dict(center=center, nexrad=_radar_nexrad(lat, lon, unit), viewed=viewed,
+            ctx = dict(center=center, nexrad=_radar_nexrad(station_lat, station_lon, unit), viewed=viewed,
                 desired=desired, auto_zoom=auto_zoom, builds=0,
                 deadline=time.monotonic() + RADAR_BUILD_DEADLINE_SEC)
             self._radar_negative = {k: v for k, v in self._radar_negative.items() if v > time.monotonic()}
             adapters = [('rainviewer', self._radar_rainviewer_frames)]
-            if _radar_iem_eligible(lat, lon):
+            if _radar_iem_eligible(station_lat, station_lon):
                 adapters.insert(0, ('iem-mrms-lcref', self._radar_iem_frames))
             site = ctx['nexrad']
-            site_ok = bool(_radar_iem_eligible(lat, lon) and site and site['distanceMeters'] <= 230000)
+            site_ok = bool(_radar_iem_eligible(station_lat, station_lon) and site and site['distanceMeters'] <= 230000)
             ctx['sources'] = [dict(mode='mosaic', available=True),
                 dict(mode='site', siteId=site['id'] if site else None, available=site_ok,
                      reason=None if site_ok else 'no site in range')]
@@ -1278,6 +1291,12 @@ class AlmanacEmitter:
                 zoom = max(7 if source == 'iem-nexrad-n0b' else RADAR_MIN_ZOOM, min(desired if desired is not None else auto_zoom,
                                                _RADAR_SOURCES[source]['max_zoom']))
                 tiles, mpp, bounds, _ = _radar_viewport(lat, lon, zoom, RADAR_VIEWPORT_W, RADAR_VIEWPORT_H)
+                cx, cy = world_point(lat, lon, zoom)
+                mx, my = plate_point(station_lat, station_lon, zoom,
+                                     cx - RADAR_VIEWPORT_W / 2, cy - RADAR_VIEWPORT_H / 2)
+                # Preserve the exact common-case glyph; off-station uses tile paste registration.
+                ctx.update(marker=dict(x=.5, y=.5) if centered else
+                           dict(x=mx / RADAR_VIEWPORT_W, y=my / RADAR_VIEWPORT_H), centered=centered)
                 bar, rings = _radar_scale(mpp, RADAR_VIEWPORT_PX, unit, max_fraction=.25)
                 identity = hashlib.sha256(repr((lat, lon, zoom, RADAR_VIEWPORT_W, RADAR_VIEWPORT_H, tiles,
                     ctx['nexrad']['id'] if source == 'iem-nexrad-n0b' else None)).encode()).hexdigest()[:20]
@@ -1337,7 +1356,7 @@ class AlmanacEmitter:
             zoomCapped=(snap.zoom_desired if snap.zoom_desired is not None else snap.zoom_auto_level) != snap.zoom,
             zoomDesired=snap.zoom_desired,
             viewport=dict(w=RADAR_VIEWPORT_W, h=RADAR_VIEWPORT_H),
-            bounds=snap.bounds, marker=dict(x=.5, y=.5), metersPerPixel=snap.mpp,
+            bounds=snap.bounds, marker=snap.marker or dict(x=.5, y=.5), centered=snap.centered, metersPerPixel=snap.mpp,
             scaleBar=snap.scalebar, rings=list(snap.rings or ()),
             frames=[dict(f, at=local(f['ts'])) for f in snap.frames],
             latest=snap.latest, frameCount=len(snap.frames), observedAt=local(snap.ts_frame),

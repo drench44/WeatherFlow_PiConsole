@@ -316,11 +316,14 @@ when the desired manual or auto level differs from the effective level,
 including clamping to single-site's lower bound. `zoomSource` is MRMS,
 NEXRAD, or RainViewer. Captions explain manual clamping and auto source limits.
 
-Both axes, station center, effective zoom, and tile placements determine crop
+Both axes, composite center, effective zoom, and tile placements determine crop
 identity. Single-site identity additionally includes ICAO to prevent same-minute
 collisions between nearby radars. XYZ x wraps at the antimeridian and y clamps
-at the poles. Bounds are inverse Mercator (`e<w` denotes wrapping). Marker is
-`{x:.5,y:.5}` = (478,245); tiles, SVG and overlays share this geometry. The scale
+at the poles. Bounds are inverse Mercator (`e<w` denotes wrapping). `center` reports the composite center. `centered:true` retains the exact station
+view: `marker:{x:.5,y:.5}` = (478,245). With a center override, `centered:false`
+and `marker{x,y}` report the station's fractional position under that crop,
+using `radar_geometry.plate_point` and the compositor's integer paste registration.
+The marker may be outside [0,1]. Tiles, SVG and overlays share this geometry. The scale
 bar uses at most 25% of the short axis; ring labels are omitted outside y76–412.
 
 Frames are oldest-to-newest, at most one hour. Each has `id`, UTC epoch `ts`,
@@ -349,6 +352,40 @@ symlink targets. The launcher links both markers to
 preferences. A two-second preference stat watcher uses the same single-flight
 worker and existing budgets. Inputs coalesce while a build is active. A request
 is acknowledged only by the decoded authoritative payload, never by an old poll.
+
+Loopback polls also accept `&radarCenter=<lat>,<lon>` or
+`&radarCenter=station`. The strict decimal grammar is
+`^-?\d{1,3}(\.\d+)?,-?\d{1,3}(\.\d+)?$` (ASCII digits), bounded by
+latitude ±85.05112878 and longitude ±180. Duplicate parameters, invalid and
+non-loopback values are ignored. `radar_center` is an atomic, deduplicated marker
+beside the runtime `wx.json`; **it is never symlinked to durable storage**.
+`station`, absence, unreadable or invalid markers select the station center.
+The preference watcher includes center changes. The emitter uses the override
+for each adapter's viewport, basemap and crop identity, so a new center always
+gets new frame IDs. Source eligibility, site selection and automatic zoom remain
+station-based. `metersPerPixel` still follows the viewport latitude's cosine:
+east/west pan leaves it unchanged; north/south pan changes it slightly at fixed
+zoom. Bounds, scale and rings are recomputed using that authoritative geometry.
+Zoom persists across reboot; pan is transient.
+
+Pointer Events on the plate share a captured pointer Map: one finger pans, two
+pinch. The three image layers share a transformed wrapper; controls/caption are
+target-gated and remain fixed. Only the plate uses `touch-action:none`. Pan uses
+independent CSS X/Y scales and the exact Mercator forward/inverse; no
+meters-per-pixel approximation. World edges and a 1.5 viewport-diagonal station
+radius resist at 0.3 and clamp on release. Pinch snaps to integer source limits
+through the same `radarZoom` intent as the stepper; wheel/ctrl-wheel debounce at
+120 ms. No pan inertia or focal-point geographic pinch is applied.
+
+Playback freezes on the newest good image through gesture and commit. Existing
+generation guards invalidate abandoned decodes; superseded intents cannot replace
+the frozen presentation. Only matching decoded geometry clears the transform.
+A quiet `Updating` appears after 2.5 s; reduced motion removes the 160 ms spring.
+When displaced, the station/rings travel together, the crosshair disappears, and
+an accent outer ring identifies the station. A bottom-center `Recenter on station`
+button sends `station`; 90 seconds without plate interaction does the same.
+Leaving the tab or hiding the document cancels the preview and idle timer. Any
+already posted intent can still finish on the server and is reconciled on return.
 
 The plate fills the 956×490 body at x34,y76 on the 1024×600 tabbed artboard.
 The 25px secondary header and 34px gutters remain. The masthead subtitle is

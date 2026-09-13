@@ -923,6 +923,195 @@ def check_radar_v2(browser, html, output_dir, theme):
     print('RADAR V2 PASS: '+json.dumps(result),flush=True)
 
 
+def check_radar_touch(browser, html, output_dir, theme):
+    """Real loopback center/zoom writes and emitter crops; synthetic captured gestures."""
+    from lib.radar_geometry import world_point, world_inverse, plate_point
+    import math
+    with zoom_site_server(html, ('touch', 'Touch fixture', 47.61, -122.33)) as (emitter, state, root, url):
+        context = browser.new_context(viewport={'width': 1024, 'height': 600}, has_touch=True,
+                                      device_scale_factor=2)
+        context.add_init_script("""window.pollURLs=[]; const realFetch=window.fetch;
+            window.fetch=function(u,o){pollURLs.push(String(u));return realFetch(u,o);};""")
+        page = context.new_page(); errors = []
+        page.on('pageerror', lambda error: errors.append(str(error)))
+        page.goto(url + f'/?tabs=1&theme={theme}')
+        page.locator('.tab[data-screen="s-radar"]').tap()
+        page.wait_for_function('radarView.good && !radarView.pending')
+        page.evaluate("""() => { window.pointer = (type,id,x,y,selector='#rad-plate') => {
+            const plate=document.getElementById('rad-plate'), b=plate.getBoundingClientRect();
+            const e=new PointerEvent(type,{bubbles:true,cancelable:true,pointerId:id,
+                pointerType:'touch',isPrimary:id===1,clientX:b.x+x,clientY:b.y+y,button:0,buttons:type==='pointerup'?0:1});
+            document.querySelector(selector).dispatchEvent(e); return e.defaultPrevented;
+        }; }""")
+        def pointer(kind, ident, x, y, selector='#rad-plate'):
+            return page.evaluate('(a)=>pointer(...a)', [kind, ident, x, y, selector])
+        def drag(dx, dy):
+            pointer('pointerdown', 1, 478, 245)
+            pointer('pointermove', 1, 478 + dx, 245 + dy)
+            pointer('pointerup', 1, 478 + dx, 245 + dy)
+        def poll():
+            page.wait_for_function('!polling'); page.evaluate('poll()'); page.wait_for_function('!polling')
+        def build():
+            poll(); emitter._do_radar(); emitter._emit(0); poll()
+            expected = emitter._build_payload()['radar']
+            page.wait_for_function('(id)=>radarView.good.id===id && !radarView.pending && radarGesture.state==="idle"', arg=expected['latest'])
+            return expected
+        build(); build()
+        page.wait_for_function('radarReady().length>=2 && !!radarView.timer')
+        assert page.locator('#rad-plate').evaluate('e=>getComputedStyle(e).touchAction') == 'none'
+        assert page.locator('#rad-stack > #rad-base, #rad-stack > #rad-echo, #rad-stack > #rad-over').count() == 3
+        assert page.locator('#rad-recenter').is_hidden()
+        # Geometry mirror: high/low zoom, hemispheres, poles, and independently stretched axes.
+        for lat, lon, zoom in [(47.61,-122.33,8), (0,179.5,4), (-33.87,151.21,10), (85.05112878,-180,4)]:
+            xy = page.evaluate('(a)=>radarWorldPoint(...a)', [lat,lon,zoom])
+            assert all(abs(a-b)<1e-8 for a,b in zip(xy,world_point(lat,lon,zoom)))
+            inverse = page.evaluate('(a)=>radarWorldInverse(...a)', [*xy,zoom])
+            assert abs(inverse['lat']-lat)<1e-8 and abs(inverse['lon']-lon)<1e-8
+        for selector in ('#rad-src-mosaic', '#rad-src-cap', '#rad-legend', '#rad-play', '#rad-zoom-in'):
+            pointer('pointerdown',1,478,245,selector)
+            pointer('pointermove',1,550,275,selector); pointer('pointerup',1,550,275,selector)
+            assert page.evaluate('radarGesture.state==="idle" && radarGesture.pointers.size===0 && radarCenter.desired===null')
+        # A captured mouse leaving the plate still commits when lifted.
+        box=page.locator('#rad-plate').bounding_box()
+        page.mouse.move(box['x']+478,box['y']+245); page.mouse.down()
+        assert page.evaluate('document.getElementById("rad-plate").hasPointerCapture(1)')
+        page.mouse.move(box['x']+518,box['y']+265); page.mouse.up()
+        build(); page.locator('#rad-recenter').tap(); build()
+        # Known CSS offset uses separate clientWidth/956 and clientHeight/490.
+        r=page.evaluate('radarView.data'); client=page.locator('#rad-plate').evaluate('e=>[e.clientWidth,e.clientHeight]')
+        dx,dy=80,36
+        cx,cy=world_point(r['center']['lat'],r['center']['lon'],r['zoom'])
+        lat,lon=world_inverse(cx-dx/(client[0]/956),cy-dy/(client[1]/490),r['zoom'])
+        pointer('pointerdown',1,478,245); pointer('pointermove',1,478+dx,245+dy)
+        assert page.evaluate('radarGesture.state==="gesturing" && !radarView.timer && radarView.current.id===radarView.good.id')
+        pointer('pointerup',1,478+dx,245+dy)
+        desired=page.evaluate('radarCenter.desired')
+        assert abs(desired['lat']-lat)<1e-9 and abs(desired['lon']-lon)<1e-9, desired
+        assert page.evaluate('radarGesture.state==="committing" && !radarView.timer')
+        held=page.locator('#rad-stack').get_attribute('style'); poll()
+        assert 'radarCenter=' in page.evaluate('pollURLs.at(-1)')
+        saved=tuple(map(float,(root/'radar_center').read_text().split(',')))
+        assert abs(saved[0]-lat)<1e-9 and abs(saved[1]-lon)<1e-9
+        assert not (root/'radar_center').is_symlink()
+        page.wait_for_timeout(2600)
+        assert page.locator('#rad-updating').is_visible()
+        assert page.locator('#rad-stack').evaluate('e=>e.style.transform')
+        panned=build()
+        page.wait_for_function('!!radarView.timer')
+        assert page.locator('#rad-stack').evaluate('e=>e.style.transform') == ''
+        assert page.locator('#rad-updating').is_hidden()
+        assert page.locator('#rad-recenter').is_visible() and page.locator('.rad-station-accent').count()==1
+        assert page.locator('.rad-cross').count()==0
+        glyph=page.locator('.rad-station').evaluate('e=>[+e.getAttribute("cx"),+e.getAttribute("cy")]')
+        assert abs(glyph[0]-panned['marker']['x']*956)<1e-8 and abs(glyph[1]-panned['marker']['y']*490)<1e-8
+        ring=page.locator('.rad-station-accent').evaluate('e=>getComputedStyle(e).stroke')
+        assert ring == ('rgb(224, 123, 85)' if theme=='night' else 'rgb(174, 58, 39)')
+        page.screenshot(path=str(output_dir/f'radar-touch-panned-{theme}.png'))
+        # Recenter is also gated; the button alone clears the runtime marker.
+        pointer('pointerdown',1,478,245,'#rad-recenter'); pointer('pointerup',1,478,245,'#rad-recenter')
+        assert page.evaluate('radarGesture.state==="idle"')
+        page.locator('#rad-recenter').tap(); centered=build()
+        assert (root/'radar_center').read_text().strip()=='station' and centered['centered']
+        assert page.locator('#rad-recenter').is_hidden() and page.locator('.rad-cross').count()==1
+        # Pinch 2x, freeze newest, whole-stack midpoint transform, integer snap/zoom channel.
+        z=page.evaluate('radarView.data.zoom')
+        pointer('pointerdown',1,428,245); pointer('pointerdown',2,528,245)
+        pointer('pointermove',1,378,245); pointer('pointermove',2,578,245)
+        assert page.evaluate('radarGesture.scale===2 && !radarView.timer && radarView.current.id===radarView.good.id')
+        page.screenshot(path=str(output_dir/f'radar-touch-mid-pinch-{theme}.png'))
+        pointer('pointerup',1,378,245); pointer('pointerup',2,578,245)
+        assert page.evaluate('radarZoom.desired')==z+1
+        build(); assert (root/'radar_zoom').read_text().strip()==str(z+1)
+        assert page.evaluate('radarView.data.zoom')==z+1
+        # Source-cap rubber band; reduced motion snaps immediately without a transition.
+        page.emulate_media(reduced_motion='reduce')
+        pointer('pointerdown',1,428,245); pointer('pointerdown',2,528,245)
+        pointer('pointermove',1,328,245); pointer('pointermove',2,628,245)
+        assert abs(page.evaluate('radarGesture.scale')-1.6)<1e-8
+        pointer('pointerup',1,328,245); pointer('pointerup',2,628,245)
+        assert page.locator('#rad-stack').evaluate('e=>e.style.transform==="" && e.style.transition===""')
+        page.emulate_media(reduced_motion='no-preference')
+        # Wheel and ctrl-wheel coalesce each burst to one integer step, no browser zoom.
+        for ctrl,delta in [(False,100),(True,-100)]:
+            prevented=page.evaluate('''a=>{let results=[];for(let i=0;i<4;i++){
+                let e=new WheelEvent('wheel',{bubbles:true,cancelable:true,deltaY:a[1],ctrlKey:a[0]});
+                document.getElementById('rad-plate').dispatchEvent(e);results.push(e.defaultPrevented);}return results;}''',[ctrl,delta])
+            assert all(prevented)
+            old=page.evaluate('radarView.data.zoom'); page.wait_for_timeout(170)
+            assert page.evaluate('radarZoom.desired')==old+(-1 if delta>0 else 1)
+            build()
+        # Rapid pans accumulate against desired center, never re-label intermediate crops.
+        drag(35,10); poll(); emitter._do_radar(); intermediate=emitter._build_payload()
+        first=page.evaluate('radarCenter.desired'); old_id=page.evaluate('radarView.good.id')
+        drag(25,15); second=page.evaluate('radarCenter.desired')
+        assert second['lon']<first['lon'] and second['lat']>first['lat']
+        page.evaluate('(d)=>render(d)',intermediate)
+        assert page.evaluate('radarView.good.id')==old_id and page.evaluate('radarGesture.state')=='committing'
+        build()
+        # A superseded image that FINISHES decoding late must never clear the preview.
+        drag(20,5); poll(); emitter._do_radar(); emitter._emit(0)
+        abandoned=emitter._build_payload()['radar']; delayed=[]
+        delayed_url=url+'/'+next(f['url'] for f in abandoned['frames'] if f['id']==abandoned['latest'])
+        page.route(delayed_url,lambda route:delayed.append(route))
+        poll(); page.wait_for_function('!!radarView.pending')
+        page.wait_for_timeout(100); assert delayed
+        frozen_id=page.evaluate('radarView.good.id')
+        drag(15,5)
+        delayed.pop().fulfill(body=(root/'radar'/(abandoned['latest']+'.png')).read_bytes(),content_type='image/png')
+        page.wait_for_timeout(100)
+        assert page.evaluate('radarView.good.id')==frozen_id
+        assert page.evaluate('radarGesture.state')=='committing'
+        build()
+        # Cancelling a two-to-one transition never posts its provisional zoom.
+        pointer('pointerdown',1,428,245); pointer('pointerdown',2,528,245)
+        pointer('pointermove',1,453,245); pointer('pointermove',2,503,245)
+        pointer('pointerup',1,453,245)
+        before_urls=len(page.evaluate('pollURLs')); poll()
+        assert all('radarZoom=' not in u for u in page.evaluate('pollURLs')[before_urls:])
+        pointer('pointercancel',2,503,245)
+        assert page.evaluate('radarZoom.desired===null && radarCenter.desired===null && radarGesture.state==="idle"')
+        # Hidden-document lifecycle cancels the same captured gesture and idle timer.
+        pointer('pointerdown',1,478,245); pointer('pointermove',1,488,250)
+        page.evaluate("Object.defineProperty(document,'hidden',{configurable:true,value:true});document.dispatchEvent(new Event('visibilitychange'))")
+        assert page.evaluate('!radarGesture.idleTimer && !radarView.timer && radarGesture.pointers.size===0 && radarGesture.state==="idle"')
+        page.evaluate("delete document.hidden;document.dispatchEvent(new Event('visibilitychange'))")
+        assert page.evaluate('!!radarGesture.idleTimer')
+        # Bounds resist (not hard-lock), and the committed center obeys the soft cap.
+        pointer('pointerdown',1,478,245); pointer('pointermove',1,20478,10245)
+        assert page.evaluate('radarGesture.pan.previewX>radarGesture.pan.x')
+        cap_data=page.evaluate('''()=>({center:radarGesture.pan.center,home:radarStationCenter(),z:radarEffectiveZoom()})''')
+        p1=world_point(cap_data['center']['lat'],cap_data['center']['lon'],cap_data['z'])
+        p2=world_point(cap_data['home']['lat'],cap_data['home']['lon'],cap_data['z'])
+        assert math.dist(p1,p2)<=1.5*math.hypot(956,490)+1e-6
+        pointer('pointercancel',1,20478,10245)
+        assert page.evaluate('radarGesture.state==="idle" && radarGesture.pointers.size===0')
+        # Unequal axes at z4 expose any mpp/tangent or uniform-scale approximation.
+        page.evaluate('radarZoom.desired=4;radarZoom.sent=false'); build()
+        page.locator('#rad-plate').evaluate('e=>{e.style.width="800px";e.style.height="400px"}')
+        r=page.evaluate('radarView.data'); client=page.locator('#rad-plate').evaluate('e=>[e.clientWidth,e.clientHeight]')
+        cx,cy=world_point(r['center']['lat'],r['center']['lon'],4)
+        lat,lon=world_inverse(cx-20/(client[0]/956),cy-15/(client[1]/490),4)
+        drag(20,15); desired=page.evaluate('radarCenter.desired')
+        assert abs(desired['lat']-lat)<1e-8 and abs(desired['lon']-lon)<1e-8
+        build(); page.locator('#rad-plate').evaluate('e=>{e.style.width="";e.style.height=""}')
+        # Off-tab cancel clears captured input and idle timer. Returning re-arms it.
+        pointer('pointerdown',1,478,245); pointer('pointermove',1,488,250)
+        page.evaluate('activate("s-obs")')
+        assert page.evaluate('radarGesture.state==="idle" && !radarGesture.idleTimer && !radarView.timer && radarGesture.pointers.size===0')
+        page.evaluate('activate("s-radar")'); page.wait_for_function('!!radarGesture.idleTimer')
+        # Deterministic browser clock verifies 90s, reset by control/plate interaction.
+        page.clock.install(); page.evaluate('radarIdleSync(true)')
+        page.clock.run_for(89000); assert page.evaluate('radarCenter.desired') is None
+        pointer('pointerdown',1,478,245,'#rad-legend'); pointer('pointerup',1,478,245,'#rad-legend')
+        page.clock.run_for(89000); assert page.evaluate('radarCenter.desired') is None
+        page.clock.run_for(1001); assert page.evaluate('radarCenter.desired')=='station'
+        assert errors==[],errors
+        context.close()
+    print(f'RADAR TOUCH PASS: {theme}; real loopback/emitter pan+pinch, exact Mercator, independent axes, '
+          'pointer capture/gating, freeze/settle, delayed/superseded intents, wheel/ctrl-wheel, '
+          'caps/reduced-motion, glyph/recenter, 90s idle reset, off-tab cancel; no page errors',flush=True)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--browser')
@@ -1002,6 +1191,7 @@ def main():
         for theme in ('paper', 'night'):
             check_source_switch(browser, html, args.output_dir, theme)
         for theme in ('paper', 'night'):
+            check_radar_touch(browser, html, args.output_dir, theme)
             check_radar_v2(browser, html, args.output_dir, theme)
             check_basemap(browser, html, args.output_dir, theme)
             for site in ZOOM_SITES:
