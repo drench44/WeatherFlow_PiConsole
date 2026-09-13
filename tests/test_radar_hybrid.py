@@ -297,8 +297,14 @@ def test_primary_deadline_leaves_time_for_fallback(make_emitter, hybrid):
     hybrid.failure = fail
     emitter = make_emitter(); emitter._do_radar()
     assert emitter._radar_result.source_id == 'rainviewer'
-    assert next(c[3] for c in hybrid.calls if c[0] == 'rainviewer') <= 25
-    assert hybrid.mono <= 25
+    # The primary (IEM) attempt is capped so the fallback both runs and has time:
+    # it gives up within its own deadline (+ one in-flight request), which stays
+    # well under the whole-pass build deadline. Bounds track the constants, not a
+    # literal, so tuning RADAR_PRIMARY_DEADLINE_SEC for slow appliance wifi is safe.
+    fallback_at = next(c[3] for c in hybrid.calls if c[0] == 'rainviewer')
+    assert fallback_at <= ae.RADAR_PRIMARY_DEADLINE_SEC + ae.RADAR_HTTP_TIMEOUT_SEC
+    assert fallback_at < ae.RADAR_BUILD_DEADLINE_SEC
+    assert hybrid.mono <= ae.RADAR_PRIMARY_DEADLINE_SEC + ae.RADAR_HTTP_TIMEOUT_SEC
 
 
 def test_source_stale_thresholds_and_dst_local_labels(make_emitter, hybrid):

@@ -6,6 +6,16 @@ to shared upstream code that the classic console benefits from too.
 
 ## 2026-09-13
 
+### Radar
+- **The 2-minute US feed now actually engages on the Pi.** The primary (IEM MRMS)
+  attempt was capped at 25s before falling back to the 10-minute global source —
+  fine on a desktop, but a Raspberry Pi over weak wifi takes ~2.8s/tile, so the
+  latest frame's ~11 requests ran ~30s and lost the race every pass, silently
+  leaving US stations on the coarse feed the hybrid was meant to improve on. The
+  cap is now 55s (still well under the 150s whole-pass budget, so the fallback
+  keeps its room). Verified on the Pi: every IEM tile fetches real echo; it was
+  purely the deadline.
+
 ### Console
 - **Temperature curve: no more phantom dip at "now".** The hourly forecast line
   welded its start onto the live sensor reading, then ran to the first future

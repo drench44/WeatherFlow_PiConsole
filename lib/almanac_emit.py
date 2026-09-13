@@ -70,7 +70,13 @@ RADAR_REQUESTS_PER_MIN = 90
 RADAR_MAX_FRAME_BUILDS_PER_PASS = 20
 RADAR_BUILD_DEADLINE_SEC = 150
 RADAR_HTTP_TIMEOUT_SEC = 10
-RADAR_PRIMARY_DEADLINE_SEC = 25
+# Cap on the IEM (finer, US) attempt before falling back to the global 10-min
+# source. It must cover the latest frame's ~11 sequential requests (metadata +
+# archive HEAD + covering tiles) at APPLIANCE latency, not a fast desktop's: on a
+# Raspberry Pi over weak wifi (~2.8s/tile, measured) 11 requests run ~30s, so the
+# old 25s made the 2-min US feed lose the race every pass and silently fall back to
+# 10-min. History backfill is bounded separately by RADAR_BUILD_DEADLINE_SEC.
+RADAR_PRIMARY_DEADLINE_SEC = 55
 RADAR_NEGATIVE_CACHE_SEC = 120
 RADAR_CACHE_GRACE_SEC = 120
 RADAR_IEM_METADATA_URL = "https://mesonet.agron.iastate.edu/data/gis/images/4326/mrms/lcref.json"
