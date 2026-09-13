@@ -7,14 +7,16 @@ to shared upstream code that the classic console benefits from too.
 ## 2026-09-13
 
 ### Radar
-- **The 2-minute US feed now actually engages on the Pi.** The primary (IEM MRMS)
-  attempt was capped at 25s before falling back to the 10-minute global source —
-  fine on a desktop, but a Raspberry Pi over weak wifi takes ~2.8s/tile, so the
-  latest frame's ~11 requests ran ~30s and lost the race every pass, silently
-  leaving US stations on the coarse feed the hybrid was meant to improve on. The
-  cap is now 55s (still well under the 150s whole-pass budget, so the fallback
-  keeps its room). Verified on the Pi: every IEM tile fetches real echo; it was
-  purely the deadline.
+- **Diagnosed why the 2-minute US feed loses to the fallback on IPv6-broken
+  networks.** IEM's host advertises an IPv6 address; where IPv6 is a black hole
+  (as on the test Pi — `curl -6` times out, `curl -4` answers in 0.23s), Python's
+  urllib has no Happy-Eyeballs and stalls ~10s on the dead address before falling
+  back to IPv4, so the IEM adapter starves and the console silently stays on the
+  10-minute global source. The cure is to reach IEM over IPv4 (disable IPv6 on the
+  appliance). The primary-attempt cap stays tight (25s) — a longer cap only delays
+  the fallback and leaves the plate empty longer when a source is unreachable; it
+  was never the real limit. (Reverts a 55s bump from earlier the same day that had
+  mis-attributed the stall to wifi bandwidth.)
 
 ### Console
 - **Temperature curve: no more phantom dip at "now".** The hourly forecast line
