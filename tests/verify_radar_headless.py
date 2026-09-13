@@ -40,6 +40,71 @@ def payload():
     return emitter._build_payload()
 
 
+def loop_payload():
+    """Three complete, opaque (echo-bearing) frames so the Phase 2 loop runs."""
+    config = make_config()
+    app = SimpleNamespace(config=config, obsParser=SimpleNamespace(api_data={}))
+    screen = SimpleNamespace(app=app, Obs={}, Met={}, Astro={}, Sager={})
+    emitter = ae.AlmanacEmitter(screen)
+    now = int(time.time())
+    zoom = ae._radar_zoom_for(47.61)
+    _, mpp, bounds, _ = ae._radar_viewport(47.61, -122.33, zoom, 480)
+    bar, rings = ae._radar_scale(mpp, 480, 'mi')
+    def frame(offset, rgb):
+        png = io.BytesIO()
+        Image.new('RGBA', (480, 480), rgb + (255,)).save(png, format='PNG')   # opaque -> hasEcho
+        return dict(id=str(now - offset), ts=now - offset, complete=True,
+                    url='data:image/png;base64,' + base64.b64encode(png.getvalue()).decode())
+    frames = (frame(1200, (60, 180, 220)), frame(600, (40, 120, 200)), frame(0, (210, 70, 60)))
+    emitter._radar_result = ae._RadarResult(True, None, frames, str(now), now,
+        dict(lat=47.61, lon=-122.33), zoom, mpp, bounds, bar, rings,
+        ae._radar_nexrad(47.61, -122.33, 'mi'), now)
+    return emitter._build_payload()
+
+
+def check_loop(browser, html):
+    """Phase 2: the past-hour loop cycles on the tab, pauses, and idles off-tab."""
+    shim = ("window.fetch=function(u){var d=PAYLOAD;d.ts=Date.now()/1000;"
+            "return Promise.resolve({ok:true,headers:{get:function(){return new Date().toUTCString();}},"
+            "json:function(){return Promise.resolve(d);}});};").replace('PAYLOAD', json.dumps(loop_payload()))
+    context = browser.new_context(viewport={'width': 1024, 'height': 600})
+    context.add_init_script(shim)
+    context.route('https://radar.test/**', lambda route: route.fulfill(body=html, content_type='text/html'))
+    page = context.new_page()
+    errors = []
+    page.on('pageerror', lambda error: errors.append(str(error)))
+    page.goto('https://radar.test/index.html?tabs=1')
+    page.wait_for_function('window.fetch && document.querySelector(".tab[data-screen=\\"s-radar\\"]")')
+    page.locator('.tab[data-screen="s-radar"]').click()
+    page.wait_for_function('radarView.loaded.length === 3 && radarView.loaded.every(f => f.ready && f.hasEcho)')
+    assert page.locator('#rad-loop').is_visible(), 'loop control should show for a 3-frame history'
+    # the echo cycles: collect distinct sources and frame-time labels over ~2.5 s
+    seen = page.evaluate("""async () => {
+        const srcs = new Set(), times = new Set();
+        for (let i = 0; i < 12; i++) {
+            srcs.add(document.getElementById('rad-echo').src);
+            times.add(document.getElementById('rad-frame-time').textContent);
+            await new Promise(r => setTimeout(r, 250));
+        }
+        return { srcs: srcs.size, times: [...times].sort() };
+    }""")
+    assert seen['srcs'] >= 2, f'loop did not cycle the echo: {seen}'
+    assert len(seen['times']) >= 2, f'frame-time label did not change: {seen}'
+    # pause holds a single frame
+    page.locator('#rad-play').click()
+    held = page.evaluate('document.getElementById("rad-echo").src')
+    page.wait_for_timeout(1400)
+    assert page.evaluate('document.getElementById("rad-echo").src') == held, 'pause did not hold the frame'
+    page.locator('#rad-play').click()   # resume
+    # leaving the tab stops the loop and hides the control
+    page.locator('.tab[data-screen="s-obs"]').click()
+    page.wait_for_timeout(200)
+    assert page.locator('#rad-loop').is_hidden(), 'loop control should hide off-tab'
+    assert not page.evaluate('!!radarView.timer'), 'loop timer should be cleared off-tab'
+    assert errors == [], errors
+    context.close()
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--browser')
@@ -113,9 +178,11 @@ def main():
         assert errors == [], errors
         report['no-tabs'] = page.evaluate('pollURLs')
         context.close()
+        check_loop(browser, html)
         browser.close()
     (args.output_dir / 'poll-urls.json').write_text(json.dumps(report, indent=2))
-    print('PASS: latest radar light/dark, tab view signal on/off, render heartbeat, other tabs, no-tabs default; no page errors')
+    print('PASS: latest radar light/dark, tab view signal on/off, render heartbeat, other tabs, '
+          'no-tabs default, Phase 2 loop (cycle/pause/off-tab idle); no page errors')
 
 
 if __name__ == '__main__':

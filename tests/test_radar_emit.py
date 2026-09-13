@@ -307,11 +307,14 @@ def test_radar_schedules_are_registered_and_cancelled(make_emitter, monkeypatch)
     emitter.stop(); assert not clock.events and not emitter._retries
 
 
+@pytest.mark.skipif(not os.environ.get('RADAR_NET_TEST'),
+                    reason='hits RainViewer; opt in with RADAR_NET_TEST=1 (kept out of CI)')
 def test_legend_fidelity_real_universal_blue_tile():
     """Online integration: exact RGBA stops must occur in ONE real fetched tile.
 
     A global 512px tile captures the whole intensity range more reliably than
     a dry station crop. Skip transport outages only, never a palette mismatch.
+    Opt-in (RADAR_NET_TEST=1) so CI stays hermetic and never flakes on the API.
     """
     context = ssl.create_default_context()
     try:

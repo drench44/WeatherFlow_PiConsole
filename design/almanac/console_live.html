@@ -582,6 +582,15 @@
   .rad-over .rad-station { fill: var(--paper); stroke: var(--ink); stroke-width: 3; }
   .rad-over .rad-dot { fill: var(--ink); }
   .rad-over .rad-scale { fill: none; stroke: var(--ink-soft); stroke-width: 2; }
+  /* radar loop control: a single quiet Play/Pause target + the current frame's
+     time. Shown only while a loop is possible (>=2 frames with echoes). */
+  .rad-loop { display: flex; align-items: center; gap: 12px; margin-top: 16px; }
+  .rad-loop[hidden] { display: none; }
+  .rad-play { width: 44px; height: 44px; flex: 0 0 44px; border: 1px solid var(--rule);
+              background: none; color: var(--ink); font-size: 13px; line-height: 1; cursor: pointer;
+              border-radius: 2px; font-family: var(--sans); }
+  .rad-play:active { opacity: 0.5; }
+  .rad-loop-cap { font: 13px var(--sans); color: var(--ink-soft); letter-spacing: 0.02em; }
   .rad-rail { flex: 1; min-width: 0; }
   .rad-place { font-size: 26px; font-weight: 800; overflow-wrap: anywhere; }
   .rad-ledger { width: 100%; }
@@ -1075,6 +1084,10 @@
           <div class="lrow"><span class="k">Observed</span><span class="dots"></span><span class="v" id="rad-observed"></span></div>
         </div>
         <div class="rad-legend" id="rad-legend"></div>
+        <div class="rad-loop" id="rad-loop" hidden>
+          <button class="rad-play" id="rad-play" type="button" aria-label="Pause radar loop">&#10073;&#10073;</button>
+          <span class="rad-loop-cap">Past hour&#160;&#183;&#160;<span id="rad-frame-time">&#8212;</span></span>
+        </div>
       </div>
     </div>
   </main>
@@ -1151,6 +1164,11 @@
     document.querySelectorAll(".tab[data-screen]").forEach(function (b) {
       b.classList.toggle("active", b.dataset.screen === id);
     });
+    /* the radar loop runs only while its tab is open (idle off-tab, Pi-friendly) */
+    if (typeof radarLoopSync === "function" && radarView) {
+      radarView.active = (id === "s-radar");
+      radarLoopSync();
+    }
   }
   document.querySelectorAll(".tab[data-screen]").forEach(function (b) {
     b.addEventListener("click", function () {
@@ -2519,7 +2537,91 @@
   /* Phase 1: decode just the latest static frame. Phase 2 can preload the
      complete oldest->newest frames here, with an active-screen-only RAF loop. */
   var radarView = { geometry: null, colorId: null, good: null, pending: null,
-                    failed: false, clear: false, retryAt: 0, data: null };
+                    failed: false, clear: false, retryAt: 0, data: null,
+                    loaded: [], loadKey: null, idx: 0, timer: null, paused: false, active: false };
+
+  /* ———— radar loop (Phase 2): step the past-hour frames while the tab is open
+     and precip is present; static otherwise. No crossfade (frames are
+     preloaded, so a src swap is instant and shows only observed states);
+     idle off-tab and under reduced motion; a single Play/Pause target. ———— */
+  var RAD_FRAME_MS = 550, RAD_HOLD_MS = 1500;
+  function radarReduced() { return window.matchMedia("(prefers-reduced-motion: reduce)").matches; }
+  function radarReady() { return radarView.loaded.filter(function (f) { return f.ready; }); }
+  function radarFrameLabel(fr) {
+    /* station-local HH:MM, derived from the latest frame's own local time so a
+       browser in a different timezone than the station never mislabels it */
+    var r = radarView.data;
+    if (!r || !r.observedAt || !isNum(r.observedTs)) return "—";
+    var m = String(r.observedAt).split(":");
+    if (m.length !== 2) return "—";
+    var mins = (parseInt(m[0], 10) * 60 + parseInt(m[1], 10)) - Math.round((r.observedTs - fr.ts) / 60);
+    mins = ((mins % 1440) + 1440) % 1440;
+    return ("0" + Math.floor(mins / 60)).slice(-2) + ":" + ("0" + (mins % 60)).slice(-2);
+  }
+  function radarPreload(r) {
+    var complete = (r.frames || []).filter(function (f) { return f.complete && f.url; });
+    var key = complete.map(function (f) { return f.id; }).join(",");
+    if (key === radarView.loadKey) return;
+    radarView.loadKey = key;
+    var have = {}; radarView.loaded.forEach(function (fr) { have[fr.id] = fr; });
+    var next = [];
+    complete.forEach(function (f) {
+      if (have[f.id]) { next.push(have[f.id]); return; }
+      var fr = { id: f.id, ts: f.ts, url: f.url, img: new Image(), ready: false, hasEcho: false };
+      fr.img.decoding = "async";
+      fr.img.onload = function () {
+        fr.ready = true;
+        try {
+          var c = document.createElement("canvas"); c.width = fr.img.naturalWidth; c.height = fr.img.naturalHeight;
+          var cx = c.getContext("2d", { willReadFrequently: true }); cx.drawImage(fr.img, 0, 0);
+          var px = cx.getImageData(0, 0, c.width, c.height).data;
+          for (var a = 3; a < px.length; a += 4) { if (px[a]) { fr.hasEcho = true; break; } }
+        } catch (e) { fr.hasEcho = true; }     /* can't sample -> keep the frame rather than drop it */
+        radarLoopSync();
+      };
+      fr.img.src = f.url;
+      next.push(fr);
+    });
+    next.sort(function (a, b) { return a.ts - b.ts; });     /* oldest -> newest */
+    radarView.loaded = next;
+    if (radarView.idx >= next.length) radarView.idx = 0;
+  }
+  function radarCouldLoop() {
+    var r = radarView.data, ready = radarReady();
+    return radarView.active && !radarReduced() && !document.hidden &&
+           ready.length >= 2 && ready.some(function (f) { return f.hasEcho; }) &&
+           !(r && r.stale);
+  }
+  function radarStopLoop(showLatest) {
+    if (radarView.timer) { clearTimeout(radarView.timer); radarView.timer = null; }
+    if (showLatest && radarView.good) { var e = $("rad-echo"); e.src = radarView.good.url; e.hidden = false; }
+  }
+  function radarLoopStep() {
+    if (!(radarCouldLoop() && !radarView.paused)) { radarLoopSync(); return; }
+    var ready = radarReady();
+    if (radarView.idx >= ready.length) radarView.idx = 0;
+    var fr = ready[radarView.idx];
+    var echo = $("rad-echo"); echo.src = fr.url; echo.hidden = false;
+    $("rad-frame-time").textContent = radarFrameLabel(fr);
+    var newest = radarView.idx === ready.length - 1;
+    radarView.idx = (radarView.idx + 1) % ready.length;
+    radarView.timer = setTimeout(radarLoopStep, newest ? RAD_HOLD_MS : RAD_FRAME_MS);
+  }
+  function radarLoopSync() {
+    var loop = $("rad-loop"), play = $("rad-play");
+    if (!radarCouldLoop()) { radarStopLoop(true); loop.hidden = true; return; }
+    loop.hidden = false;
+    if (radarView.paused) {
+      radarStopLoop(true);
+      play.textContent = "▶"; play.setAttribute("aria-label", "Play radar loop");
+      $("rad-frame-time").textContent = (radarView.good && radarView.good.at) || "—";
+    } else {
+      play.textContent = "❙❙"; play.setAttribute("aria-label", "Pause radar loop");
+      if (!radarView.timer) radarLoopStep();
+    }
+  }
+  $("rad-play").addEventListener("click", function () { radarView.paused = !radarView.paused; radarLoopSync(); });
+  document.addEventListener("visibilitychange", radarLoopSync);   /* pause the loop when the page is hidden */
   function radarState() {
     var r = radarView.data;
     if (!r || !r.available) return;
@@ -2556,6 +2658,7 @@
     if (tab.hidden) {
       if ($("s-radar").classList.contains("active")) activate("s-obs");
       radarView.pending = null;
+      radarStopLoop(false); $("rad-loop").hidden = true;
       return;
     }
     var key = JSON.stringify([r.zoom, r.metersPerPixel, r.bounds, r.marker, r.rings, r.scaleBar]);
@@ -2618,8 +2721,8 @@
         var current = radarView.data;
         radarView.good = {id:id, url:frame.url, ts:frame.ts, at:current.observedAt};
         radarView.clear = clear; radarView.failed = false; radarView.pending = null; radarView.retryAt = 0;
-        var echo = $("rad-echo"); echo.src = frame.url; echo.hidden = false;
         radarState();
+        radarLoopSync();          /* owns rad-echo.src: the loop when running, else this latest frame */
       };
       image.onerror = function () {
         if (radarView.pending !== id) return;
@@ -2629,6 +2732,8 @@
       image.src = frame.url;
     }
     radarState();
+    radarPreload(r);      /* load the past-hour frames (when the history is present) */
+    radarLoopSync();      /* start/continue/stop the loop for the current state */
   }
 
   function render(data) {
