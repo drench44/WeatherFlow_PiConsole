@@ -52,7 +52,17 @@ guesses wrong. Point at a specific browser with `WFP_CHROMIUM=/usr/bin/chromium`
 6. **Enable the kiosk service.** The systemd user service, autostart, and revert
    steps are in [`README.md`](README.md). Set `WFP_BIND=0.0.0.0` in the service to
    view the page from other devices at `http://<hostname>.local:8137`.
-7. **Reboot** (`sudo reboot`). The Pi autologins to the desktop and the kiosk comes
+7. **Pin the browser to the console.** A kiosk has no back button, so a stray tap
+   on any link would strand the panel on another site. Install the Chromium policy
+   that allows only the console's own origin (Pi OS reads `chromium-browser`,
+   plain Debian reads `chromium`; installing both is harmless):
+   ```
+   for d in /etc/chromium/policies/managed /etc/chromium-browser/policies/managed; do
+     sudo mkdir -p "$d" && sudo cp ~/wfpiconsole/design/almanac/kiosk/chromium-policy.json "$d/almanac-kiosk.json"
+   done
+   ```
+   Chromium reads it at launch (restart the kiosk service after installing).
+8. **Reboot** (`sudo reboot`). The Pi autologins to the desktop and the kiosk comes
    up fullscreen on its own. Autologin and the boot-time service both need this
    first reboot to take effect.
 

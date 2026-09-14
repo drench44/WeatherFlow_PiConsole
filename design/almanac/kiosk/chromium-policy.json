@@ -1,0 +1,6 @@
+{
+  "URLBlocklist": ["*"],
+  "URLAllowlist": ["http://127.0.0.1:8137", "http://localhost:8137", "http://127.0.0.1", "http://localhost"],
+  "DefaultPopupsSetting": 2,
+  "HomepageLocation": "http://127.0.0.1:8137/"
+}
