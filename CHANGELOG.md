@@ -7,6 +7,17 @@ to shared upstream code that the classic console benefits from too.
 ## 2026-09-14
 
 ### Radar
+- **Radar v4.2 geography scheduling.** An independent `geo` worker starts home
+  pre-warming with the engine, even on Observations and before radar fetches.
+  It renders one missing tile per 250ms scheduling quantum, yields between
+  background tiles, and idles after both themes/all home zooms are complete.
+  Station/revision changes rebuild the queue. Fresh settled camera reports
+  prioritize the current viewport; reported motion suppresses generation.
+  Radar network passes cannot block it, and PNG/revision writes are atomic.
+- **Kiosk benchmark summary first.** Cached paint, pan/pinch timing and draw
+  counts, actual CDP network request counts, graphics memory, disk tile counts
+  and fences precede details. `--verbose` includes raw frames/fetches/GPU data;
+  `--radar-dir` selects the local tile cache for disk counts.
 - **Radar v4.1 raster basemaps.** Paper and night now use opaque, versioned
   Natural Earth PNG-8 tiles with 4× antialiased strokes. The vector cell service
   and backing canvas are removed. Missing geography remains visible as a true

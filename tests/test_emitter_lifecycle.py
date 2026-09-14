@@ -124,11 +124,12 @@ def _response(payload):
 def test_start_is_idempotent_and_stop_cancels_every_handle(make_emitter, clock):
     emitter = make_emitter(scn.all_none())
     emitter.start()
-    # 6 intervals (emit, version, aqi, alerts, forecast, radar) + 5 boot one-shots
-    assert len(clock.events) == 12
+    # 8 intervals (emit, version, aqi, alerts, forecast, radar, intent, geo)
+    # plus 5 boot one-shots.
+    assert len(clock.events) == 13
 
     emitter.start()
-    assert len(clock.events) == 12       # re-armed, not stacked
+    assert len(clock.events) == 13       # re-armed, not stacked
 
     emitter.stop()
     assert clock.events == []            # one-shots included
@@ -164,6 +165,10 @@ def test_a_day_of_forecast_failures_stays_one_retry_chain(make_emitter, clock, m
     monkeypatch.setattr(ae.RadarSession, 'open', refuse)
     emitter = make_emitter(scn.all_none())
     attempts = []
+    # This simulates a full day of provider retries; raster correctness and the
+    # real independent geo worker are exercised in test_radar_v42.
+    monkeypatch.setattr(emitter, '_radar_geo_work',
+                        lambda token=None: setattr(emitter, '_radar_geo_idle', token))
     fetch = emitter._do_forecast
     monkeypatch.setattr(emitter, '_do_forecast', lambda: (attempts.append(clock.now), fetch())[1])
 
@@ -177,7 +182,7 @@ def test_a_day_of_forecast_failures_stays_one_retry_chain(make_emitter, clock, m
     # one retry chain PER provider, never a chain per failure: with the network
     # down, radar (also fetched) legitimately keeps its own single retry too
     assert sorted(emitter._retries) == ['forecast', 'radar']
-    assert len(clock.events) == 9                 # 7 intervals + forecast retry + radar retry
+    assert len(clock.events) == 10                # 8 intervals + forecast retry + radar retry
 
     emitter.stop()
     assert clock.events == [] and emitter._retries == {}

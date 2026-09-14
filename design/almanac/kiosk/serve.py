@@ -195,6 +195,18 @@ def _write_radar_intent(params):
         except OSError: pass
 
 
+def _radar_activity(params):
+    record=dict(at=time.time(),theme=params['radarTheme'][0],moving=params.get('radarMoving')==['1'])
+    centers,zooms=params.get('radarGeoCenter',[]),params.get('radarGeoZoom',[])
+    if len(centers)==len(zooms)==1:
+        if (re.fullmatch(r'-?\d{1,3}(\.\d+)?,-?\d{1,3}(\.\d+)?',centers[0],re.ASCII)
+                and re.fullmatch(r'[0-9]{1,2}',zooms[0],re.ASCII)):
+            lat,lon=map(float,centers[0].split(','));zoom=int(zooms[0])
+            if -85.05112878<=lat<=85.05112878 and -180<=lon<=180 and 4<=zoom<=10:
+                record.update(center=dict(lat=lat,lon=lon),zoom=zoom)
+    return record
+
+
 class Handler(http.server.SimpleHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
     def __init__(self, *a, **k):
@@ -219,7 +231,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                     if viewed_radar and params.get('radarTheme',[''])[0] in ('paper','night'):
                         marker=os.path.join(os.path.dirname(DATA),'radar_activity');tmp=marker+'.tmp'
                         try:
-                            with open(tmp,'w') as f:json.dump(dict(at=time.time(),theme=params['radarTheme'][0],moving=params.get('radarMoving')==['1']),f)
+                            with open(tmp,'w') as f:json.dump(_radar_activity(params),f)
                             os.replace(tmp,marker)
                         except OSError:pass
                     if 'radarSeq' in params:

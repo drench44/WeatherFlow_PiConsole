@@ -331,6 +331,11 @@ def cache_tile(radar_dir,theme,z,x,y,pinned=()):
     if target.is_file():return target
     raw=tile(theme,z,x,y)
     if not prune(radar_dir,pinned,len(raw),1):return None
+    atomic_write(target,raw)
+    return target
+
+
+def atomic_write(target,raw):
     target.parent.mkdir(parents=True,exist_ok=True);temp=None
     try:
         with tempfile.NamedTemporaryFile(dir=target.parent,prefix='.tile-',delete=False) as out:
@@ -338,18 +343,52 @@ def cache_tile(radar_dir,theme,z,x,y,pinned=()):
         os.replace(temp,target)
     finally:
         if temp and os.path.exists(temp):os.unlink(temp)
-    return target
 
 
-def warm(radar_dir,station,center,zoom,home_zoom=8,theme='paper',limit=1):
-    """One worker quantum, home order first, then the settled viewport."""
-    requests=list(home_requests(station,home_zoom,theme))
-    pinned={tile_path(radar_dir,*r) for r in requests}
-    px,py=world_point(center['lat'],center['lon'],zoom)
-    requests.extend((theme,zoom,x%2**zoom,y) for y in range(max(0,int(py//256)-2),min(2**zoom,int(py//256)+3)) for x in range(int(px//256)-3,int(px//256)+4))
+def publish_revision(radar_dir):
+    target=Path(radar_dir)/'.geo-revision'
+    if not target.is_file() or target.read_text()!=version():
+        atomic_write(target,version().encode())
+
+
+class WarmState:
+    """Only the geo worker owns this queue; completed home sets need no rescans."""
+    def __init__(self):
+        self.identity=None
+        self.home=deque()
+        self.pinned=set()
+
+    def prepare(self,radar_dir,station,home_zoom,theme):
+        identity=(str(radar_dir),version(),tuple(station),home_zoom)
+        if self.identity==identity:return
+        requests=list(home_requests(station,home_zoom,theme))
+        publish_revision(radar_dir)
+        self.home=deque(requests)
+        self.pinned={tile_path(radar_dir,*r) for r in requests}
+        self.identity=identity
+
+
+def viewport_requests(center,zoom,theme):
+    # The same central 5x3, then 7x5 margin order as home, at this camera only.
+    return (r for r in home_requests((center['lat'],center['lon']),zoom,theme)
+            if r[0]==theme and r[1]==zoom)
+
+
+def warm(radar_dir,station,center=None,zoom=None,home_zoom=8,theme='paper',limit=1,state=None):
+    """One tile by default: current viewport first, then resumable home order."""
+    state=state if state is not None else WarmState()
+    state.prepare(radar_dir,station,home_zoom,theme)
     made=0
-    for r in dict.fromkeys(requests):
+    for r in viewport_requests(center,zoom,theme) if center is not None else ():
         if not tile_path(radar_dir,*r).is_file():
-            cache_tile(radar_dir,*r,pinned=pinned);made+=1
-            if made>=limit:break
+            if cache_tile(radar_dir,*r,pinned=state.pinned) is None:return made
+            made+=1
+            if made>=limit:return made
+    while state.home:
+        r=state.home[0]
+        if not tile_path(radar_dir,*r).is_file():
+            if cache_tile(radar_dir,*r,pinned=state.pinned) is None:return made
+            made+=1
+        state.home.popleft()
+        if made>=limit:break
     return made

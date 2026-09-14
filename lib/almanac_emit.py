@@ -99,6 +99,8 @@ RADAR_LOOP_FRAMES = 8
 RADAR_DEEP_VIEW_SEC = 20
 RADAR_VIEW_POLL_GAP_SEC = 5  # normal wx.json polling is every two seconds
 RADAR_INTENT_CHECK_SEC = .1
+RADAR_GEO_QUANTUM_SEC = .25
+RADAR_GEO_UNVIEWED_SLEEP_SEC = .05
 RADAR_NEGATIVE_CACHE_SEC = 120
 RADAR_CACHE_GRACE_SEC = 120
 RADAR_IEM_METADATA_URL = "https://mesonet.agron.iastate.edu/data/gis/images/4326/mrms/lcref.json"
@@ -910,6 +912,8 @@ class AlmanacEmitter:
         self._radar_view_session = None
         self._radar_view_geometry = None
         self._radar_geometry_since = 0.
+        self._radar_geo_state = None
+        self._radar_geo_idle = None
         self._radar_lock = _RLock()
         self._radar_session = None
         self._radar_provider = None
@@ -1009,6 +1013,7 @@ class AlmanacEmitter:
             self._schedule(self._check_radar, RADAR_CHECK_INTERVAL, interval=True)
             self._radar_zoom_stamp = self._radar_preference_stamp()
             self._schedule(self._check_radar_zoom, RADAR_INTENT_CHECK_SEC, interval=True)
+            self._schedule(self._check_radar_geo, RADAR_GEO_QUANTUM_SEC, interval=True)
             return self._event
 
     def stop(self):
@@ -1157,19 +1162,72 @@ class AlmanacEmitter:
                 self._radar_zoom_stamp = stamp
                 self._spawn('radar', lambda: self._do_radar(intent_triggered=True, view_started=view_started))
 
-        elif (self._running and viewed and session is not None and 'radar' not in self._inflight
-              and hasattr(self,'_radar_geo_context') and time.monotonic()>=getattr(self,'_radar_geo_next',0)):
-            self._radar_geo_next=time.monotonic()+.25
-            self._spawn('radar',self._radar_geo_work)
-
-    def _radar_geo_work(self):
-        from lib.radar_basemap import warm
+    def _check_radar_geo(self, _dt=None):
+        if not self._running or 'geo' in self._inflight:
+            return
+        from lib.radar_basemap import version
+        config = getattr(self.app, 'config', {}) or {}
         try:
-            activity=json.loads(Path(self.output_path).with_name('radar_activity').read_text())
-            if activity.get('moving') or time.time()-activity['at']>5:return
-            station,center,zoom,home=self._radar_geo_context
-            warm(RADAR_DIR,station,center,zoom,home,activity.get('theme','paper'))
-        except (OSError,ValueError,KeyError):return
+            stat = Path(self.output_path).with_name('radar_activity').stat()
+            activity_stamp = (stat.st_ino, stat.st_mtime_ns, stat.st_size)
+        except OSError:
+            activity_stamp = None
+        token = (_cfg(config, 'Station', 'Latitude'), _cfg(config, 'Station', 'Longitude'),
+                 version(), activity_stamp, self._radar_is_viewed())
+        if token != self._radar_geo_idle:
+            self._spawn('geo', lambda: self._radar_geo_work(token))
+
+    def _radar_geo_work(self, token=None):
+        # No radar/session/result lock or transport context: home warming starts
+        # with the engine, including before its first scheduled radar fetch.
+        from lib.radar_basemap import WarmState, warm
+        config = getattr(self.app, 'config', {}) or {}
+        station = (_num(_cfg(config, 'Station', 'Latitude')),
+                   _num(_cfg(config, 'Station', 'Longitude')))
+        lat, lon = station
+        if lat is None or lon is None or not (-90 <= lat <= 90 and -180 <= lon <= 180):
+            self._radar_geo_idle = token
+            return
+        activity = {}
+        try:
+            record = json.loads(Path(self.output_path).with_name('radar_activity').read_text())
+            if isinstance(record, dict):
+                activity = record
+        except (OSError, ValueError):
+            pass
+        # Motion suppresses both queues, even if the last report is old. Only a
+        # subsequent settled report (or removal of the marker) clears it.
+        if activity.get('moving'):
+            self._radar_geo_idle = token
+            return
+        center, zoom = None, None
+        theme = activity.get('theme', 'paper')
+        if theme not in ('paper', 'night'):
+            theme = 'paper'
+        viewed = self._radar_is_viewed()
+        try:
+            candidate, level = activity['center'], activity['zoom']
+            if (viewed and 0 <= time.time()-activity['at'] < 5
+                    and type(level) is int and 4 <= level <= 10
+                    and isinstance(candidate, dict)
+                    and type(candidate.get('lat')) in (int, float)
+                    and type(candidate.get('lon')) in (int, float)
+                    and -85.05112878 <= candidate['lat'] <= 85.05112878
+                    and -180 <= candidate['lon'] <= 180):
+                center, zoom = candidate, level
+        except (KeyError, TypeError):
+            pass
+        if self._radar_geo_state is None:
+            self._radar_geo_state = WarmState()
+        try:
+            made = warm(RADAR_DIR, station, center, zoom, _radar_zoom_for(lat), theme,
+                        state=self._radar_geo_state)
+            if not made and not self._radar_geo_state.home:
+                self._radar_geo_idle = token
+            if made and center is None:
+                time.sleep(RADAR_GEO_UNVIEWED_SLEEP_SEC)
+        except (OSError, ValueError, ImportError) as error:
+            Logger.warning(f'almanac_emit: geography warming failed - {error}')
 
     def _radar_inventory_valid(self,snap):
         grid=(snap.tiles or {}).get('grid')
@@ -1994,7 +2052,7 @@ class AlmanacEmitter:
 
     def _radar_migrate_cache(self):
         import shutil
-        from lib.radar_basemap import version,remove_empty_parents
+        from lib.radar_basemap import publish_revision,remove_empty_parents
         root=Path(RADAR_DIR);root.mkdir(parents=True,exist_ok=True)
         site_revision=_radar_sites_revision();site_path=root/('sites-'+site_revision+'.json')
         marker=root/'.sites-revision'
@@ -2013,7 +2071,7 @@ class AlmanacEmitter:
         for obsolete in (root/'geo').glob('*/*/*/*/*.bin'):
             obsolete.unlink(missing_ok=True);remove_empty_parents(obsolete,root/'geo')
         revision.write_text(_radar_render_revision())
-        (root/'.geo-revision').write_text(version())
+        publish_revision(RADAR_DIR)
 
     def _do_radar(self, intent_triggered=None, view_started=False):
         """Primary-first orchestration; radar failures never alter engine health."""
@@ -2136,7 +2194,6 @@ class AlmanacEmitter:
                 ctx['tiles'] = sorted(_radar_grid(ctx,margin=1),key=lambda t: math.hypot(t[0]+.5-world_point(lat,lon,zoom)[0]/256,t[1]+.5-world_point(lat,lon,zoom)[1]/256))
                 from lib.radar_basemap import version
                 ctx['geo'] = dict(version=version(),base='radar/geo/',sites='radar/sites-'+_radar_sites_revision()+'.json')
-                self._radar_geo_context=(station,center,zoom,auto_zoom)
                 # Source/station knowledge can exist before the first tile. No camera acknowledgement.
                 if not self._radar_result.available:
                     self._radar_result = _RADAR_NONE._replace(available=True,reason=None,

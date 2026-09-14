@@ -432,16 +432,46 @@ Later stroke coverage replaces previous strokes against the original backdrop.
 The two backdrops and five stroke layers × two backdrops × sixteen coverages
 form a fixed 162-entry palette, with no dither, alpha or tRNS chunk.
 
-The existing single-flight radar worker renders one missing tile per idle
-250ms quantum. Acquisition/changed intent takes priority at the next quantum;
-an in-progress tile cannot be interrupted. Loopback activity gives active theme
-and motion state; generation requires a current idle viewing hint. The home
-7×5 block is pinned at every zoom in both themes (490 tiles). Active theme order:
-home zoom's central 5×3, its margin, z−1, z+1, z4, remaining zooms by distance;
-then the other theme in the same order. The settled viewport follows the home
-set. Geography has an independent **32,000,000-byte / 6,000-file** served-atime
+**v4.2 scheduling:** geography has its own single-flight `geo` worker, scheduled
+every 250ms from engine startup, independently of radar fetches, view markers
+and live viewing sessions. Each invocation renders at most one missing tile;
+250ms is an admission quantum, not a render deadline. A slow tile completes
+before the next geo invocation, without holding the radar result or transport
+locks. Background work sleeps another 50ms after a tile when there is no fresh
+viewed viewport. An in-progress tile cannot be interrupted.
+
+The home 7×5 block is pinned at every zoom in both themes (490 tiles away from
+the polar tile-row limits). Order is home zoom's central 5×3, its margin, z−1,
+z+1, z4, remaining zooms by distance; then the other theme in the same order.
+The initial theme defaults to paper without an activity report. The queue
+retains progress and idles when complete; station or basemap revision changes
+rebuild it, reusing any existing immutable tiles. An engine restart checks the
+same disk set and does not rerender existing tiles.
+
+Loopback `radar_activity` atomically carries `{at, theme, moving, center, zoom}`.
+The displayed camera (`radarGeoCenter`, `radarGeoZoom` on the ordinary poll) is
+independent of durable requested/auto zoom and the radar worker's current pass.
+With a viewed marker and activity age **0–5s**, missing tiles for that settled
+viewport and its margin precede the remaining home queue, in the reported theme.
+The freshness check applies only to viewport priority. Missing, malformed or
+stale activity never gates home warming, except that a report of `moving=true`
+suppresses both queues until a settled report or marker removal. No request is
+added during gestures: existing polls remain suppressed while moving, so the
+engine cannot know about unreported motion and can only yield at tile boundaries.
+Home and viewport PNGs, and the served geography revision marker, use a unique
+same-directory temporary file followed by atomic replacement. Geography has an
+independent **32,000,000-byte / 6,000-file** served-atime
 LRU. Pruning removes empty directories and never evicts home tiles. Radar cache
 pressure cannot evict geography. Routine tile access/miss logs are suppressed.
+
+`tools/benchmark_radar_kiosk.py` prints `summary` first: cached `firstPaintMs`,
+pan/pinch `{frames, maxDrawMs, p95DrawMs, maxDrawImages, serverRequests}`,
+`memoryPeakMiB`, `geoTilesOnDisk`, `radarTilesOnDisk`, and `fences`. CDP network
+events exclude browser-cache/service-worker responses from server request counts;
+each gesture includes its settling interval. Disk counts cover all revisions
+under `--radar-dir` (default `WFP_RADAR_DIR` or `~/almanac_web/radar`), and are
+null if that root is absent. Raw frames/fetches/decode/GPU details require
+`--verbose`. These graphics counters do not measure Chromium process RSS.
 
 Every opaque base-canvas paint is: baked ground → whole-plate graticule →
 same-version/same-theme z−2 ancestors → z−1 ancestors → exact tiles. Ancestors

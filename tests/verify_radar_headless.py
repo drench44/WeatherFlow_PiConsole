@@ -646,6 +646,13 @@ def review_cases(browser,server,theme):
     page.route('**/wx.json*',lambda route:route.abort())
     page.evaluate('radarPostIntent()');page.wait_for_timeout(300);assert page.evaluate('radarIntent.ready')
     page.unroute('**/wx.json*');page.evaluate('poll()');page.wait_for_function('!radarIntent.ready')
+    # Geography receives the displayed camera even with a worker/source clamp
+    # or a durable request that differs from the effective zoom.
+    activity=json.loads((server.root/'radar_activity').read_text())
+    camera=page.evaluate('radarCamera')
+    assert activity['zoom']==camera['zoom'] and activity['theme']==theme,activity
+    assert abs(activity['center']['lat']-camera['lat'])<1e-8,activity
+    assert abs(activity['center']['lon']-camera['lon'])<1e-8,activity
     # Restore actual eight-frame acquisition, then stage and abandon a source.
     (server.root/'wx.json').write_text(json.dumps(original));page.evaluate('d=>{sessionStorage.removeItem("radarCamera");radarCamera=null;radarRelease();renderRadar(d);radarActivate()}',original)
     page.wait_for_function('radarReady().length===8',timeout=20000)
