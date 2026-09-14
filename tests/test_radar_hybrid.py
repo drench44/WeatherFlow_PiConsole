@@ -235,7 +235,10 @@ def test_cold_warm_unviewed_counts_history_limit_and_atomic(make_emitter, hybrid
     starts = [c[3] for c in hybrid.calls]
     assert all(sum(t <= v < t + 60 for v in starts) <= 90 for t in starts)
     hybrid.now -= 60; hybrid.mono += 60; hybrid.calls.clear(); emitter._do_radar()
-    assert len(hybrid.calls) == 1  # warm check: zero archive HEADs or tile GETs
+    assert len(hybrid.calls) == 28  # warm crops + first eligible adjacent newest round
+    assert all(c[1] == 'GET' and '/8/' not in c[2] for c in hybrid.calls)
+    hybrid.calls.clear(); emitter._do_radar()
+    assert len(hybrid.calls) == 1  # once per stamp
     assert not list(Path(ae.RADAR_DIR).rglob('*.tmp.*'))
 
 
@@ -263,7 +266,8 @@ def test_build_limit_and_real_gap_spacing(make_emitter, hybrid, monkeypatch):
     r = emitter._build_payload()['radar']
     assert r['completeFrameCount'] == 2 and r['historyGaps']
     assert r['frameSpacingSec'] == 240 and r['cadenceSec'] == 120
-    assert len(hybrid.calls) == 28  # metadata + 2 complete crops (20) + failed archive (1)
+    assert len(hybrid.calls) == 55  # metadata + 2 crops + failed HEAD + 27 adjacent tiles
+    assert sum('/7/' in c[2] or '/9/' in c[2] for c in hybrid.calls) == 27
 
 
 def test_negative_archive_cache_and_expiry(make_emitter, hybrid):

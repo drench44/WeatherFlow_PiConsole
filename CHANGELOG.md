@@ -12,7 +12,7 @@ to shared upstream code that the classic console benefits from too.
   scan keeps its own reprojection at stale opacity until matching echoes decode.
   A second press continues from that held scan. The plate stays painted throughout.
 - **Stop paying twice for the same tiles.** A bounded native-tile cache keeps valid
-  downloads from superseded passes. Four concurrent tile fetches share persistent
+  downloads from superseded passes. Concurrent tile fetches share persistent
   IPv4/SNI connections across passes; failures and idle sockets are discarded.
   The shared limiter keeps its history reserve for the next widest mosaic. Worker
   publications emit immediately, intent checks run at 100 ms, and the page polls at
@@ -27,6 +27,16 @@ to shared upstream code that the classic console benefits from too.
   history fills in about a minute and a half rather than five; the tile cache
   means re-zooms do not spend it again. The attribution in the caption is text,
   never a link: a kiosk has no way back from another site.
+
+- **DNS stays warm when sockets go cold.** Resolved IPv4 addresses now live for
+  15 minutes independently of keep-alive expiry. One worker resolves outside the
+  pool lock; expired addresses serve tiles immediately while a background refresh
+  runs, and a resolver failure keeps the last good answer until the next pass.
+- **Warm the next zoom when idle.** A viewed radar pass with 60 spare requests
+  above the interaction reserve warms the newest tiles one zoom out and one zoom
+  in, once per scan. A new intent stops submissions; valid downloads stay in the
+  same bounded cache without becoming frames. Newest fetches use six connections
+  for parallel cold renders; history and idle warming stay at four.
 
 ## 2026-09-13
 

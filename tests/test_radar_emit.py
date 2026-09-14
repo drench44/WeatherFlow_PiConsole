@@ -120,7 +120,8 @@ def test_viewing_warms_history_then_expiry_prunes_it(make_emitter, radar_net, ra
     marker.write_text(str(ae.time.time()))
     radar_net['calls'].clear(); emitter._radar_request_times.clear(); emitter._do_radar()
     emitter._radar_request_times.clear(); emitter._do_radar()
-    assert len(tile_calls(radar_net)) == 6 * 15  # history yields before starting a frame
+    assert len(tile_calls(radar_net)) == 7 * 15  # six history frames + adjacent newest
+    assert sum('/256/6/' in u for u in tile_calls(radar_net)) == 15
     assert all(f['complete'] for f in emitter._radar_frames)
     assert len(list(radar_dir.rglob('*.png'))) == 7
     emitter._radar_request_times.clear()
@@ -209,7 +210,8 @@ def test_composite_and_one_snapshot(make_emitter, radar_net, radar_dir, monkeypa
     assert result.available and result.latest.endswith('/1800000600')
     assert [f['ts'] for f in result.frames] == radar_net['times']
     assert all(f['complete'] and f['url'] == 'radar/' + f['id'] + '.png' for f in result.frames)
-    assert len(tile_calls(radar_net)) == 2 * len(ae._radar_viewport(47.61, -122.33, 7, 956, 490)[0])
+    assert sum('/256/7/' in u for u in tile_calls(radar_net)) == 2 * len(ae._radar_viewport(47.61, -122.33, 7, 956, 490)[0])
+    assert sum('/256/6/' in u for u in tile_calls(radar_net)) == 15  # no extra publication
     with Image.open(radar_dir / (result.latest + '.png')) as image:
         assert image.getpixel((240, 240)) == (46, 147, 168, 100)  # alpha wasn't squared
     assert not list(radar_dir.rglob('*.tmp.*'))
@@ -225,7 +227,8 @@ def test_cache_and_prune(make_emitter, radar_net, radar_dir, radar_viewed):
     assert radar_net['calls'] == [ae.RADAR_RAINVIEWER_MANIFEST_URL]
     radar_net['times'] = [1800000600, 1800001200]
     emitter._do_radar()
-    assert len(tile_calls(radar_net)) == len(ae._radar_viewport(47.61, -122.33, 7, 956, 490)[0])
+    assert sum('/256/7/' in u for u in tile_calls(radar_net)) == len(ae._radar_viewport(47.61, -122.33, 7, 956, 490)[0])
+    assert sum('/256/6/' in u for u in tile_calls(radar_net)) == 15  # new stamp warms again
     assert sorted(p.stem for p in radar_dir.rglob('*.png')) == ['1800000000', '1800000600', '1800001200']  # grace
 
 

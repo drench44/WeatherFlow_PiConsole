@@ -155,7 +155,7 @@ def test_session_persists_across_passes_and_drops_on_failure(make_emitter, hybri
     assert emitter._radar_session is not session and emitter._radar_available
 
 
-def test_transport_four_leases_reuse_idle_expiry_and_error(monkeypatch):
+def test_transport_six_leases_reuse_idle_expiry_and_error(monkeypatch):
     mono = [0.]
     monkeypatch.setattr(http.time, 'monotonic', lambda:mono[0])
     lookup = Mock(return_value=[(2,1,6,'',('192.0.2.1',443))])
@@ -170,19 +170,19 @@ def test_transport_four_leases_reuse_idle_expiry_and_error(monkeypatch):
         conns.append(conn); return conn
     monkeypatch.setattr(http,'_Connection',connection)
     session=http.RadarSession(); req=urllib.request.Request('https://example/tile')
-    leased=[session.open(req,10) for _ in range(4)]
-    assert len(conns)==4 and lookup.call_count==1
+    leased=[session.open(req,10) for _ in range(6)]
+    assert len(conns)==6 and lookup.call_count==1
     waiting=threading.Event(); acquired=threading.Event()
-    def fifth():
+    def seventh():
         waiting.set()
         with session.open(req,10): acquired.set()
-    worker=threading.Thread(target=fifth);worker.start();assert waiting.wait(5)
+    worker=threading.Thread(target=seventh);worker.start();assert waiting.wait(5)
     assert not acquired.wait(.03)
     leased[0].close();assert acquired.wait(5);worker.join(5)
     for response in leased: response.close()
     session.begin_pass()
     with session.open(req,10): pass
-    assert len(conns)==4 and lookup.call_count==1
+    assert len(conns)==6 and lookup.call_count==1
     conns[0].request.side_effect=OSError('broken')
     with pytest.raises(OSError): session.open(req,10)
     conns[0].close.assert_called_once()
@@ -190,7 +190,7 @@ def test_transport_four_leases_reuse_idle_expiry_and_error(monkeypatch):
     mono[0]=61;session.begin_pass()
     assert not session.connections
     with session.open(req,10): pass
-    assert len(conns)==5 and lookup.call_count==2
+    assert len(conns)==7 and lookup.call_count==1
     session.close()
 
 

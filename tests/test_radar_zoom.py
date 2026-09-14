@@ -117,7 +117,7 @@ def test_unused_history_expires_and_zoom_only_builds_latest(make_emitter, radar_
     radar_net['calls'].clear(); emitter._do_radar()
     r = emitter._build_payload()['radar']
     assert r['zoom'] == 6 and r['completeFrameCount'] == 1
-    assert len(tile_calls(radar_net)) == len(ae._radar_viewport(47.61, -122.33, 6, 956, 490)[0])
+    assert not tile_calls(radar_net)  # newest warmed at zoom 6 while previously viewed
     assert all('/256/6/' in c for c in tile_calls(radar_net))
     radar_net['calls'].clear(); emitter._do_radar()
     assert not tile_calls(radar_net)

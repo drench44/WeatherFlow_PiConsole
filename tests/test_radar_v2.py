@@ -78,7 +78,7 @@ def test_readiness_lag_and_fail_fast(make_emitter,hybrid):
     assert gets
     stamps=[datetime.strptime(u.split('lcref-')[1].split('/')[0],'%Y%m%d%H%M').replace(tzinfo=timezone.utc).timestamp() for u in gets]
     assert all(hybrid.now-ts>=300 for ts in stamps)
-    assert all(stamps.count(t)<=4 for t in set(stamps))  # only the initial in-flight batch
+    assert all(stamps.count(t)<=6 for t in set(stamps))  # only the initial in-flight batch
     assert emitter._radar_result.source_id=='rainviewer'
 
 
@@ -86,7 +86,7 @@ def test_placeholder_fail_fast(make_emitter,hybrid):
     hybrid.tile=png((255,0,0,255))
     emitter=make_emitter(); emitter._do_radar()
     gets=[c[2].split('lcref-')[1].split('/')[0] for c in hybrid.calls if 'mrms::' in c[2]]
-    assert gets and all(gets.count(t)<=4 for t in set(gets))
+    assert gets and all(gets.count(t)<=6 for t in set(gets))
 
 
 def test_stickiness_logs_failure_then_switch_and_recovery(make_emitter,hybrid,monkeypatch):

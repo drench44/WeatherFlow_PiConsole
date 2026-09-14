@@ -198,7 +198,7 @@ def test_zero_byte_failures_retry_but_post_does_not(origin, monkeypatch, error):
     finally: session.close()
 
 
-def test_four_workers_complete_frame_with_closing_connections(make_emitter, origin, tmp_path, monkeypatch):
+def test_six_workers_complete_frame_with_closing_connections(make_emitter, origin, tmp_path, monkeypatch):
     origin.close_after = 1
     origin.alternate = True
     origin.delay = .02
@@ -216,8 +216,8 @@ def test_four_workers_complete_frame_with_closing_connections(make_emitter, orig
         assert emitter._radar_result.source_id == 'iem-mrms-lcref'
         assert sum(f['complete'] for f in emitter._radar_result.frames) == 1
         session = emitter._radar_session
-        assert origin.peak == 4
-        assert len(session.connections[('localhost', int(origin.url.rsplit(':',1)[1]))]) <= 4
+        assert origin.peak == 6
+        assert len(session.connections[('localhost', int(origin.url.rsplit(':',1)[1]))]) <= 6
         assert emitter._radar_transport_retries == session.retries > 0
         assert len(emitter._radar_request_times) == len(origin.requests) + session.retries
         assert not warnings and not any('SWITCH' in line for line in infos)

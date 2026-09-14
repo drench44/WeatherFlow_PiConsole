@@ -212,15 +212,26 @@ UTC rollover applies to both paths. MRMS's native raster covers longitude
 −130…−60, latitude 20…55; crossing that domain sets `partialCoverage:true`.
 
 The transport uses standard-library `http.client.HTTPSConnection`, with at most
-four leased connections per host. A connection stays leased until the response
-body has been consumed or closed; four tile workers fetch each frame incrementally.
-Sessions and successful IPv4 DNS results survive worker passes. Each host is
-resolved with `AF_INET`; the resolved IP retains the original TLS SNI, certificate
-hostname verification and HTTP Host. Errors discard the affected connection;
-provider changes and shutdown close the session. Idle connections older than 60 s
-are discarded before reuse. Resolver exceptions are cached only through the current
-pass. A synchronous system DNS lookup cannot be interrupted by socket timeout;
-an over-budget lookup is rejected on return.
+six leased connections per host. A connection stays leased until the response
+body has been consumed or closed; newest frames use six tile workers, history
+and idle prefetch use four. Sessions and successful IPv4 DNS results survive
+worker passes and socket expiry. Each host is resolved with `AF_INET`; the
+resolved IP retains the original TLS SNI, certificate hostname verification and
+HTTP Host. DNS has its own 15-minute monotonic TTL. One caller resolves outside
+the pool lock, with a per-host event sharing the result among cold callers;
+another host can proceed meanwhile. Expired good addresses remain immediately
+usable while one background refresh runs. A failed refresh keeps those addresses
+and retries next pass; a cold resolver failure is also charged only once per pass.
+System DNS cannot be interrupted by socket timeout; an over-budget cold lookup
+is rejected on return, while cached callers never wait for resolution.
+
+Idle sockets expire after four seconds or the smaller advertised Keep-Alive
+window minus 250 ms. A reused GET/HEAD that fails before any response byte is
+retried once on a fresh socket within the original deadline and atomic rate gate.
+Partial responses and fresh-socket failures propagate. Connection: close drops
+the socket; provider changes and shutdown close the session. A primary transport
+hiccup retains the completed scan and retries in seconds; repeated failed passes
+permit fallback. Transport errors do not negatively cache frames.
 
 Validated native PNG bytes enter a 400-tile in-memory LRU before cancellation is
 checked. Keys include source, site when applicable, scan timestamp, zoom and tile
@@ -229,16 +240,36 @@ keys also include its server-side colour scheme and options. A pan or restarted
 crop reuses overlapping tiles without HTTP, even if the earlier crop never finished.
 Truncated, oversized, placeholder and invalid tiles never enter this cache.
 
+After a successful pass publishes `idle`, a fresh `radar_viewed` marker permits
+one adjacent-zoom prefetch round per source/newest timestamp. The rolling window
+must have at least 60 free requests above the 34-request interaction reserve.
+For the same centre, Z−1 and Z+1 within source bounds warm only newest native
+tiles in the same LRU. Site mode uses known scan listings and intersecting sites;
+it does not fetch extra metadata. RainViewer warms at most once per 10-minute
+stamp, including across zoom/centre changes. Interrupted rounds also count once.
+Prefetch never composites, publishes, creates history entries, or schedules a
+retry. Intent checkpoints stop new submissions immediately; active requests drain
+into the LRU. View freshness is checked again during warming. Every prefetch
+request and transport retry preserves the interaction reserve atomically. History
+can consume the available headroom, in which case the idle round is skipped.
+
+The existing 400-entry limit already fits three zooms × 15 tiles × two stamps
+(90 entries), so it is unchanged. Only compressed PNG bytes are retained: memory
+is the sum of their byte lengths plus dictionary/key overhead, not 400 decoded
+RGBA images. For comparison, 90 decoded 256×256 RGBA tiles would occupy 22.5 MiB.
+The transport's 2 MiB body limit gives a conservative 800 MiB raw-byte ceiling
+for 400 maximally sized responses; normal radar PNGs are much smaller.
+
 All metadata, HEAD, tile, conditional and failing requests share a rolling
-90-request/minute monotonic limiter across adapters. Reservation is locked across
+240-request/minute monotonic limiter across adapters. Reservation is locked across
 tile threads, so concurrent starts cannot overspend it. Per-source 429 cooldowns
 honor numeric or HTTP-date `Retry-After`. Maximum request timeout is 10 s,
 primary acquisition budget 25 s, full build budget 150 s, maximum 20 uncached
 frame attempts per pass. No deadline was raised for v3. An HTTP error, invalid
 PNG, incorrect dimensions, oversized body (>2 MiB), or solid opaque red IEM
 placeholder stops new submissions for that mosaic candidate (or individual site layer).
-Already-active requests drain, retaining their valid tiles; at most four are in flight. Transparent data is a valid
-clear frame. Negative cache TTL is 120 s; only complete 256×256 tiles contribute
+Already-active requests drain, retaining their valid tiles; at most six newest or
+four history/prefetch tiles are in flight. Transparent data is a valid clear frame. Negative cache TTL is 120 s; only complete 256×256 tiles contribute
 to an atomically published crop. Native alpha is preserved within each tile
 layer. Site layers use RGBA alpha compositing, with the site nearest the viewport
 centre on top.
@@ -451,8 +482,8 @@ blocks it, retain the geometry-only view, publish idle, and retry at the necessa
 request-window or cooldown expiry. Retained failure records describe the retained
 intent and frame counts. Mid-newest budget exhaustion without any fresh retained
 result remains failed; history budget yields remain idle.
-History starts a frame only if it leaves at least 17 requests: the widest mosaic's
-5×3 tiles plus metadata and archive HEAD (or the current newest cost, if larger).
+History starts a frame only if it leaves at least 34 requests: two widest mosaics
+of 5×3 tiles plus metadata and archive HEAD (or the current newest cost, if larger).
 This preserves the interactive reserve even when the next zoom needs more tiles.
 Supersession queues one notice, but a newer intent's acknowledgement takes priority
 over an older queued notice. Neither failure nor cancellation changes the last

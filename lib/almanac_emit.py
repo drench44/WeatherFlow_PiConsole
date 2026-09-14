@@ -95,6 +95,8 @@ RADAR_HTTP_TIMEOUT_SEC = 10
 RADAR_PRIMARY_DEADLINE_SEC = 25
 RADAR_TILE_CACHE_SIZE = 400
 RADAR_TILE_WORKERS = 4
+RADAR_NEWEST_TILE_WORKERS = 6
+RADAR_PREFETCH_HEADROOM = 60
 RADAR_INTENT_CHECK_SEC = .1
 RADAR_NEGATIVE_CACHE_SEC = 120
 RADAR_CACHE_GRACE_SEC = 120
@@ -822,6 +824,7 @@ class AlmanacEmitter:
         self._radar_request_times = []  # ALL attempts, shared across sources and retries
         self._radar_negative = {}
         self._radar_tiles = OrderedDict()
+        self._radar_prefetched = {}  # source -> last attempted newest stamp
         self._radar_lock = _RLock()
         self._radar_session = None
         self._radar_provider = None
@@ -1061,6 +1064,16 @@ class AlmanacEmitter:
     def _radar_checkpoint(self, ctx):
         if 'preference_stamp' in ctx and ctx['preference_stamp'] != self._radar_preference_stamp(ctx.get('stamp_names')):
             raise _RadarSuperseded('radar intent changed')
+        if ctx.get('prefetch') and not self._radar_is_viewed():
+            raise _RadarBudget('radar tab no longer viewed')
+
+    def _radar_is_viewed(self):
+        try:
+            with open(os.path.join(os.path.dirname(self.output_path), 'radar_viewed')) as marker:
+                age = time.time() - float(marker.read(128))
+            return 0 <= age < RADAR_VIEW_TTL
+        except (OSError, ValueError, UnicodeError):
+            return False
 
     def _radar_emit_now(self):
         # Scheduling is thread-safe; payload construction stays on the Kivy thread.
@@ -1117,29 +1130,29 @@ class AlmanacEmitter:
                                       frameTotal=len(snap.frames), forSeq=intent['seq'], intent=intent)
         self._radar_emit_now()
 
-    def _radar_request_gate(self, source, deadline):
+    def _radar_request_gate(self, source, deadline, reserve=0):
         with self._radar_lock:
             now = time.monotonic()
             self._radar_request_times = [t for t in self._radar_request_times if now - t < 60]
             if (now >= deadline or now < self._radar_cooldowns.get(source, 0) or
-                    len(self._radar_request_times) >= RADAR_REQUESTS_PER_MIN):
+                    len(self._radar_request_times) >= RADAR_REQUESTS_PER_MIN - reserve):
                 raise _RadarBudget('radar request budget/cooldown')
             self._radar_request_times.append(now)
         return now
 
-    def _radar_transport_retry(self, source, deadline):
-        self._radar_request_gate(source, deadline)
+    def _radar_transport_retry(self, source, deadline, reserve=0):
+        self._radar_request_gate(source, deadline, reserve)
         with self._radar_lock:
             self._radar_transport_retries += 1
             count = self._radar_transport_retries
         Logger.info(f'almanac_emit: radar {source} stale connection retry; transport_retries={count}')
 
-    def _radar_request(self, source, url, deadline, method='GET', metadata=False):
+    def _radar_request(self, source, url, deadline, method='GET', metadata=False, reserve=0):
         """Validated transport; every attempt uses one monotonic rate/cooldown gate."""
         import urllib.request
         import urllib.error
         from email.utils import parsedate_to_datetime
-        now = self._radar_request_gate(source, deadline)
+        now = self._radar_request_gate(source, deadline, reserve)
         headers = {'User-Agent': 'WeatherFlow-PiConsole-almanac'}
         cached = self._radar_metadata.get(url)
         if metadata:
@@ -1186,8 +1199,9 @@ class AlmanacEmitter:
             raise
 
     def _radar_tile_batch(self, source, stamp, ctx, deadline, url, site):
-        """Four in flight at most; drain on cancellation, retaining every success."""
+        """Six newest / four background requests; retain successes on cancellation."""
         from PIL import Image
+        workers = ctx.get('tile_workers', RADAR_TILE_WORKERS)
         def fetch(tile):
             tx, ty, _, _ = tile
             # Native IEM bytes have no dependency on our remapping revision.
@@ -1200,7 +1214,8 @@ class AlmanacEmitter:
                     self._radar_tiles.move_to_end(key)
                     return tile, raw
             self._radar_checkpoint(ctx)
-            raw = self._radar_request(source, url(tx, ty), deadline)
+            options = dict(reserve=RADAR_HISTORY_RESERVE) if ctx.get('prefetch') else {}
+            raw = self._radar_request(source, url(tx, ty), deadline, **options)
             if not raw.startswith(b'\x89PNG\r\n\x1a\n'):
                 raise ValueError('radar response is not PNG')
             with Image.open(io.BytesIO(raw)) as image:
@@ -1219,13 +1234,13 @@ class AlmanacEmitter:
             return tile, raw
 
         tiles = iter(_radar_site_tiles(ctx, site))
-        with ThreadPoolExecutor(max_workers=RADAR_TILE_WORKERS, thread_name_prefix='radar-tile') as pool:
+        with ThreadPoolExecutor(max_workers=workers, thread_name_prefix='radar-tile') as pool:
             pending = set()
             try:
                 for tile in tiles:
                     self._radar_checkpoint(ctx)
                     pending.add(pool.submit(fetch, tile))
-                    if len(pending) == RADAR_TILE_WORKERS:
+                    if len(pending) == workers:
                         break
                 while pending:
                     done, pending = wait(pending, return_when=FIRST_COMPLETED)
@@ -1507,10 +1522,12 @@ class AlmanacEmitter:
         latest = build(newest, ctx['deadline'])
         if not latest['complete']:
             raise ValueError('no complete RainViewer latest')
+        ctx['rainviewer_prefix'] = host + past[newest]
         return self._radar_history(source, newest, newest, ctx, build, latest, sorted(past))
 
     def _radar_history(self, source, newest, advertised, ctx, build, latest, slots=None):
         """Publish latest promptly, then atomically replace with bounded backfill."""
+        ctx['tile_workers'] = RADAR_TILE_WORKERS
         settings = _RADAR_SOURCES[source]
         slots = slots or list(range(newest - RADAR_HISTORY_SEC, newest + 1, settings['cadence']))
         frames = {t: _radar_frame(source, t, ctx, _radar_site_pairs(ctx, t)
@@ -1591,6 +1608,55 @@ class AlmanacEmitter:
                 else:
                     self._schedule_retry('radar', self._check_radar, RADAR_RETRY_SEC)
         return self._radar_result
+
+    def _radar_prefetch(self, source, ctx):
+        """Idle-only native tiles: no crops, history entries or publications."""
+        snap = self._radar_result
+        newest = snap.ts_frame
+        if (not ctx['viewed'] or not self._radar_is_viewed() or
+                ctx.get('refresh', {}).get('state') != 'idle' or
+                self._radar_prefetched.get(source, -1) >= newest or
+                self._radar_headroom_delay(source, RADAR_PREFETCH_HEADROOM + RADAR_HISTORY_RESERVE)):
+            return
+        self._radar_checkpoint(ctx)
+        self._radar_prefetched[source] = newest  # interrupted rounds also cost once
+        warm = dict(ctx, prefetch=True, tile_workers=RADAR_TILE_WORKERS)
+        retry = self._radar_session.on_retry
+        self._radar_session.on_retry = lambda end: self._radar_transport_retry(source, end, RADAR_HISTORY_RESERVE)
+        try:
+            floor = RADAR_SITE_MIN_ZOOM if source == 'iem-nexrad-n0b' else RADAR_MIN_ZOOM
+            for zoom in (ctx['zoom'] - 1, ctx['zoom'] + 1):
+                self._radar_checkpoint(warm)
+                if not floor <= zoom <= _RADAR_SOURCES[source]['max_zoom']:
+                    continue
+                tiles, _, bounds, _ = _radar_viewport(ctx['center']['lat'], ctx['center']['lon'],
+                    zoom, RADAR_VIEWPORT_W, RADAR_VIEWPORT_H)
+                warm.update(zoom=zoom, tiles=tiles, bounds=bounds)
+                if source == 'iem-nexrad-n0b':
+                    sites, _ = _radar_sites(ctx['station'], bounds)
+                    warm['sites'] = [dict(s, reporting=bool(ctx['site_scans'].get(s['id']))) for s in sites]
+                    pairs = _radar_site_pairs(warm, newest)
+                else:
+                    pairs = ((None, newest),)
+                for site, stamp in pairs:
+                    utc = datetime.fromtimestamp(stamp, timezone.utc).strftime('%Y%m%d%H%M')
+                    if source == 'iem-mrms-lcref':
+                        url = lambda x, y: RADAR_IEM_TILE_TEMPLATE.format(stamp=utc, z=zoom, x=x, y=y)
+                    elif source == 'iem-nexrad-n0b':
+                        url = lambda x, y: RADAR_SITE_TILE_TEMPLATE.format(site=site[1:], stamp=utc, z=zoom, x=x, y=y)
+                    else:
+                        url = lambda x, y: (f'{ctx["rainviewer_prefix"]}/256/{zoom}/{x}/{y}/'
+                            f'{RADAR_RAINVIEWER_COLOR}/{RADAR_RAINVIEWER_TILE_OPTS}.png')
+                    for _ in self._radar_tile_batch(source, stamp, warm, ctx['deadline'], url, site):
+                        pass
+        except _RadarSuperseded:
+            raise
+        except Exception:
+            # Optional warming must never invalidate the published pass or cause
+            # source fallback, negative frame caching, or additional retries.
+            pass
+        finally:
+            self._radar_session.on_retry = retry
 
     def _radar_prune(self, previous):
         """Prune only owned namespaces; give abandoned generations decode grace."""
@@ -1683,12 +1749,7 @@ class AlmanacEmitter:
                 pass  # absence/auto/invalid all mean latitude-auto
             if intent_record is not None:
                 desired = None if intent_record['zoom']=='auto' else intent_record['zoom']
-            try:
-                with open(os.path.join(os.path.dirname(self.output_path), 'radar_viewed')) as marker:
-                    viewed_age = time.time() - float(marker.read(128))
-                viewed = 0 <= viewed_age < RADAR_VIEW_TTL
-            except (OSError, ValueError, UnicodeError):
-                viewed = False
+            viewed = self._radar_is_viewed()
             unit = _radar_distance_unit(config)
             # One budget spans both attempts; geometry is source-specific, intent is not.
             ctx = dict(center=center, nexrad=_radar_nexrad(station_lat, station_lon, unit), viewed=viewed,
@@ -1781,6 +1842,7 @@ class AlmanacEmitter:
                     return
                 started = time.monotonic()
                 try:
+                    ctx['tile_workers'] = RADAR_NEWEST_TILE_WORKERS
                     adapter(ctx)
                     self._radar_transport_failures.pop(source, None)
                     if previous.available and previous.source_id != self._radar_result.source_id:
@@ -1793,6 +1855,7 @@ class AlmanacEmitter:
                         self._radar_retained_refresh('failed')
                     else:
                         self._radar_publish_refresh(ctx, state='idle')
+                        self._radar_prefetch(source, ctx)
                     return
                 except _RadarSuperseded:
                     raise

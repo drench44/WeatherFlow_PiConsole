@@ -108,12 +108,16 @@ class _Response:
 
 
 class RadarSession:
-    MAX_CONNECTIONS = 4
+    MAX_CONNECTIONS = 6
     IDLE_SEC = 4
+    DNS_TTL_SEC = 15 * 60
 
     def __init__(self, on_retry=None):
         self.on_retry = on_retry
         self.addresses = {}
+        self._resolved_at = {}
+        self._dns_errors = {}
+        self._resolving = {}  # host -> event; cold callers share one lookup
         self.connections = {}  # host -> connections, including leased sockets
         self._busy = set()
         self._used = {}
@@ -125,13 +129,66 @@ class RadarSession:
     def begin_pass(self):
         with self._condition:
             # A broken resolver costs once per pass; the next pass may recover.
-            self.addresses = {k:v for k,v in self.addresses.items() if not isinstance(v, Exception)}
+            self._dns_errors.clear()
             self._expire()
+
+    def _resolve(self, key, event):
+        # Never hold the pool lock during resolver I/O, including refreshes.
+        try:
+            addresses = socket.getaddrinfo(*key, socket.AF_INET, socket.SOCK_STREAM)
+            if not addresses:
+                raise socket.gaierror('no radar IPv4 addresses')
+        except OSError as error:
+            with self._condition:
+                if not self._closed:
+                    self._dns_errors[key] = error
+        else:
+            with self._condition:
+                if not self._closed:
+                    self.addresses[key] = addresses
+                    self._resolved_at[key] = time.monotonic()
+        finally:
+            with self._condition:
+                self._resolving.pop(key, None)
+                event.set()
+
+    def _addresses_for(self, key, end):
+        with self._condition:
+            if self._closed:
+                raise OSError('radar session closed')
+            cached = self.addresses.get(key)
+            expired = time.monotonic() - self._resolved_at.get(key, 0) >= self.DNS_TTL_SEC
+            if cached is not None and not expired:
+                return cached
+            error = self._dns_errors.get(key)
+            if error is not None:
+                if cached is not None:
+                    return cached  # failed refresh retries next pass
+                raise error
+            event = self._resolving.get(key)
+            resolve = event is None
+            if resolve:
+                event = self._resolving[key] = threading.Event()
+        if resolve:
+            if cached is not None:
+                threading.Thread(target=self._resolve, args=(key, event),
+                                 name='radar-dns', daemon=True).start()
+            else:
+                self._resolve(key, event)
+        if cached is not None:
+            return cached  # stale-while-refresh: first tile never waits for DNS
+        if not event.wait(max(0, end - time.monotonic())):
+            raise TimeoutError('radar DNS exceeded request deadline')
+        with self._condition:
+            if self._closed:
+                raise OSError('radar session closed')
+            if key in self._dns_errors:
+                raise self._dns_errors[key]
+            return self.addresses[key]
 
     def _expire(self):
         now = time.monotonic()
         for key, conns in list(self.connections.items()):
-            had_connections = bool(conns)
             for conn in list(conns):
                 if conn not in self._busy and now - self._used.get(conn, now) >= self._idle_sec.get(conn, self.IDLE_SEC):
                     conn.close()
@@ -140,8 +197,6 @@ class RadarSession:
                     self._idle_sec.pop(conn, None)
             if not conns:
                 self.connections.pop(key, None)
-                if had_connections:
-                    self.addresses.pop(key, None)
 
     def _release(self, key, conn, broken=False, idle_sec=None):
         with self._condition:
@@ -165,19 +220,12 @@ class RadarSession:
         key = (url.hostname, url.port or 443)
         end = time.monotonic() + timeout
         for attempt in range(2):
+            addresses = self._addresses_for(key, end)
             with self._condition:
                 while True:
                     if self._closed:
                         raise OSError('radar session closed')
                     self._expire()  # also expire sockets released during pool waits
-                    if key not in self.addresses:
-                        try:
-                            self.addresses[key] = socket.getaddrinfo(*key, socket.AF_INET, socket.SOCK_STREAM)
-                        except OSError as error:
-                            self.addresses[key] = error
-                    addresses = self.addresses[key]
-                    if isinstance(addresses, Exception):
-                        raise addresses
                     remaining = end - time.monotonic()
                     if remaining <= 0:
                         raise TimeoutError('radar DNS/pool exceeded request deadline')
@@ -241,4 +289,8 @@ class RadarSession:
                     if conn not in self._busy:
                         self._release(key, conn, broken=True)
             self.addresses.clear()
+            self._resolved_at.clear()
+            self._dns_errors.clear()
+            for event in self._resolving.values():
+                event.set()
             self._condition.notify_all()
