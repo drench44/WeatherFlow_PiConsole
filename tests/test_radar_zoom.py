@@ -285,7 +285,7 @@ def test_durable_link_survives_runtime_directory_recreation(make_emitter,hybrid,
 
 def test_zoom_wakeup_coalesces_busy_changes_and_stops(make_emitter,tmp_path,monkeypatch):
     emitter=make_emitter(); emitter._running=True
-    spawned=[]; monkeypatch.setattr(emitter,'_check_radar',lambda: spawned.append(True))
+    spawned=[]; monkeypatch.setattr(emitter,'_spawn',lambda key, worker: spawned.append(worker))
     pref=tmp_path/'radar_zoom'; pref.write_text('6')
     emitter._inflight.add('radar')
     emitter._check_radar_zoom(); pref.write_text('8'); emitter._check_radar_zoom()

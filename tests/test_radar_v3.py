@@ -650,7 +650,8 @@ def test_pan_cap_cannot_replace_station_timeline(make_emitter,hybrid,multisite,m
     emitter._do_radar();r=emitter._build_payload()['radar']
     assert r['sourceMode']=='site' and r['siteId']=='K000'
     assert 'K000' not in {s['id'] for s in r['sites']}
-    assert len([c for c in multisite.calls if c[0]=='list'])==8
+    assert {c[1] for c in multisite.calls if c[0]=='list'}=={'K005','K006','K007','K008'}
+    # The four station-timeline listings remain valid across the pan.
     assert not any(c[:2]==('tile','K000') for c in multisite.calls)
 
 

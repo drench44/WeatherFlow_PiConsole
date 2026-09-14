@@ -7,6 +7,11 @@ to shared upstream code that the classic console benefits from too.
 ## 2026-09-14
 
 ### Radar
+- **Zoom without asking what is newest again.** Intent passes reuse validated
+  source timestamps and per-site scan listings for one source cadence, then go
+  straight to tiles. Scheduled refreshes, expiry and failures revalidate; purged
+  newest tiles trigger validation in the same pass. Successful archive probes
+  are remembered per stamp. Interaction never extends freshness or cadence.
 - **Map first, echoes follow.** Zoom and pan publish the new geography before any
   radar request. The map, station, rings and scale settle immediately; the drawn
   scan keeps its own reprojection at stale opacity until matching echoes decode.

@@ -604,6 +604,10 @@ class _RadarSuperseded(Exception):
     """The current preference generation no longer owns this pass."""
 
 
+class _RadarRevalidate(Exception):
+    """Remembered newest tiles failed; rediscover the source in this pass."""
+
+
 class _RadarBudget(Exception):
     """Yield unfinished history to a later pass; never bypass the shared limit."""
 
@@ -823,6 +827,8 @@ class AlmanacEmitter:
         self._radar_result = _RADAR_NONE
         self._radar_request_times = []  # ALL attempts, shared across sources and retries
         self._radar_negative = {}
+        self._radar_newest = {}  # (source, site) -> (validated monotonic, knowledge)
+        self._radar_archive_positive = set()  # immutable successful archive URLs
         self._radar_tiles = OrderedDict()
         self._radar_prefetched = {}  # source -> last attempted newest stamp
         self._radar_lock = _RLock()
@@ -1012,7 +1018,7 @@ class AlmanacEmitter:
                 self._retries[key] = handle
 
     def _check_radar(self, _dt=None):
-        self._spawn('radar', self._do_radar)
+        self._spawn('radar', lambda: self._do_radar(intent_triggered=False))
 
     def _radar_read_intent(self):
         try:
@@ -1059,7 +1065,7 @@ class AlmanacEmitter:
                     self._do_radar(geometry_only=True)
             else:
                 self._radar_zoom_stamp = stamp
-                self._check_radar()
+                self._spawn('radar', lambda: self._do_radar(intent_triggered=True))
 
     def _radar_checkpoint(self, ctx):
         if 'preference_stamp' in ctx and ctx['preference_stamp'] != self._radar_preference_stamp(ctx.get('stamp_names')):
@@ -1260,7 +1266,7 @@ class AlmanacEmitter:
                 # The executor drains active requests, whose successes enter LRU
                 # even when the main worker has already detected supersession.
 
-    def _radar_composite(self, source, ts, ctx, deadline, tile_url, archive_url=None, layers=None):
+    def _radar_composite(self, source, ts, ctx, deadline, tile_url, archive_url=None, layers=None, on_validated=None):
         """Atomic crop; site layers are all-or-nothing and alpha-composited in order.
 
         Degraded crops are keyed by their actual contributors, never cached under
@@ -1276,6 +1282,11 @@ class AlmanacEmitter:
             reasons = ctx.setdefault('site_reasons', {})
             for site, stamp, _ in layers:
                 if time.monotonic() < self._radar_negative.get(site_key(site, stamp), 0):
+                    entry = self._radar_newest.get((source, site))
+                    if entry and entry[1]['newest'] == stamp:
+                        self._radar_forget(source, site)
+                    if ctx.get('reuse_newest'):
+                        raise _RadarRevalidate('remembered site scan unavailable')
                     reasons[site] = 'scan unavailable'
             layers = [(site, stamp, url) for site, stamp, url in layers
                       if time.monotonic() >= self._radar_negative.get(site_key(site, stamp), 0)]
@@ -1286,6 +1297,9 @@ class AlmanacEmitter:
         if os.path.isfile(target):
             frame = _radar_cached_frame(frame, target)
             if frame['complete']:
+                if on_validated is not None:
+                    self._radar_archive_probe(source, archive_url, deadline)
+                    on_validated()
                 return frame
         if not work or time.monotonic() < self._radar_negative.get(frame['id'], 0):
             return frame
@@ -1297,7 +1311,9 @@ class AlmanacEmitter:
         opaque_pixels, ambiguous_pixels = 0, 0
         try:
             if archive_url:
-                self._radar_request(source, archive_url, deadline, method='HEAD')
+                self._radar_archive_probe(source, archive_url, deadline)
+            if on_validated is not None:
+                on_validated()
             with ExitStack() as buffers:
                 composite = buffers.enter_context(Image.new('RGBA', (RADAR_VIEWPORT_W, RADAR_VIEWPORT_H)))
                 for site, stamp, url in work:
@@ -1319,7 +1335,7 @@ class AlmanacEmitter:
                                         layer_ambiguous_pixels += mapped.info['ambiguousPixels']
                                         layer.paste(mapped, (x+crop[0], y+crop[1]))
                                 self._radar_checkpoint(ctx)
-                    except _RadarSuperseded:
+                    except (_RadarSuperseded, _RadarRevalidate):
                         raise
                     except _RadarBudget as error:
                         self._radar_checkpoint(ctx)
@@ -1337,6 +1353,11 @@ class AlmanacEmitter:
                         break
                     except Exception as error:
                         self._radar_checkpoint(ctx)
+                        entry = self._radar_newest.get((source, site))
+                        if entry and entry[1]['newest'] == stamp:
+                            self._radar_forget(source, site)
+                        if ctx.get('reuse_newest'):
+                            raise _RadarRevalidate('remembered newest tiles failed') from error
                         if site is None:
                             raise
                         ctx.setdefault('site_reasons', {})[site] = 'scan unavailable'
@@ -1379,38 +1400,88 @@ class AlmanacEmitter:
             self._radar_negative.update(negatives)
             frame.update(complete=True, url='radar/' + frame['id'] + '.png',
                          legend=dict(remapped=metadata['remapped']), **metadata)
-        except (_RadarBudget, _RadarSuperseded):
+        except (_RadarBudget, _RadarSuperseded, _RadarRevalidate):
             raise
         except Exception as error:
             self._radar_checkpoint(ctx)
+            entry = self._radar_newest.get((source, None))
+            if entry and entry[1]['newest'] == ts:
+                self._radar_forget(source)
+            if ctx.get('reuse_newest'):
+                raise _RadarRevalidate('remembered newest tiles failed') from error
             if is_transport_error(error):
                 raise  # dropped sockets do not mean this frame is unavailable
             ctx['last_error'] = f'{type(error).__name__}: {error}'
             self._radar_negative[frame['id']] = time.monotonic() + RADAR_NEGATIVE_CACHE_SEC
         return frame
 
+    def _radar_known(self, source, ctx, site=None):
+        entry = self._radar_newest.get((source, site))
+        if (ctx.get('intent_triggered') and entry is not None and
+                0 <= time.monotonic() - entry[0] < _RADAR_SOURCES[source]['cadence']):
+            return entry[1]
+        return None
+
+    def _radar_forget(self, source, site=None):
+        for key in list(self._radar_newest):
+            if key[0] == source and (site is None or key[1] == site):
+                del self._radar_newest[key]
+
+    def _radar_archive_probe(self, source, url, deadline):
+        if url in self._radar_archive_positive:
+            return
+        if time.monotonic() < self._radar_negative.get(url, 0):
+            raise ValueError('archive unavailable')
+        try:
+            self._radar_request(source, url, deadline, method='HEAD')
+        except (_RadarBudget, _RadarSuperseded):
+            raise
+        except Exception as error:
+            if not is_transport_error(error):
+                self._radar_negative[url] = time.monotonic() + RADAR_NEGATIVE_CACHE_SEC
+            raise
+        self._radar_archive_positive.add(url)
+
     def _radar_iem_frames(self, ctx):
         """Acquire a fresh complete primary first, probing even UTC slots backward."""
         source = 'iem-mrms-lcref'
         deadline = min(ctx['deadline'], time.monotonic() + RADAR_PRIMARY_DEADLINE_SEC)
-        meta = json.loads(self._radar_request(source, RADAR_IEM_METADATA_URL, deadline, metadata=True))['meta']
-        valid = datetime.fromisoformat(meta['end_valid'].replace('Z', '+00:00'))
-        ts = int(valid.timestamp())
+        known = self._radar_known(source, ctx)
         now = time.time()
-        if (valid.utcoffset() != timedelta(0) or meta.get('product') != 'lcref' or
-                meta.get('units') != '0.5 dBZ' or ts % RADAR_IEM_FRAME_INTERVAL_SEC or
-                not 0 <= now - ts <= RADAR_IEM_STALE_SEC):
-            raise ValueError('invalid or stale IEM metadata')
-        newest = min(ts, int(now - RADAR_IEM_READY_LAG_SEC) // 120 * 120)
+        if known is not None and not 0 <= now - known['newest'] <= RADAR_IEM_STALE_SEC:
+            known = None
+        if known is None:
+            self._radar_forget(source)
+            meta = json.loads(self._radar_request(source, RADAR_IEM_METADATA_URL, deadline, metadata=True))['meta']
+            valid = datetime.fromisoformat(meta['end_valid'].replace('Z', '+00:00'))
+            ts = int(valid.timestamp())
+            if (valid.utcoffset() != timedelta(0) or meta.get('product') != 'lcref' or
+                    meta.get('units') != '0.5 dBZ' or ts % RADAR_IEM_FRAME_INTERVAL_SEC or
+                    not 0 <= now - ts <= RADAR_IEM_STALE_SEC):
+                raise ValueError('invalid or stale IEM metadata')
+            newest = min(ts, int(now - RADAR_IEM_READY_LAG_SEC) // 120 * 120)
+        else:
+            newest = known['newest']
         self._radar_publish_refresh(ctx, frameTotal=RADAR_HISTORY_SEC // 120 + 1 if ctx['viewed'] else 1)
         def build(stamp, limit):
             utc = datetime.fromtimestamp(stamp, timezone.utc)
+            def validated():
+                # Superseding intents can reuse discovery even mid-tile-batch.
+                self._radar_newest[(source, None)] = (time.monotonic(), dict(newest=stamp))
             return self._radar_composite(source, stamp, ctx, limit,
                 lambda x, y: RADAR_IEM_TILE_TEMPLATE.format(stamp=utc.strftime('%Y%m%d%H%M'),
-                    z=ctx['zoom'], x=x, y=y), utc.strftime(RADAR_IEM_ARCHIVE_TEMPLATE))
+                    z=ctx['zoom'], x=x, y=y),
+                None if known is not None else utc.strftime(RADAR_IEM_ARCHIVE_TEMPLATE),
+                on_validated=validated if known is None and stamp == newest else None)
         for candidate in range(newest, int(now - RADAR_IEM_STALE_SEC) - 1, -120):
             ctx['candidates'].append(candidate)
+            ctx['reuse_newest'] = known is not None
             latest = build(candidate, deadline)
+            ctx['reuse_newest'] = False
+            if not latest['complete']:
+                self._radar_forget(source)
+                if known is not None:
+                    raise _RadarRevalidate('remembered newest unavailable')
             if latest['complete']:
                 if time.time() - candidate > RADAR_IEM_STALE_SEC:
                     break
@@ -1445,15 +1516,23 @@ class AlmanacEmitter:
                 product='N0B', start=fmt(now - RADAR_HISTORY_SEC - RADAR_SITE_MAX_AGE_SEC), end=fmt(now)))
             stamps = []
             try:
-                listing = json.loads(self._radar_request(source, url, deadline, metadata=True))
-                for scan in listing['scans']:
-                    valid = datetime.fromisoformat(scan['ts'].replace('Z', '+00:00'))
-                    if valid.utcoffset() != timedelta(0):
-                        raise ValueError('non-UTC site scan')
-                    ts = int(valid.timestamp())
-                    if 0 <= now - ts <= RADAR_HISTORY_SEC + RADAR_SITE_MAX_AGE_SEC and ts % 60 == 0:
-                        stamps.append(ts)
-                stamps = sorted(set(stamps))
+                known = self._radar_known(source, ctx, site['id'])
+                if known is not None:
+                    stamps = [t for t in known['stamps'] if 0 <= now-t <= RADAR_HISTORY_SEC + RADAR_SITE_MAX_AGE_SEC]
+                    ctx['reuse_newest'] = True
+                else:
+                    self._radar_forget(source, site['id'])
+                    listing = json.loads(self._radar_request(source, url, deadline, metadata=True))
+                    for scan in listing['scans']:
+                        valid = datetime.fromisoformat(scan['ts'].replace('Z', '+00:00'))
+                        if valid.utcoffset() != timedelta(0):
+                            raise ValueError('non-UTC site scan')
+                        ts = int(valid.timestamp())
+                        if 0 <= now - ts <= RADAR_HISTORY_SEC + RADAR_SITE_MAX_AGE_SEC and ts % 60 == 0:
+                            stamps.append(ts)
+                    stamps = sorted(set(stamps))
+                    self._radar_newest[(source, site['id'])] = (time.monotonic(),
+                        dict(newest=stamps[-1] if stamps else None, stamps=tuple(stamps)))
             except (_RadarBudget, _RadarSuperseded):
                 raise
             except Exception as error:
@@ -1490,6 +1569,9 @@ class AlmanacEmitter:
             slots = [t for t in stamps if ts - RADAR_HISTORY_SEC <= t <= ts][-(8 if len(_radar_site_pairs(ctx, ts)) >= 2 else 31):]
             self._radar_publish_refresh(ctx, frameTotal=len(slots) if ctx['viewed'] else 1)
             latest = build(ts, deadline)
+            if ctx.get('reuse_newest') and not latest['complete']:
+                raise _RadarRevalidate('remembered site scan unavailable')
+            ctx['reuse_newest'] = False
             if latest['complete']:
                 cap = 8 if len(latest.get('siteScans', ())) >= 2 else 31
                 slots = [t for t in stamps if ts - RADAR_HISTORY_SEC <= t <= ts][-cap:]
@@ -1502,24 +1584,37 @@ class AlmanacEmitter:
     def _radar_rainviewer_frames(self, ctx):
         """Global past-frame adapter; never include nowcast or more than one hour."""
         source = 'rainviewer'
-        manifest = json.loads(self._radar_request(source, RADAR_RAINVIEWER_MANIFEST_URL,
-            ctx['deadline'], metadata=True))
-        host = manifest['host'].rstrip('/')
-        if not host.startswith('https://'):
-            raise ValueError('invalid RainViewer host')
-        past = {int(f['time']): f['path'] for f in manifest['radar']['past']}
-        newest = max(past)
+        known = self._radar_known(source, ctx)
+        if known is None:
+            self._radar_forget(source)
+            manifest = json.loads(self._radar_request(source, RADAR_RAINVIEWER_MANIFEST_URL,
+                ctx['deadline'], metadata=True))
+            host = manifest['host'].rstrip('/')
+            if not host.startswith('https://'):
+                raise ValueError('invalid RainViewer host')
+            past = {int(f['time']): f['path'] for f in manifest['radar']['past']}
+            newest = max(past)
+            past = {t: p for t, p in past.items() if newest - RADAR_HISTORY_SEC <= t <= newest}
+        else:
+            newest, host, past = known['newest'], known['host'], known['past']
         if not 0 <= time.time() - newest <= RADAR_RAINVIEWER_STALE_SEC:
+            if known is not None:
+                raise _RadarRevalidate('remembered RainViewer scan aged out')
             raise ValueError('invalid or stale RainViewer manifest')
-        past = {t: p for t, p in past.items() if newest - RADAR_HISTORY_SEC <= t <= newest}
         self._radar_publish_refresh(ctx, frameTotal=len(past) if ctx['viewed'] else 1)
         def build(ts, limit):
             path = past[ts]
             if not isinstance(path, str) or not path.startswith('/'):
                 raise ValueError('invalid RainViewer path')
+            if known is None and ts == newest:
+                self._radar_newest[(source, None)] = (time.monotonic(), dict(newest=newest, host=host, past=past))
             return self._radar_composite(source, ts, ctx, limit,
                 lambda x, y: f'{host}{path}/256/{ctx["zoom"]}/{x}/{y}/{RADAR_RAINVIEWER_COLOR}/{RADAR_RAINVIEWER_TILE_OPTS}.png')
+        ctx['reuse_newest'] = known is not None
         latest = build(newest, ctx['deadline'])
+        ctx['reuse_newest'] = False
+        if known is not None and not latest['complete']:
+            raise _RadarRevalidate('remembered RainViewer scan unavailable')
         if not latest['complete']:
             raise ValueError('no complete RainViewer latest')
         ctx['rainviewer_prefix'] = host + past[newest]
@@ -1618,6 +1713,11 @@ class AlmanacEmitter:
                 self._radar_prefetched.get(source, -1) >= newest or
                 self._radar_headroom_delay(source, RADAR_PREFETCH_HEADROOM + RADAR_HISTORY_RESERVE)):
             return
+        known_ctx = dict(ctx, intent_triggered=True)
+        if source != 'iem-nexrad-n0b':
+            known = self._radar_known(source, known_ctx)
+            if known is None or known['newest'] != newest:
+                return
         self._radar_checkpoint(ctx)
         self._radar_prefetched[source] = newest  # interrupted rounds also cost once
         warm = dict(ctx, prefetch=True, tile_workers=RADAR_TILE_WORKERS)
@@ -1635,7 +1735,8 @@ class AlmanacEmitter:
                 if source == 'iem-nexrad-n0b':
                     sites, _ = _radar_sites(ctx['station'], bounds)
                     warm['sites'] = [dict(s, reporting=bool(ctx['site_scans'].get(s['id']))) for s in sites]
-                    pairs = _radar_site_pairs(warm, newest)
+                    pairs = tuple((site, stamp) for site, stamp in _radar_site_pairs(warm, newest)
+                                  if self._radar_known(source, known_ctx, site) is not None)
                 else:
                     pairs = ((None, newest),)
                 for site, stamp in pairs:
@@ -1693,10 +1794,14 @@ class AlmanacEmitter:
                     if ident not in keep and time.time() - os.path.getmtime(path) >= RADAR_CACHE_GRACE_SEC:
                         os.unlink(path)
 
-    def _do_radar(self, geometry_only=False):
+    def _do_radar(self, geometry_only=False, intent_triggered=None):
         """Primary-first orchestration; radar failures never alter engine health."""
         stamp_names = self._radar_stamp_names()
         stamp = self._radar_preference_stamp(stamp_names)
+        if intent_triggered is None:
+            # Direct callers follow changed markers; scheduled/retry callbacks
+            # explicitly force validation even if an intent arrived meanwhile.
+            intent_triggered = stamp != self._radar_zoom_stamp or self._radar_restart
         if not geometry_only:
             self._radar_restart = False
             self._radar_zoom_stamp = stamp
@@ -1754,7 +1859,7 @@ class AlmanacEmitter:
             # One budget spans both attempts; geometry is source-specific, intent is not.
             ctx = dict(center=center, nexrad=_radar_nexrad(station_lat, station_lon, unit), viewed=viewed,
                 desired=desired, auto_zoom=auto_zoom, builds=0, station=station,
-                preference_stamp=stamp, stamp_names=stamp_names,
+                preference_stamp=stamp, stamp_names=stamp_names, intent_triggered=intent_triggered,
                 deadline=time.monotonic() + RADAR_BUILD_DEADLINE_SEC)
             if not geometry_only:
                 self._radar_negative = {k: v for k, v in self._radar_negative.items() if v > time.monotonic()}
@@ -1843,7 +1948,14 @@ class AlmanacEmitter:
                 started = time.monotonic()
                 try:
                     ctx['tile_workers'] = RADAR_NEWEST_TILE_WORKERS
-                    adapter(ctx)
+                    ctx['reuse_newest'] = False
+                    try:
+                        adapter(ctx)
+                    except _RadarRevalidate:
+                        self._radar_forget(source)
+                        ctx.update(intent_triggered=False, reuse_newest=False)
+                        ctx.pop('site_reasons', None)
+                        adapter(ctx)  # same deadline, build count and rolling request gate
                     self._radar_transport_failures.pop(source, None)
                     if previous.available and previous.source_id != self._radar_result.source_id:
                         Logger.info(f'almanac_emit: radar source SWITCH {previous.source_id} -> {self._radar_result.source_id}')
@@ -1852,6 +1964,7 @@ class AlmanacEmitter:
                     except OSError as error:
                         Logger.warning(f'almanac_emit: radar cache prune failed - {error}')
                     if ctx.get('retained_failed'):
+                        self._radar_forget(source)
                         self._radar_retained_refresh('failed')
                     else:
                         self._radar_publish_refresh(ctx, state='idle')
@@ -1860,12 +1973,14 @@ class AlmanacEmitter:
                 except _RadarSuperseded:
                     raise
                 except _RadarBudget:
+                    self._radar_forget(source)
                     fresh = previous.available and 0 <= time.time()-previous.ts_frame < previous.stale_sec
                     self._radar_result = previous
                     self._radar_retained_refresh('idle' if fresh else 'failed')
                     self._radar_budget_retry(source, needed)
                     return
                 except Exception as error:
+                    self._radar_forget(source)
                     self._radar_checkpoint(ctx)
                     self._radar_session.close()
                     self._radar_session = None

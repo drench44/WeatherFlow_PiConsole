@@ -204,12 +204,36 @@ readiness lag avoids IEM's as-yet-unrendered newest tiles. It is acquisition
 latency, not a substituted valid time: every accepted timestamp has a complete
 matching crop. The UI still reports actual age and may correctly mark MRMS stale.
 
-Each uncached MRMS candidate first probes the original archive with HEAD:
+During validation, an MRMS candidate probes the original archive with HEAD
+unless that stamp already has a successful probe:
 `https://mesonet.agron.iastate.edu/archive/data/YYYY/MM/DD/GIS/mrms/lcref_YYYYMMDDHHMM.png`.
 Tiles use
 `https://mesonet.agron.iastate.edu/cache/tile.py/1.0.0/mrms::lcref-YYYYMMDDHHMM/z/x/y.png`.
 UTC rollover applies to both paths. MRMS's native raster covers longitude
 −130…−60, latitude 20…55; crossing that domain sets `partialCoverage:true`.
+
+As of 2026-09-14, newest discovery belongs to the source, independently of crop
+geometry. Successful MRMS metadata/readiness/archive validation retains `(newest_stamp, validated_monotonic)`; RainViewer retains its
+validated manifest paths/host with the stamp, before tiles begin. N0B retains parsed scan listings
+(including empty listings) and newest stamp separately per site. Intent-triggered
+zoom, centre, source changes and supersede restarts reuse this knowledge only
+while monotonic age is strictly below the source cadence: MRMS 120 s, site 300 s,
+RainViewer 600 s. Reuse does not reset that clock. Scheduled/retry passes, first
+passes and sources/sites whose acquisition failed validate again; expiry cannot
+be extended by repeated interaction. Newly encountered sites list independently.
+
+A pass reusing MRMS knowledge goes straight to tiles for newest and history,
+without metadata or archive requests. Full validation caches each positive HEAD
+for the emitter lifetime, independently of zoom, crop, transport session and
+cadence; negative probes retain the 120 s retry TTL. All tiles still require the
+same PNG validation and complete-crop rules. Failure of remembered newest tiles
+(including a purged scan's 404 or failed site layer) discards knowledge and runs
+one full source validation in the same pass, sharing its original deadline,
+build limit, cooldown and request budget. Supersession is not a provider failure.
+Idle prefetch uses only still-valid remembered stamps/listings and never performs
+control requests. No background metadata worker is added; provider cadence,
+readiness lag, observed timestamps, retained-failure handling and stale thresholds
+are unchanged.
 
 The transport uses standard-library `http.client.HTTPSConnection`, with at most
 six leased connections per host. A connection stays leased until the response

@@ -237,7 +237,9 @@ def test_primary_transport_failure_retains_new_geometry_then_recovers(make_emitt
             raise client.RemoteDisconnected('stale socket')
     hybrid.failure = fail
     hybrid.calls.clear()
-    emitter._do_radar()
+    # Metadata outages are discovered by scheduled validation; warm intents
+    # deliberately make no metadata request. Tile outages still exercise reuse.
+    emitter._do_radar(intent_triggered=False if phase == 'metadata' else True)
     assert emitter._radar_result is previous
     assert emitter._radar_refresh['state'] == 'failed'
     assert emitter._retries['radar'].timeout == 2

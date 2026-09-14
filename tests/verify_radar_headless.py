@@ -383,13 +383,13 @@ def check_zoom_site(browser, html, output_dir, theme, site):
             page.wait_for_timeout(140)
             page.wait_for_function('!polling'); page.evaluate('poll()'); page.wait_for_function('!polling')
 
-        def build(desired=None, history=True):
+        def build(desired=None, history=True, scheduled=False):
             poll()  # real GET persists preference before the separate worker reads it
             if desired is not None:
                 assert (root/'radar_zoom').read_text().strip() == str(desired)
             if not history:
                 (root/'radar_viewed').unlink(missing_ok=True)
-            emitter._do_radar(); emitter._emit(0)
+            emitter._do_radar(intent_triggered=False if scheduled else None); emitter._emit(0)
             expected=emitter._build_payload()['radar']
             poll()
             # Pass JSON text: Playwright's wait_for_function argument conversion
@@ -490,7 +490,8 @@ def check_zoom_site(browser, html, output_dir, theme, site):
             shot('closer')
             page.keyboard.press('0'); build('auto')
             page.keyboard.press('+')  # requested z9 differs from retained z8, so acquire fallback
-            state.source_down=True; r=build(9)
+            # Scheduled validation discovers an outage even with a warm crop.
+            state.source_down=True; r=build(9, scheduled=True)
             assert r['zoomDesired']==9 and r['zoom']==7 and r['zoomCapped']
             assert page.locator('#rad-zoom-in').is_disabled()
             page.wait_for_function("document.getElementById('rad-note').textContent==='Set closer than RainViewer reaches — showing its closest.'")

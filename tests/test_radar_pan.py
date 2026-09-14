@@ -139,7 +139,7 @@ def test_pan_failure_keeps_entire_previous_snapshot(make_emitter, hybrid, tmp_pa
 
 def test_center_wakes_same_single_flight_worker(make_emitter, tmp_path, monkeypatch):
     emitter = make_emitter(); emitter._running = True
-    seen = []; monkeypatch.setattr(emitter, '_check_radar', lambda: seen.append(True))
+    seen = []; monkeypatch.setattr(emitter, '_spawn', lambda key, worker: seen.append(True))
     emitter._radar_zoom_stamp = emitter._radar_preference_stamp()
     emitter._inflight.add('radar')
     marker = tmp_path / 'radar_center'; marker.write_text('1,2'); emitter._check_radar_zoom()
