@@ -219,3 +219,31 @@ def test_radar_continuous_view_session_resets_off_tab_and_on_gap(serve_at, tmp_p
     _get(url + '/wx.json?view=radar')
     assert json.loads(marker.read_text()) == dict(since=now[0], last=now[0])
     assert not list(tmp_path.glob('radar_viewing.tmp.*'))
+
+
+@pytest.mark.parametrize('address,recorded', [
+    ('192.168.1.2', '192.168.1.2'),        # a LAN viewer is recorded for the wifi keepalive's bridge nudge
+    ('::ffff:10.0.0.7', '10.0.0.7'),        # IPv4-mapped form is normalised
+    ('127.0.0.1', None),                    # loopback never recorded
+    ('::1', None),
+    ('8.8.8.8', None),                      # public addresses never recorded
+    ('192.168.1', None),                    # malformed never recorded
+])
+def test_last_lan_viewer_marker(monkeypatch, tmp_path, address, recorded):
+    module = _load_serve(monkeypatch, tmp_path, _payload())
+    module._lan_viewer_at = 0.0
+    monkeypatch.setattr(module.http.server.SimpleHTTPRequestHandler, 'do_GET', lambda self: None)
+    handler = object.__new__(module.Handler)
+    handler.client_address = (address, 12345)
+    handler.path = '/index.html'
+    handler.do_GET()
+    marker = tmp_path / 'last_viewer'
+    if recorded is None:
+        assert not marker.exists()
+    else:
+        assert marker.read_text() == recorded + '\n'
+        assert not list(tmp_path.glob('last_viewer.tmp*'))
+        # throttled: a second viewer inside the interval does not rewrite the file
+        handler.client_address = ('192.168.1.3', 1)
+        handler.do_GET()
+        assert marker.read_text() == recorded + '\n'

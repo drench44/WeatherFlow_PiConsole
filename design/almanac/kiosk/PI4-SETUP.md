@@ -92,17 +92,20 @@ until a power-cycle. Two things guard against it:
    pins `wifi.powersave = 2` for every profile. `dmesg | grep power_mgmt` should end
    with `power save disabled`.
 2. **A keepalive timer** (`wifi-keepalive.sh` / `.service` / `.timer` in this directory)
-   pings another always-on LAN host every minute and, after three consecutive
-   failures, re-associates through NetworkManager. It probes a *peer*, not the
-   gateway, because the gateway can still answer while the Pi is cut off from
-   other LAN clients. The peer is site-specific and is not baked into the script:
-   set it before enabling the timer, e.g.
+   pings an always-on LAN host every minute and, after three consecutive
+   failures, re-associates through NetworkManager. The peer defaults to the
+   DHCP default gateway (read from the routing table at run time, never baked
+   in); set `WIFI_PEER=<ip>` in `/etc/default/wifi-keepalive` only to probe a
+   different always-on host.
 
-   ```
-   echo 'WIFI_PEER=<ip-of-another-always-on-lan-host>' | sudo tee /etc/default/wifi-keepalive
-   ```
-
-   With `WIFI_PEER` unset the check logs that and exits without probing. Install:
+   It also sends a *bridge nudge* every check: a couple of unicast pings to the
+   most recent LAN device that viewed the console (the server records it in
+   `/tmp/wfp_data/last_viewer`). On a multi-node mesh the node bridging the Pi
+   can stop forwarding wired-side traffic to it (wired hosts see ARP
+   `(incomplete)` while the Pi's own outbound still works, and the gateway still
+   answers, so a gateway probe cannot detect it). The Pi's own frames toward a
+   wired host are what re-teach the node's bridge table. The nudge's reply is
+   ignored; the frames are the point. Install:
 
    ```
    sudo install -m 0755 wifi-keepalive.sh /usr/local/sbin/

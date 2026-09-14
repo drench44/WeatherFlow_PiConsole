@@ -7,10 +7,19 @@
 # Configure via /etc/default/wifi-keepalive or a systemd Environment override.
 set -eu
 IFACE="${WIFI_IFACE:-wlan0}"
-# The peer is site-specific (another always-on LAN host), so it is never baked
-# in here: set WIFI_PEER in /etc/default/wifi-keepalive. Unset means "nothing to
-# probe" — the check exits cleanly rather than guessing a host.
+# The peer defaults to the DHCP default gateway on the wifi interface — the one
+# host every site has always on — and is never baked in here. Override with
+# WIFI_PEER in /etc/default/wifi-keepalive for a different always-on LAN host.
 PEER="${WIFI_PEER:-}"
+if [ -z "$PEER" ]; then
+  PEER=$(ip route show default dev "$IFACE" 2>/dev/null | awk '{print $3; exit}') || PEER=""
+fi
+# Bridge nudge: the console's server records the most recent LAN viewer in
+# <data dir>/last_viewer. A few unicast frames from the Pi toward that host each
+# check keep the mesh node's forwarding entry for the Pi fresh on the WIRED side;
+# a reachable gateway alone did not (observed 2026-09-13/14: gateway REACHABLE,
+# wired hosts could not ARP the Pi, and pinging the wired viewer healed it).
+NUDGE_FILE="${WIFI_NUDGE_FILE:-/tmp/wfp_data/last_viewer}"
 FAIL_LIMIT="${WIFI_FAIL_LIMIT:-3}"
 # A peer outage must not cause repeated wifi bounces every three minutes.
 COOLDOWN="${WIFI_RECOVERY_COOLDOWN:-900}"
@@ -41,6 +50,16 @@ read_count() {
   printf '%s\n' "$value"
 }
 probe() { ping -n -c 3 -W 2 -w 8 -I "$IFACE" "$1" >/dev/null 2>&1; }
+
+# Bridge nudge every check, before anything else and regardless of outcome: the
+# result is deliberately ignored (the viewer may be asleep); the frames are the point.
+if [ -r "$NUDGE_FILE" ]; then
+  viewer=$(head -c 64 "$NUDGE_FILE" | tr -d '[:space:]')
+  if [[ "$viewer" =~ ^(10\.|172\.(1[6-9]|2[0-9]|3[01])\.|192\.168\.)[0-9]{1,3}\.[0-9]{1,3}(\.[0-9]{1,3})?$ ]] && [ "$viewer" != "$PEER" ]; then
+    ping -n -c 2 -W 1 -w 3 -I "$IFACE" "$viewer" >/dev/null 2>&1 && nudge=answered || nudge=silent
+    log "bridge nudge to last LAN viewer $viewer: $nudge"
+  fi
+fi
 
 fails=$(read_count "$STATE")
 if probe "$PEER"; then

@@ -33,6 +33,48 @@ RADAR_MIN_ZOOM, RADAR_MAX_DESIRED_ZOOM = 4, 10
 
 LOOPBACK = ("127.0.0.1", "::1", "::ffff:127.0.0.1")
 
+# The most recent private-LAN client that fetched anything, written at most every
+# 30 s to <data dir>/last_viewer. The wifi keepalive sends that host a few unicast
+# frames each minute: on a multi-node mesh the node bridging the Pi stopped
+# forwarding wired-side traffic to it (ARP "(incomplete)" from a wired Mac while
+# the Pi's own outbound worked), and the Pi's OWN frames toward a wired host are
+# what re-teach the node's bridge table. Loopback and public addresses are never
+# recorded; the file holds one IP and nothing else.
+_LAN_VIEWER_INTERVAL = 30.0
+_lan_viewer_at = 0.0
+_lan_viewer_lock = threading.Lock()
+
+
+def _is_private_ipv4(address):
+    parts = address.split(".")
+    if len(parts) != 4 or not all(p.isdigit() and 0 <= int(p) <= 255 for p in parts):
+        return False
+    a, b = int(parts[0]), int(parts[1])
+    return a == 10 or (a == 172 and 16 <= b <= 31) or (a == 192 and b == 168)
+
+
+def _note_lan_viewer(address):
+    global _lan_viewer_at
+    if address in LOOPBACK or address.startswith("::ffff:"):
+        address = address[7:] if address.startswith("::ffff:") else address
+        if address in LOOPBACK:
+            return
+    if not _is_private_ipv4(address):
+        return
+    now = time.time()
+    with _lan_viewer_lock:
+        if now - _lan_viewer_at < _LAN_VIEWER_INTERVAL:
+            return
+        _lan_viewer_at = now
+    marker = os.path.join(os.path.dirname(DATA), "last_viewer")
+    tmp = f"{marker}.tmp.{os.getpid()}"
+    try:
+        with open(tmp, "w") as f:
+            f.write(address + "\n")
+        os.replace(tmp, marker)
+    except OSError:
+        pass
+
 # Two counters, and the difference matters. `polls` counts wx.json REQUESTS
 # from anyone — a LAN viewer, a curl, a renderer that fetched and then threw.
 # `renders` counts frames the KIOSK actually painted: the page reports the
@@ -215,6 +257,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
     def do_GET(self):
         self._immutable_radar = False
         path, _, query = self.path.partition("?")
+        _note_lan_viewer(self.client_address[0])
         if path == "/health":
             return self._health()
         if path == "/wx.json":
