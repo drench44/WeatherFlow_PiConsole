@@ -192,7 +192,7 @@ def smoke(browser,server,theme,output):
     assert instant==dict(state='idle',z=9),instant
     page.emulate_media(reduced_motion='no-preference');page.wait_for_timeout(350)
     # R17-19: deterministic pixels, including strict same-stamp ancestry and
-    # independently timed hatch. Freeze only fixture delivery, not draw logic.
+    # missing-tile transparency over time. Freeze only fixture delivery, not draw logic.
     page.wait_for_function('radarTileBusy===0')
     pixels=page.evaluate('''async()=>{
       radarGestureCancel();radarRelease();radarView.active=false;radarCamera={...radarView.data.center,lon:radarView.data.center.lon-.8,zoom:8};radarBaseDirty=true;radarBasePaint();radarView.paused=false;
@@ -208,22 +208,18 @@ def smoke(browser,server,theme,output):
       const visible=radarTileSet(radarCamera,8),xs=visible.map(t=>t.x),ys=visible.map(t=>t.y),grid={x0:Math.min(...xs),y0:Math.min(...ys),w:Math.max(...xs)-Math.min(...xs)+1,h:Math.max(...ys)-Math.min(...ys)+1};
       radarView.data.tiles={...radarView.data.tiles,z:8,grid,newest:{stamp:f.stamp,expectedMask:((1n<<BigInt(grid.w*grid.h))-1n).toString(16)}};
       for(const t of visible.slice(1,-1)){const k=radarTileKey(f,8,t.x,t.y);radarTileRemember(k,{key:k,z:8,x:t.x,y:t.y,bitmap:await createImageBitmap(c),meta,hasEcho:true});}
-      radarMissingSince.clear();radarEchoPaint(f);await new Promise(r=>setTimeout(r,300));radarEchoPaint(f);let hatch300=radarMetrics.hatchRects;
-      await new Promise(r=>setTimeout(r,300));radarEchoPaint(f);radarState();radarView.active=true;radarLoopSync();radarView.active=false;let hatch600=radarMetrics.hatchRects,aria=document.getElementById('rad-plate').getAttribute('aria-label'),asof=document.getElementById('rad-asof').textContent;
-      return {same,other,hatch300,hatch600,aria,asof,read:document.getElementById('rad-frame-time').textContent,color:radarBaseStyle['--rule-faint']};
+      radarEchoPaint(f);const before=ctx.getImageData(0,0,956,490).data;
+      await new Promise(r=>setTimeout(r,650));radarEchoPaint(f);const after=ctx.getImageData(0,0,956,490).data;
+      const unchanged=before.every((v,i)=>v===after[i]),unexpected=Array.from({length:956*490},(_,i)=>after[i*4+3]).filter(a=>a!==0&&a!==255).length;
+      radarState();radarUpdateReady();radarView.active=true;radarLoopSync();radarView.active=false;
+      return {same,other,unchanged,unexpected,aria:document.getElementById('rad-plate').getAttribute('aria-label'),asof:document.getElementById('rad-asof').textContent,read:document.getElementById('rad-frame-time').textContent};
     }''')
     assert pixels['same']==[138,163,198,255] and pixels['other']==[0,0,0,0],pixels
-    assert pixels['hatch300']==0 and pixels['hatch600']>0 and pixels['aria'].endswith('· partial coverage') and pixels['asof']=='17:12' and pixels['read']=='17:12 · newest',pixels
-    assert not any(t in page.locator('#s-radar').inner_text() for t in ('Loading','Fetching'))
-    # At the displaced mid-pan camera, hatch is shown only after fingers lift.
-    # P4 explicitly forbids a hatch during an active gesture.
-    page.screenshot(path=str(output/f'radar-v41-mid-pan-hatch-{theme}.png'))
-    hatch_color=page.evaluate('''()=>{const c=new OffscreenCanvas(8,8),x=c.getContext('2d');x.fillStyle=radarHatchPattern(x);x.fillRect(0,0,8,8);let a=x.getImageData(0,0,8,8).data;return Array.from({length:64},(_,i)=>Array.from(a.slice(i*4,i*4+4))).filter(p=>p[3]);}''')
-    expected_hatch=page.evaluate('''()=>{const c=new OffscreenCanvas(8,8),x=c.getContext('2d');x.strokeStyle=radarBaseStyle['--rule-faint'];x.lineWidth=1;x.beginPath();x.moveTo(-1,1);x.lineTo(1,-1);x.moveTo(0,8);x.lineTo(8,0);x.moveTo(7,9);x.lineTo(9,7);x.stroke();let a=x.getImageData(0,0,8,8).data;return Array.from({length:64},(_,i)=>Array.from(a.slice(i*4,i*4+4))).filter(p=>p[3]);}''')
-    assert hatch_color==expected_hatch
-    assert hatch_color and all(p[:3]!=list(bytes.fromhex(h[1:])) for p in hatch_color for band in ae._RADAR_RAMP['bands'] for h in (band['start'],band['end']))
-    absent=page.evaluate('''()=>{radarTiles.forEach(t=>t.bitmap.close());radarTiles.clear();radarEchoPaint(radarView.current);radarUpdateReady();radarView.active=true;radarLoopSync();radarView.active=false;return {hatch:radarMetrics.hatchRects,read:document.getElementById('rad-frame-time').textContent};}''')
-    assert absent==dict(hatch=0,read='Buffering · 0 of 8'),absent
+    assert pixels['unchanged'] and pixels['unexpected']==0 and pixels['aria']=='Reflectivity radar' and pixels['asof']=='17:12' and pixels['read']=='Buffering · 0 of 8',pixels
+    assert page.locator('#rad-plate [id*="hatch"], #rad-plate [class*="hatch"], #rad-plate pattern').count()==0
+    page.screenshot(path=str(output/f'radar-mid-acquisition-{theme}.png'))
+    absent=page.evaluate('''()=>{radarTiles.forEach(t=>t.bitmap.close());radarTiles.clear();radarEchoPaint(radarView.current);radarUpdateReady();radarView.active=true;radarLoopSync();radarView.active=false;const a=document.getElementById('rad-echo').getContext('2d').getImageData(0,0,956,490).data;return {marked:a.some(v=>v!==0),read:document.getElementById('rad-frame-time').textContent};}''')
+    assert absent==dict(marked=False,read='Buffering · 0 of 8'),absent
     # R22 plus the cache lifecycle: base pigment changes, raster bytes do not.
     page.evaluate('d=>{radarRelease();radarView.data=d.radar;radarView.active=true;radarActivate();radarView.paused=true}',server.data)
     page.wait_for_function('radarReady().length===8 && radarTileBusy===0')

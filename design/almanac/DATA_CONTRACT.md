@@ -389,30 +389,29 @@ routinely-delayed feed reads clean and the suffix forecasts the stale flag. Nomi
 source caption; scan age belongs only beside AS OF. Never label data LIVE.
 
 AS OF, ageSec and staleness all describe the newest primary scan. The loop
-frame read alone names the displayed historical scan, including partial coverage. A tile contributes its own remap counts only when drawn. More than
+frame read names the displayed historical scan once the eight-frame inventory
+is ready. A tile contributes its own remap counts only when drawn. More than
 2% discarded opaque pixels or any cross-stop ambiguity marks `palette incomplete`.
 Incomplete acquisition or remapping cannot assert clear conditions.
 
 Missing tiles first use a **same-stamp**, same-source/site-set parent at Z−1 or
-Z−2, nearest-neighbour scaled. Other timestamps never fill an acquisition hole.
-A 45° 1px `--rule-faint` hatch at 8px pitch is reserved for **partial** acquisition:
-only cells set in the matching newest `expectedMask`, at its declared grid/zoom,
-and intersecting the drawn source's coverage qualify. Unknown/stale manifests,
-unrequested cells and outside-coverage cells never hatch. Site coverage is the
-union of actually contributing sites' 230km spherical range circles; MRMS uses
-20–55°N, 130–60°W. Boundary cells are additionally clipped to that coverage, so
-the hatch does not spill beyond a circle or domain edge. Geography must be present.
+Z−2, nearest-neighbour scaled. Without that fallback, missing radar tiles draw
+nothing. There is no hatch, pattern, coverage tint,
+delayed overlay, or partial-coverage aria suffix in either theme. Same-stamp
+parent tiles still supply measured echoes while finer tiles are in flight;
+other timestamps never fill a missing tile. **Absence of echoes in a region may
+mean "not yet loaded".** The loop read and note carry that acquisition state.
+The loop read shows `Buffering · N of 8` (or `Paused · N of 8`) until the eight
+frames are ready, including when a partially acquired scan already shows echoes.
+The note retains `Refreshing · newest frame` / `Refreshing · frame N of M`.
 
-Each eligible hole waits 400ms. If **more than 40%** of manifest-expected cells
-in the planned source coverage are missing (including incomplete site tiles), the state is acquiring: no hatch;
-the loop read uses `Buffering · n of 8` / `Paused · n of 8`, and the refresh note
-can say `Refreshing · newest frame`. Exactly 40% remains partial. Gestures and
-total absence never hatch. Arrivals repaint the whole echo plate because the
-cap is global; an old hatch cannot survive in an undamaged tile rectangle.
-While hatched, the accessible name ends `· partial coverage`. A few partial
-pixels keep their frame-time read. Cold acquisition tiles paint at full opacity
-on the next rAF after decode. The temporal playback blend below does not apply
-to newly acquired tiles.
+The former acquiring-versus-partial 40% classification is removed. What remains
+is copy driven by decoded frame readiness/inventory and the refresh stage
+(newest versus history). A tile's `partial` flag still prevents an incomplete
+multi-site tile from claiming readiness/clear weather and permits retry; it
+never controls decoration. Cold acquisition tiles paint at full opacity on the
+next rAF after decode. Temporal playback blending does not apply to arrivals.
+This user decision supersedes P4 and the v4.4 hatch rules.
 
 The reporting timeline owner (`siteId`, station-nearest reporting site) remains
 the caption/picker subject while its tiles are late: e.g. `Camano Island radar
@@ -534,7 +533,8 @@ loop ticks never stack on a camera repaint. Draw-count fences are ≤32 steady,
 ≤56 degraded. Wall-time target is 4ms on the actual panel, requiring CDP evidence.
 
 One rAF loop targets 30fps. Events mutate camera state; drawing is coalesced.
-Tile arrivals damage only their rectangles. Polls do not rerender geography.
+Echo arrivals repaint the echo plate; geography arrivals damage only their
+rectangles. Polls do not rerender geography.
 Overlay groups `rad-geo` and `rad-chrome` persist; gesture updates change
 attributes only. Ring labels use one translation attribute apiece (site labels
 retain x/y), bounding four sites plus two rings to twelve writes. Site arcs are geodesic circles sampled once at 120 points per
@@ -546,8 +546,8 @@ The graphics budget admits storage **before allocation**, with a shared 40 MiB
 cap across echo and geography jobs. Retained canvases are 3×1,873,760 bytes,
 histories ≤7×1,873,760, echo LRU ≤40×262,144 and basemap LRU ≤36×262,144.
 Four shared decode slots reserve 786,432 bytes each. A 262,144-byte merge scratch
-and 256-byte hatch surface are included too, so simultaneous nominal maxima
-require eviction of at least one tile (the delta's 39.87 MiB omitted these).
+is included too, so simultaneous nominal maxima require eviction of at least
+one tile (the delta's 39.87 MiB omitted the scratch).
 History transfers reserve a plate before allocation; if eviction cannot make
 room, admission blocks. Merging has no getImageData/readback buffer. Compressed
 responses are bounded at 128 KiB; oversize tiles follow the unavailable path.
@@ -828,8 +828,8 @@ Each transition (including loop wrap) blends two real cached scans linearly for
 120ms: previous weight `1-a`, next weight `a`. Two `drawImage` calls per composite
 paint use nearest-neighbour sampling. Premultiplied additive composition preserves
 translucent echo alpha; ordinary source-over would not give a linear mixture.
-The blend is **temporal**, never spatial smoothing or a fabricated scan. The loop
-read names the frame whose weight is ≥0.5 (next wins the tie). There is no rewind
+The blend is **temporal**, never spatial smoothing or a fabricated scan. Once the eight-frame inventory is ready, the loop read names the frame whose
+weight is ≥0.5 (next wins the tie). There is no rewind
 dip. Reduced motion hard-cuts and keeps the existing opt-in single sweep. A contiguous ready suffix
 ending at newest starts as soon as two frames are decoded and extends as older
 frames arrive. Play intent survives all acquisition/buffering fences; the second
@@ -850,17 +850,20 @@ Every press changes the glyph and read immediately and gives a 120ms button
 opacity dip (suppressed for reduced motion). Transport, gesture, stale and
 visibility fences still control actual animation, independently of intent.
 
-With fewer than two ready frames the read is `Buffering · N of 8` for play
-intent or `Paused · N of 8` for paused intent, including zero frames. With two
-or more it follows the drawn `HH:MM · newest` / `HH:MM · −N min`, prefixed by
-`Paused · ` when paused. Clear history reads `No echoes · clear`, likewise
-prefixed when paused. The read has neither status role nor aria-live; only the
-corner note describes pass progress and owns that live
-region and its 600ms suppression. Partial history
-reports its actual oldest time; no duplicate/padded scans. The browser retains up to eight scan composites and live newest tiles.
+With fewer than eight ready frames, or an incomplete displayed scan, the read
+is `Buffering · N of 8` for play intent or `Paused · N of 8` for paused intent,
+including zero frames. Playback can still run the contiguous ready suffix from
+two frames onward; the read retains the inventory count while history arrives.
+With all eight ready it follows the drawn `HH:MM · newest` / `HH:MM · −N min`,
+prefixed by `Paused · ` when paused. Complete clear history reads
+`No echoes · clear`, likewise prefixed when paused. The read has neither status
+role nor aria-live; the corner note describes pass progress and owns that live
+region and its existing 600ms suppression. The scan inventory retains its actual
+oldest time; no duplicate/padded scans. The browser retains up to eight scan
+composites and live newest tiles.
 
-Play/Pause and station-local `HH:MM · −N min` / `HH:MM · newest` follow the drawn
-scan, with a hairline progress track. One supplied frame is static; clear data
+With a complete inventory, station-local `HH:MM · −N min` / `HH:MM · newest`
+follows the drawn scan, with a hairline progress track. One supplied frame is static; clear data
 keeps the cluster visible and enabled. Hidden pages idle. Reduced
 motion shows newest with a Play button; a tap runs one complete sweep and stops
 on newest, with wrap dip and track transition disabled. The loop never changes `#rad-base`.
@@ -881,12 +884,17 @@ byte-for-byte with remapping of their native provider responses.
 
 `tests/verify_radar_headless.py` uses the real loopback handler in both themes.
 It measures 200px pans, focal pinch/snap, tile request/decode activity, cached
-first paint, ancestor identity, graticule/hatch pixels, real capture/cancellation,
+first paint, ancestor identity, graticule pixels and absence of hatch pixels,
+real capture/cancellation,
 source transitions, failed-report recovery, overlay mutations, palette/legend
 purity, playback and 60-second memory sessions. Its `chrome` checks cover all
 27 Fable v4.3b copy/accessibility/geometry assertions in paper and night, plus
 font-measured overflow drop order, name fallbacks, shared-timer delivery,
 acquisition acknowledgement and stale-versus-new refresh failures.
+`tests/verify_radar_v44.py` also runs the v4.5 pixel oracle in
+`tests/verify_radar_v45.py`: all missing fractions, transparent acquired tiles,
+site/MRMS boundaries, RainViewer, unknown masks, cached composites, and delayed
+mid-acquisition stills in both themes must show no hatch element or pigment.
 `tests/verify_radar_picker.py` preserves the real touch, click, keyboard, immediate
 intent, 20-second polling-bound and integrated warm emitter-to-canvas checks;
 first-frame captions describe the old source and acquire `switching` after 600ms. Independent instrumentation

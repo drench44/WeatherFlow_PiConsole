@@ -7,6 +7,13 @@ to shared upstream code that the classic console benefits from too.
 ## 2026-09-14
 
 ### Radar
+- **Radar v4.5 removes the hatch entirely (user decision, superseding P4/v4.4).**
+  Missing tiles draw nothing; same-stamp parent tiles still fill in while finer
+  tiles load. The drawing pattern, hatch token use, 400ms timer, coverage/40%
+  gates and partial-coverage aria suffix are deleted. Incomplete inventory
+  reads `Buffering · N of 8` (or `Paused · N of 8`); the loop read and refresh
+  note carry acquisition state. Empty regions may mean not yet loaded.
+  Both-theme regression checks assert no hatch elements or pixels.
 - **Radar v4.4 keeps hatch to a few real holes.** The 400ms hatch requires the
   manifest's expected bit and drawn site-range/MRMS coverage, clips at coverage
   edges, and disappears when more than 40% of expected cells are missing.

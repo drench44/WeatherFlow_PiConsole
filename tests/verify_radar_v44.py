@@ -1,10 +1,11 @@
-"""Local Chromium evidence: coverage holes, delayed primary and temporal blends."""
+"""Local Chromium evidence: no missing-tile pigment, delayed primary and temporal blends."""
 import argparse
 import json
 from pathlib import Path
 
 from playwright.sync_api import sync_playwright
 from tests.verify_radar_headless import AUDIT, radar_server, tile_png
+from tests.verify_radar_v45 import acquisition_pixels
 
 
 def verify(browser, server, theme, output):
@@ -94,9 +95,9 @@ def verify(browser, server, theme, output):
     switch_payload['data']={**server.data,'radar':switched}
     page.wait_for_function("radarView.data.sourceMode==='site' && radarView.current.drawnSites?.some(s=>s.id==='KOTX')")
     page.wait_for_timeout(700)
-    switch = page.evaluate('({caption:document.getElementById("rad-src-cap").textContent,hatch:radarMetrics.hatchRects,acquiring:radarMetrics.acquiring,read:document.getElementById("rad-frame-time").textContent,sites:radarView.current.drawnSites})')
+    switch = page.evaluate('({caption:document.getElementById("rad-src-cap").textContent,read:document.getElementById("rad-frame-time").textContent,sites:radarView.current.drawnSites})')
     assert switch['caption'].startswith('Camano Island radar') and 'KATX loading' in switch['caption'] and 'timeline' not in switch['caption'], switch
-    assert switch['hatch'] == 0 and all(s['id'] != 'KATX' for s in switch['sites']), switch
+    assert all(s['id'] != 'KATX' for s in switch['sites']), switch
     page.screenshot(path=str(output/f'delayed-nearest-{theme}.png'))
     delayed['yes']=False
     page.wait_for_timeout(2100)
@@ -104,53 +105,12 @@ def verify(browser, server, theme, output):
     page.wait_for_function("radarView.current.drawnSites?.some(s=>s.id==='KATX') && !document.getElementById('rad-src-cap').textContent.includes('KATX loading')")
     recovery = page.locator('#rad-src-cap').inner_text()
     assert recovery.startswith('Camano Island radar'), recovery
-    # Coverage pixel oracle. Transparent acquired tiles isolate hatch pigment.
-    coverage = page.evaluate('''async()=>{
-      radarView.active=false;radarRelease();radarCamera={...radarView.data.center,zoom:7};const r=radarView.data;
-      const f={stamp:r.tiles.newest.stamp,ts:r.observedTs,siteScans:['KATX','KOTX'].map(id=>({id,ts:r.observedTs}))};radarView.current=radarView.good=f;radarView.loaded=[f];r.siteId='KATX';
-      const tiles=radarTileSet(radarCamera,7),covered=tiles.filter(t=>f.siteScans.some(s=>radarSiteCovers(s.id,7,t.x,t.y))),c=new OffscreenCanvas(256,256),meta={opaquePixels:0,unmatchedPixels:0,ambiguousPixels:0};
-      c.getContext('2d').clearRect(0,0,256,256);
-      // Basemap presence is a separate required hatch gate, independent of pigment.
-      for(const t of tiles){const k=radarGeoKey(7,t.x,t.y);if(!radarGeoTiles.has(k))radarGeoTiles.set(k,{bitmap:await createImageBitmap(c)});}
-      const cp0=radarWorldPoint(radarCamera.lat,radarCamera.lon,7),rangeSites=f.siteScans.map(p=>radarSiteTable.find(s=>s.id===p.id));
-      const inside=(lat,lon)=>rangeSites.some(site=>{const rad=Math.PI/180,h=Math.sin((lat-site.lat)*rad/2)**2+Math.cos(lat*rad)*Math.cos(site.lat*rad)*Math.sin((lon-site.lon)*rad/2)**2;return 6371008.8*2*Math.asin(Math.sqrt(h))<=230000;});
-      const hole=covered.find(t=>{let yes=false,no=false;for(let y=8;y<256;y+=16)for(let x=8;x<256;x+=16){const wx=t.x*256+x,wy=t.y*256+y;if(wx<cp0[0]-478||wx>cp0[0]+478||wy<cp0[1]-245||wy>cp0[1]+245)continue;const q=radarWorldInverse(wx,wy,7);if(inside(q.lat,q.lon))yes=true;else no=true;}return yes&&no;});
-      if(!hole)throw Error('fixture needs a visible range boundary');
-      for(const t of covered.filter(t=>t!==hole)){const k=radarTileKey(f,7,t.x,t.y);radarTiles.set(k,{key:k,z:7,x:t.x,y:t.y,bitmap:await createImageBitmap(c),meta,hasEcho:false,sites:f.siteScans});}
-      radarEchoPaint(f);const grace=radarMetrics.hatchRects;for(const k of radarMissingSince.keys())radarMissingSince.set(k,performance.now()-401);radarEchoPaint(f);
-      const x=document.getElementById('rad-echo').getContext('2d'),a=x.getImageData(0,0,956,490).data,cp=radarWorldPoint(radarCamera.lat,radarCamera.lon,7),sites=f.siteScans.map(p=>radarSiteTable.find(s=>s.id===p.id));let marked=0,outside=0;
-      for(let py=0;py<490;py++)for(let px=0;px<956;px++)if(a[(py*956+px)*4+3]){marked++;const q=radarWorldInverse(cp[0]+px+.5-478,cp[1]+py+.5-245,7),rad=Math.PI/180;if(sites.every(site=>{const h=Math.sin((q.lat-site.lat)*rad/2)**2+Math.cos(q.lat*rad)*Math.cos(site.lat*rad)*Math.sin((q.lon-site.lon)*rad/2)**2;return 6371008.8*2*Math.asin(Math.sqrt(h))>231000}))outside++;}
-      const partial={grace,hatch:radarMetrics.hatchRects,marked,outside,expected:radarMetrics.expectedCells,missing:radarMetrics.missingCells};
-      window.v44Coverage={f,covered,c,meta,hole};return partial;
-    }''')
-    assert coverage['grace'] == 0 and coverage['hatch'] == 1 and coverage['marked'] > 0 and coverage['outside'] == 0, coverage
-    page.screenshot(path=str(output/f'coverage-hole-{theme}.png'))
-    excluded = page.evaluate("""()=>{const {f,hole}=v44Coverage,m=radarView.data.tiles,g=m.grid,saved=m.newest.expectedMask,bit=BigInt((hole.y-g.y0)*g.w+hole.x-g.x0);m.newest.expectedMask=(BigInt('0x'+saved)&~(1n<<bit)).toString(16);radarEchoPaint(f);const hatch=radarMetrics.hatchRects;m.newest.expectedMask=saved;return hatch;}""")
-    assert excluded == 0
-    cached = page.evaluate("""()=>{const {f}=v44Coverage,c=new OffscreenCanvas(956,490);c.getContext('2d');f.bitmap=c.transferToImageBitmap();f.camera={...radarCamera};f.ready=true;radarEchoPaint(f);const hatch=radarMetrics.hatchRects;f.bitmap.close();delete f.bitmap;c.width=c.height=0;return hatch;}""")
-    assert cached == 0
-    cap = page.evaluate('''()=>{const {f,covered}=v44Coverage;for(const t of covered.filter(t=>t!==v44Coverage.hole).slice(0,Math.floor(covered.length*.4))){const k=radarTileKey(f,7,t.x,t.y);radarTiles.get(k)?.bitmap.close();radarTiles.delete(k);}radarEchoPaint(f);for(const k of radarMissingSince.keys())radarMissingSince.set(k,performance.now()-401);radarEchoPaint(f);return {hatch:radarMetrics.hatchRects,acquiring:radarMetrics.acquiring,expected:radarMetrics.expectedCells,missing:radarMetrics.missingCells};}''')
-    assert cap['hatch'] == 0 and cap['acquiring'], cap
-    mrms = page.evaluate("""async()=>{
-      radarRelease();radarCamera={lat:48,lon:-130,zoom:7};radarView.data.sourceId='iem-mrms-lcref';radarView.data.sites=[];
-      const f={stamp:'200001010000',ts:946684800,siteScans:[]};radarView.current=radarView.good=f;radarView.loaded=[f];
-      const tiles=radarTileSet(radarCamera,7),xs=tiles.map(t=>t.x),ys=tiles.map(t=>t.y),g={x0:Math.min(...xs),y0:Math.min(...ys),w:Math.max(...xs)-Math.min(...xs)+1,h:Math.max(...ys)-Math.min(...ys)+1};
-      radarView.data.tiles={...radarView.data.tiles,z:7,grid:g,newest:{stamp:f.stamp,expectedMask:((1n<<BigInt(g.w*g.h))-1n).toString(16)}};
-      const coverage=radarDrawnCoverage(f),covered=tiles.filter(t=>radarCoverageIncludes(coverage,t)),hole=covered.find(t=>radarWorldInverse(t.x*256,t.y*256,7).lon < -130),c=new OffscreenCanvas(256,256),meta={opaquePixels:0,unmatchedPixels:0,ambiguousPixels:0};c.getContext('2d');
-      for(const t of tiles){const k=radarGeoKey(7,t.x,t.y);if(!radarGeoTiles.has(k))radarGeoTiles.set(k,{bitmap:await createImageBitmap(c)});}
-      for(const t of covered.filter(t=>t!==hole)){const k=radarTileKey(f,7,t.x,t.y);radarTiles.set(k,{key:k,z:7,x:t.x,y:t.y,bitmap:await createImageBitmap(c),meta,hasEcho:false});}
-      radarEchoPaint(f);for(const k of radarMissingSince.keys())radarMissingSince.set(k,performance.now()-401);radarEchoPaint(f);
-      const a=document.getElementById('rad-echo').getContext('2d').getImageData(0,0,956,490).data,cp=radarWorldPoint(48,-130,7);let marked=0,outside=0;
-      for(let y=0;y<490;y++)for(let x=0;x<956;x++)if(a[(y*956+x)*4+3]){marked++;if(radarWorldInverse(cp[0]+x+.5-478,cp[1]+y+.5-245,7).lon < -130.02)outside++;}
-      c.width=c.height=0;return {marked,outside,hatch:radarMetrics.hatchRects};
-    }""")
-    assert mrms['marked'] > 0 and mrms['outside'] == 0 and mrms['hatch'] == 1, mrms
-    page.screenshot(path=str(output/f'mrms-edge-{theme}.png'))
+    acquisition = acquisition_pixels(page, theme, output)
     assert not errors, errors
     times = sorted(b['ms'] for b in playback['blends'])
     result = dict(theme=theme, intervalMs=sum(steps)/len(steps), steps=steps, holds=holds,
                   blendDraws=2, blendCostMs=dict(median=times[len(times)//2], p95=times[int(len(times)*.95)], max=max(times)),
-                  middle=middle, pixelBlend=pixel_blend, reduced=reduced, rainviewer=rainviewer, switch=switch, recovery=recovery, coverage=coverage, cap=cap, excludedHatch=excluded, cachedHatch=cached, mrms=mrms,
+                  middle=middle, pixelBlend=pixel_blend, reduced=reduced, rainviewer=rainviewer, switch=switch, recovery=recovery, acquisition=acquisition,
                   playbackFetches=0, playbackDecodes=0, memory=playback['memory'], observedMemory=playback['observedMemory'])
     (output/f'v44-{theme}.json').write_text(json.dumps(result, indent=2))
     print('V4.4', json.dumps(result), flush=True)
