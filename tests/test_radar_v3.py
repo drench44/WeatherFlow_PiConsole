@@ -347,7 +347,7 @@ def test_live_aberdeen_multisite(make_emitter, tmp_path, monkeypatch):
         for tx,ty,x,y in ae._radar_site_tiles(dict(zoom=7,tiles=tiles),pair['id']):
             url=ae.RADAR_SITE_TILE_TEMPLATE.format(site=pair['id'][1:],stamp=stamp,z=7,x=tx,y=ty)
             with Image.open(io.BytesIO(raw_tiles[url])) as tile:
-                layer.paste(ae.remap(tile,'iem-nexrad-n0b',ae._RADAR_LUT),(x,y))
+                layer.paste(ae.remap(tile,'iem-nexrad-n0b',ae.source_palette('iem-nexrad-n0b')),(x,y))
         layers.append((pair['id'],layer))
         expected.alpha_composite(layer)
     with Image.open(Path(ae.RADAR_DIR)/(r['latest']+'.png')) as actual:

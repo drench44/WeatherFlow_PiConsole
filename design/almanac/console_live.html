@@ -633,10 +633,10 @@
   .rad-zoom[data-state="pending"] .rad-zoom-read { opacity: .45; }
   #rad-asof { font: 17px var(--serif); font-variant-numeric: tabular-nums; }
   #rad-status { font-size: 11.5px; }
-  :root { --plate-scrim: rgba(242,237,226,.82); }
-  :root[data-theme="night"] { --plate-scrim: rgba(11,13,17,.78); }
+  :root { --plate-scrim: rgba(242,237,226,.82); --rad-clear-air: #9F9FAA; }
+  :root[data-theme="night"] { --plate-scrim: rgba(11,13,17,.78); --rad-clear-air: #5D606E; }
   @media (prefers-color-scheme: dark) {
-    :root:not([data-theme="paper"]):not([data-theme="light"]) { --plate-scrim: rgba(11,13,17,.78); }
+    :root:not([data-theme="paper"]):not([data-theme="light"]) { --plate-scrim: rgba(11,13,17,.78); --rad-clear-air: #5D606E; }
   }
   .rad-src { position:absolute; left:12px; top:10px; z-index:4; display:flex;
     height:44px; border:1px solid var(--rule); border-radius:2px; background:var(--plate-scrim); }
@@ -645,6 +645,7 @@
   .rad-seg + .rad-seg { border-left:1px solid var(--rule-faint); }
   .rad-seg[aria-pressed="true"] { color:var(--ink); box-shadow:inset 0 -2px 0 var(--ink); }
   .rad-seg:disabled, .rad-play:disabled { opacity:.38; cursor:default; }
+  .rad-play:disabled { opacity:1; color:var(--ink-soft); border-color:var(--rule-faint); cursor:default; }
   .rad-seg:active:not(:disabled) { opacity:.5; }
   .rad-seg:focus-visible { outline:1px solid var(--ink); outline-offset:-3px; }
   .rad-src[data-state="pending"] .rad-seg[aria-pressed="true"] { opacity:.45; }
@@ -662,7 +663,8 @@
   .rad-ramps { display:flex; align-items:center; }
   .rad-legend-unit { flex:0 0 34px; padding-right:6px; text-align:right; font:11.5px/12px var(--sans);
     letter-spacing:.04em; color:var(--ink-soft); }
-  .rad-ramp { display:flex; height:12px; width:372px; border:1px solid var(--rule); }
+  .rad-ramp { position:relative; display:flex; height:12px; width:372px; }
+  .rad-ramp::after { content:""; position:absolute; inset:0; border:1px solid var(--rule); pointer-events:none; }
   .rad-ramp { flex:0 0 372px; }
   .rad-ramp i { flex-basis:0; }
   .rad-ticks { position:relative; width:372px; height:14px; margin:1px 0 0 34px; }
@@ -681,8 +683,8 @@
   .rad-play, .rad-step, .rad-reset { background:var(--plate-scrim); }
   .rad-loop-read { padding:3px 7px; background:var(--plate-scrim); }
   .rad-track { position:relative; width:220px; height:1px; background:var(--rule-faint); margin:5px 0 6px; }
-  .rad-track i { position:absolute; top:-3px; width:2px; height:7px; background:var(--ink); transition:left .11s linear; }
-  .rad-track[hidden] { display:none; }
+  .rad-track i { display:none; position:absolute; top:-3px; width:2px; height:7px; background:var(--ink); transition:left .11s linear; }
+  .rad-track[data-frames="1"] i { display:block; }
   .rad-loop-cap { font:12px var(--sans); letter-spacing:.02em; color:var(--ink-soft); font-variant-numeric:tabular-nums; }
   .rad-zoom { position:absolute; right:12px; bottom:12px; z-index:4; gap:10px; margin:0; }
   .rad-zoom-read { padding:4px 8px; background:var(--plate-scrim); }
@@ -2767,6 +2769,7 @@
       if (mode==='site' && affected.length) cap.append(document.createTextNode(' · '+affected.map(s => s.id).join(', ')+' '+reason));
       else if (site && site.reason===reason) cap.append(document.createTextNode(' · '+site.siteId+' '+reason));
     });
+    if (mode==='site' && r.legend && r.legend.floorDbz===5) cap.append(document.createTextNode(' · from 5 dBZ'));
     var dark=(r.sites || []).filter(s => s.reason==='not reporting');
     if (mode==='site' && dark.length) cap.append(document.createTextNode(' · '+dark.map(s => s.id).join(', ')+' not reporting'));
     else if (site && site.reason==='not reporting') cap.append(document.createTextNode(' · '+site.siteId+' not reporting'));
@@ -3087,6 +3090,7 @@
     echo.hidden = false; radarView.current = fr;
     var remapped=fr.legend ? fr.legend.remapped : radarView.data.legend && radarView.data.legend.remapped;
     if (radarView.shownRemapped!==remapped) { radarView.shownRemapped=remapped; radarSourceRender(); }
+    $("rad-frame-time").removeAttribute("aria-label");
     $("rad-frame-time").textContent = radarFrameLabel(fr) + " · " +
       (fr.ts === radarView.data.observedTs ? "newest" : "−" + Math.round((radarView.data.observedTs-fr.ts)/60) + " min");
     radarNoteRender(); radarSourceRender();
@@ -3187,9 +3191,15 @@
     var buffering=!radarView.bufferDone && ready.length < Math.min(4,radarView.loaded.length);
     var clear=radarView.clear && !ready.some(f => f.hasEcho || f.legend && f.legend.remapped===false) &&
       !(r.sites || []).some(s => s.reason);
-    loop.hidden=radarView.loaded.length < 2 && !clear;
-    $("rad-track").hidden=clear;
-    play.hidden=clear; play.disabled=buffering;
+    loop.hidden=false;
+    $("rad-track").dataset.frames=ready.length ? "1" : "0";
+    play.hidden=false; play.disabled=clear || ready.length < 2;
+    play.textContent="▶"; play.setAttribute("aria-label","Play radar loop");
+    var read=$("rad-frame-time");
+    if (!ready.length) {
+      radarStopLoop(false); read.textContent="—"; read.setAttribute("aria-label","No radar frames decoded yet"); return;
+    }
+    read.removeAttribute("aria-label");
     if (clear) { radarStopLoop(true); $("rad-frame-time").textContent="No echoes · clear"; return; }
     if (radarView.current) {
       var fr=radarView.current;
@@ -3336,7 +3346,7 @@
     var generation = radarView.generation, image = new Image();
     var pending = { data: d };
     radarView.pending = pending;
-    radarStopLoop(false); $("rad-loop").hidden = true;
+    radarStopLoop(false);
     image.decoding = "async";
     function failed() {
       if (generation !== radarView.generation || radarView.pending !== pending) return;
@@ -3495,22 +3505,26 @@
     }
     radarBasemapSync();
     radarSourceRender();
-    var legendKey = (r.sourceId || "rainviewer") + ":" + (r.legend && (r.legend.id || r.legend.colorId));
+    var legendKey = (r.sourceId || "rainviewer") + ":" + (r.legend && (r.legend.id || r.legend.colorId)) + ":" + (r.legend && r.legend.floorDbz);
     if (r.legend && radarView.legendKey !== legendKey) {
       radarView.legendKey=legendKey;
       var legend=$('rad-legend'); legend.replaceChildren();
       var ramps=document.createElement('div'); ramps.className='rad-ramps'; legend.append(ramps);
       var unit=document.createElement('div'); unit.className='rad-legend-unit'; unit.textContent='dBZ'; ramps.append(unit);
       var ramp=document.createElement('div'); ramp.className='rad-ramp'; ramp.id='rad-ramp'; ramps.append(ramp);
+      var floorDbz=r.legend.floorDbz || 10;
+      ramp.setAttribute('role','img');
+      ramp.setAttribute('aria-label','Reflectivity scale, '+floorDbz+' to 75 dBZ.'+
+        (floorDbz===5 ? ' Below 10 dBZ in grey: clear-air return, not precipitation.' : ''));
       var ticks=document.createElement('div'); ticks.className='rad-ticks'; ticks.id='rad-ticks'; legend.append(ticks);
       (r.legend.bands || []).forEach(function(band) {
         var swatch=document.createElement('i'); swatch.style.flex=String(band.hi-band.lo)+' 1 0px';
-        swatch.style.background='linear-gradient(90deg,'+band.start+','+band.end+')'; ramp.append(swatch);
+        swatch.style.background=band.kind==='clear-air' ? 'var(--rad-clear-air)' : 'linear-gradient(90deg,'+band.start+','+band.end+')'; ramp.append(swatch);
       });
-      for (var dbz=10;dbz<=70;dbz+=10) {
+      [floorDbz,10,20,30,40,50,60,70].filter((v,i,a)=>a.indexOf(v)===i).forEach(function(dbz) {
         var tick=document.createElement('span'); tick.className='rad-tick'; tick.textContent=dbz;
-        tick.style.left=((dbz-10)/65*372)+'px'; ticks.append(tick);
-      }
+        tick.style.left=((dbz-floorDbz)/(75-floorDbz)*372)+'px'; ticks.append(tick);
+      });
     }
     radarState();
     if (!r.geometryOnly) radarPreload(r);      /* load the past-hour frames (when the history is present) */

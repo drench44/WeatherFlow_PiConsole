@@ -168,7 +168,7 @@ its next poll only after `render()` returned, and the server credits that mark o
 from a loopback client. The launcher's watchdog reads `renders`, because a request
 count never proved anything reached the screen.
 
-## Radar v3 — sources, geometry, acquisition intent and observed playback
+## Radar v3.2 — sources, geometry, acquisition intent and observed playback
 
 `radar` is an independent side artifact. It never changes `ts`, `obsAgeSec`, or
 engine `/health`. Missing radar or `available:false` hides the tab. A station
@@ -563,7 +563,8 @@ is `i/2−32`, N0B's is `i/2−33` with reserved codes 0/1 transparent. RainView
 uses the published Universal Blue table; tiles request scheme 2 with options
 `0_0`. These lookup tables supply intensity only, never precipitation type.
 
-All three sources publish one legend and use one crop raster for both themes:
+All three sources share the nine rain bands and use one crop raster for both
+themes. MRMS and RainViewer publish the following 10 dBZ legend:
 
 ```jsonc
 "legend": {
@@ -582,18 +583,51 @@ All three sources publish one legend and use one crop raster for both themes:
 }
 ```
 
-There is no precipitation-type key or secondary ramp. RainViewer's caption ends
-`· reflectivity only`. The nine gradients are proportional to their dBZ widths
-on a 372px bar; seven 10…70 ticks lie at `(dBZ−10)/65*372`, with 1×3px hairlines.
-The emitter samples the bands in sRGB every 2.5 dBZ, 10 through 72.5 (26 stops,
-open-ended last stop). Every sampled colour meets ≥2:1 on paper `#F2EDE2` and
-≥3:1 on night `#0B0D11`. Below 10 dBZ is fully transparent. Stale echo opacity
-is .66; the canvas has no CSS filter or theme-dependent recolouring.
+Only `sourceId:"iem-nexrad-n0b"` (single or multi-site) publishes `floorDbz:5`
+and prepends `{"lo":5,"hi":10,"start":"#7F8295","end":"#7F8295","alpha":180,"kind":"clear-air"}`.
+The rain bands gain neither `alpha` nor `kind`. Site indices 0/1 and 2…75 are
+transparent, 76…85 (5…9.5 dBZ) use this flat step, 86 starts the rain ramp, and
+217…255 retain the open top. The unchanged MRMS formula starts visible output
+at index 84. The B2 zoom-floor fallback serves MRMS, so its legend stays at 10.
+There is no precipitation-type key, inference or secondary ramp. RainViewer's
+caption ends `· reflectivity only`.
+
+The 26 rain LUT entries remain sRGB samples every 2.5 dBZ, 10 through 72.5,
+with an open-ended last stop. The site palette prepends one 5 dBZ step without
+extending that LUT. Every rain sample meets ≥2:1 on both page paper `#F2EDE2`
+and tinted plate paper `#EBE6DB`, and ≥3:1 on night `#0B0D11`. Clear air uses
+`#7F8295` at alpha 180/255: composites `#9F9FAA` on plate paper (2.10:1),
+`#A1A1AC` on page paper (2.18:1), and `#5D606E` on night (3.10:1).
+Below the actual source floor is transparent. Stale echo opacity remains .66;
+the canvas has no CSS filter or theme-dependent recolouring. At stale opacity
+the clear-air composite falls to 1.60:1 on plate paper and 1.99:1 on night;
+these floors describe the plate, not the one-pixel basemap hairlines beneath it.
+On paper the clear-air composite has nearly the same luminance as the 10 dBZ
+start, separated by chroma and flatness; a tritanope may confuse those two marks.
+
+The legend stays 414px wide, right:12px, with 8px left padding, a 34px unit cell
+and a 372px ramp. Band widths are proportional to `(hi−lo)` across that full
+372px; its shared 1px border overlays the segments without consuming scale
+width. Site has ten segments (5 dBZ spans 26.571px, 10 spans 53.143px), mosaic
+nine. Ticks are de-duplicated `[floorDbz,10,20,30,40,50,60,70]`, positioned at
+`(dBZ−floorDbz)/(75−floorDbz)*372`, each with a 1×3px hairline. The 10 tick
+also divides clear air from the rain scale; there is no extra rule or word row.
+The legend rebuild key includes the floor even when source and legend id agree.
+Clear-air swatches use opaque `--rad-clear-air` composites (`#9F9FAA` paper,
+`#5D606E` explicit or system night), because translucent paint over the legend
+scrim would differ from the plate. Other segments keep their payload gradients.
+
+Site captions append `· from 5 dBZ` before a dark-site `· KATX not reporting`
+tail, inside the existing 544px maximum; mosaic captions gain nothing. The ramp
+has `role="img"` and `aria-label="Reflectivity scale, 5 to 75 dBZ. Below 10 dBZ in grey: clear-air return, not precipitation."`
+in site mode, or `aria-label="Reflectivity scale, 10 to 75 dBZ."` for mosaic.
 
 IEM XYZ tiles actually arrive as RGBA with antialiased colours. After existing
 PNG/size/placeholder validation, the compositor remaps each distinct colour:
 exact RGBA, then exact RGB, then nearest native RGB within Euclidean distance 3.
-Visible output preserves the original alpha. Repeated and tolerated RGB matches
+Visible output uses `round(nativeCoverage * targetAlpha / 255)`, with the
+alpha-zero suppression path unchanged. Opaque rain stops preserve their exact
+pre-v3.2 RGBA bytes in indexed and RGBA tiles. Repeated and tolerated RGB matches
 retain their candidate dBZ range; crossing a target stop sets `remapped:false`
 and counts `ambiguousPixels`. Verified provider-indexed PNG palettes preserve
 numeric indices rather than losing repeated-colour intensity information.
@@ -602,7 +636,8 @@ Unknown opaque colours become transparent and are counted.
 For at most 256 native RGBA colours, verify an adaptive palette's exact RGBA
 round trip before swapping its palette. Pillow's RGBA octree is not always
 lossless even below 256 colours; if verification fails, verified exact RGB
-median-cut and the untouched alpha channel perform the remap in C. More than
+median-cut and a separately rounded coverage/target-alpha product perform
+the remap in C. More than
 256 colours uses channel masks, bounded at 1024 colours; larger inputs are
 rejected. There are supersede checkpoints before and after every tile.
 
@@ -729,7 +764,24 @@ ending at newest starts when four frames are ready (or a smaller supplied
 history finishes decoding), then extends as older frames become ready — a
 loop that waited for eight left the panel on "Buffering" for 30–45 s after
 every new zoom while frames were visibly arriving.
-Buffering disables Play and displays `Buffering · N of M`. Partial history
+The loop cluster at left:12px/bottom:12px keeps its box through play, clear,
+buffering, zoom, source swaps and frame staging; only an inactive radar tab or
+no radar hides it. The 220×1px rail is permanent. Its 2px marker has `display:none`
+with zero ready frames, appears at left:218px with one, and tracks frame index
+with two or more. The existing .11s left transition remains the entire marker
+animation, suppressed for reduced motion.
+
+Play stays visible and is disabled only for clear content or fewer than two
+ready frames, independent of gesture/fetch/staleness loop fences. Disabled Play
+keeps its 44×44px box, opacity:1, `--ink-soft`, `--rule-faint` border and default
+cursor; source segments retain disabled opacity .38. A stopped or buffering
+loop shows ▶ with `aria-label="Play radar loop"`, never a pause glyph.
+The read evaluates zero ready frames → clear → buffering → frame label:
+`—` with `aria-label="No radar frames decoded yet"`, `No echoes · clear`,
+`Buffering · 1 of 4`, or `17:12 · newest` / `17:02 · −10 min`. A real label
+removes the empty-inventory aria-label. The read has neither status role nor
+aria-live; only the corner note describes refresh progress and owns that live
+region and its 600ms suppression. Partial history
 reports its actual oldest time; no duplicate/padded scans. The browser retains
 at most **16 956×490 bitmaps (~29 MiB)** plus its static newest image/canvas.
 Leaving the tab closes all history bitmaps; returning decodes the active history.

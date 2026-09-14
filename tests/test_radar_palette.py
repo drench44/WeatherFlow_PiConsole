@@ -40,7 +40,7 @@ def test_identity_palette_roundtrip_every_unambiguous_native_colour(source):
         colors=[tuple(bytes.fromhex(row['Universal Blue'][1:])) for row in rows if row['Universal Blue'][-2:]!='00']
     else:
         colors=list(exact)
-    stops={rp.native_dbz(source,c):c for c in colors}
+    stops={rp.native_dbz(source,c):c[:3]+(255,) for c in colors}
     # Repeated RGBA bins have a canonical lowest dBZ; each canonical bin has one
     # colour on these rain/native ramps. Transparent reserved codes remain clear.
     image=Image.new('RGBA',(len(colors)+1,1)); image.putdata(colors+[(0,0,0,0)])

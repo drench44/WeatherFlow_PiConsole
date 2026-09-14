@@ -483,7 +483,7 @@ def check_zoom_site(browser, html, output_dir, theme, site):
             build(); page.wait_for_function('radarView.loaded.filter(f=>f.ready).length>=2')
             page.locator('#rad-play').click(); assert page.evaluate('radarView.paused')
             page.keyboard.press('+'); r=build(9,history=False)
-            assert r['completeFrameCount']==1 and page.locator('#rad-loop').is_hidden()
+            assert r['completeFrameCount']==1 and page.locator('#rad-loop').is_visible()
             assert page.evaluate('radarView.paused')
             build(); page.wait_for_function('radarView.loaded.filter(f=>f.ready).length>=2')
             assert page.evaluate('radarView.paused') and not page.evaluate('!!radarView.timer')
@@ -1503,6 +1503,147 @@ def check_radar_fast(browser, html, theme):
     context.close()
 
 
+def check_radar_v32(browser, html, output_dir, theme):
+    """K7–K17 in both themes, including an actual zoom and gated image decodes."""
+    import copy
+    data=source_payload('iem-mrms-lcref');r=data['radar']
+    r.update(geometryOnly=True,frames=[],latest=None,observedTs=None,observedAt=None,
+             zoom=7,zoomDesired=7,zoomAuto=False,zoomMin=4,zoomMax=9,zoomCapped=False,
+             sourceMode='mosaic',sourcePref='mosaic',sitePreferred=False,sourceFallback=None,
+             sources=[dict(mode='mosaic',available=True),dict(mode='site',siteId='KATX',available=True)],
+             intent=dict(seq=0,zoom=7,center='station',source='mosaic'),
+             refresh=dict(state='newest',frameIndex=0,frameTotal=4,forSeq=0))
+    context=browser.new_context(viewport=dict(width=1024,height=600),reduced_motion='reduce')
+    context.add_init_script("""window.testPayload=PAYLOAD;window.allowed=new Set();window.decodeWaiters=[];
+      const decode=HTMLImageElement.prototype.decode;
+      HTMLImageElement.prototype.decode=async function(){await decode.call(this);
+        if(this.src.includes('/v32/') && !this.onload && !allowed.has(this.src))
+          await new Promise(resolve=>decodeWaiters.push({url:this.src,resolve}));
+      };
+      window.releaseFrames=urls=>{urls.forEach(u=>allowed.add(u));decodeWaiters.forEach(w=>{
+        if(allowed.has(w.url))w.resolve();});};
+      window.fetch=u=>Promise.resolve({ok:true,headers:{get:()=>null},json:()=>Promise.resolve(testPayload)});
+    """.replace('PAYLOAD',json.dumps(data)))
+    image=io.BytesIO();Image.new('RGBA',(956,490),(138,163,198,255)).save(image,'PNG')
+    context.route('https://radar.test/**',lambda route:route.fulfill(body=image.getvalue(),content_type='image/png')
+                  if '/v32/' in route.request.url else route.fulfill(body=html,content_type='text/html'))
+    page=context.new_page();errors=[];page.on('pageerror',lambda e:errors.append(str(e)))
+    page.goto('https://radar.test/?tabs=1&theme='+theme);page.locator('.tab[data-screen="s-radar"]').click()
+    page.evaluate('clearTimeout(pollTimer);radarView.paused=true')
+    def visible():
+        for selector in ('#rad-loop','#rad-play','#rad-track'):
+            assert page.locator(selector).get_attribute('hidden') is None, (theme,selector)
+            assert page.locator(selector).is_visible(), (theme,selector)
+    def boxes():
+        return [page.locator(s).bounding_box() for s in ('#rad-legend','.rad-legend-unit')]
+    def commit(d):
+        page.evaluate('d=>{testPayload=d;radarGeometryCommit(d)}',d)
+        visible()
+    def disabled():
+        play=page.locator('#rad-play');assert play.is_disabled() and play.inner_text()=='▶'
+        assert play.get_attribute('aria-label')=='Play radar loop'
+        b=play.bounding_box();assert b['width']>=44 and b['height']>=44
+        values=play.evaluate("""e=>{let s=getComputedStyle(e),p=getComputedStyle(document.getElementById('rad-plate'));
+          let rgb=c=>c.match(/[\d.]+/g).slice(0,3).map(Number).map(v=>c.startsWith('color(')?v*255:v),lum=a=>a.map(x=>x/255).map(x=>x<=.04045?x/12.92:((x+.055)/1.055)**2.4).reduce((s,v,i)=>s+v*[.2126,.7152,.0722][i],0);
+          let probe=document.createElement('i');e.parentElement.append(probe);probe.style.color=p.getPropertyValue('--ink-soft');let ink=getComputedStyle(probe).color;
+          probe.style.color=p.getPropertyValue('--rule-faint');let rule=getComputedStyle(probe).color;probe.remove();
+          let ground=document.documentElement.dataset.theme==='night'?[11,13,17]:[241,236,225];
+          let ls=[lum(rgb(s.color)),lum(ground)].sort((a,b)=>a-b);
+          return {opacity:s.opacity,color:s.color,ink,border:s.borderColor,rule,contrast:(ls[1]+.05)/(ls[0]+.05)};}""")
+        assert values['opacity']=='1' and values['color']==values['ink'] and values['border']==values['rule'],values
+        assert values['contrast']>=4.5,values
+    visible();disabled()
+    baseline=boxes();assert baseline[0]['width']==414 and baseline[1]['width']==34
+    assert page.locator('#rad-ramp').get_attribute('aria-label')=='Reflectivity scale, 10 to 75 dBZ.'
+    assert '5 dBZ' not in page.locator('#rad-src-cap').inner_text()
+    site=copy.deepcopy(data);sr=site['radar']
+    sr.update(sourceMode='site',sourceId='iem-nexrad-n0b',sourcePref='site',siteId='KATX',legend=dict(ae._RADAR_SITE_RAMP,remapped=True))
+    sr['sites']=[dict(id=i,lat=lat,lon=lon,primary=n==0,contributing=True,reason=None) for n,(i,lat,lon) in enumerate([
+      ('KATX',47.65,-122.33),('KLGX',46.98,-123.82),('KRTX',45.71,-122.97)])]
+    commit(site);assert boxes()==baseline
+    widths=page.locator('#rad-ramp i').evaluate_all('es=>es.map(e=>e.getBoundingClientRect().width)')
+    assert len(widths)==10 and all(abs(a-b)<1 for a,b in zip(widths,[26.6,53.1,26.6,53.1,26.6,26.6,26.6,53.1,53.1,26.6])),widths
+    assert abs(sum(widths)-372)<.1 and page.locator('#rad-ramp').bounding_box()['width']==372,widths
+    swatch=page.locator('#rad-ramp i').first.evaluate('e=>({color:getComputedStyle(e).backgroundColor,image:getComputedStyle(e).backgroundImage})')
+    assert swatch==dict(color='rgb(159, 159, 170)' if theme=='paper' else 'rgb(93, 96, 110)',image='none'),swatch
+    ticks=page.locator('.rad-tick').evaluate_all("""es=>es.map(e=>({text:e.textContent,left:parseFloat(getComputedStyle(e).left),
+      w:getComputedStyle(e,'::before').width,h:getComputedStyle(e,'::before').height}))""")
+    assert [t['text'] for t in ticks]==['5','10','20','30','40','50','60','70']
+    assert all(abs(t['left']-v)<1 and t['w']=='1px' and t['h']=='3px' for t,v in zip(ticks,[0,26.6,79.7,132.9,186,239.1,292.3,345.4]))
+    assert page.locator('#rad-src-cap').inner_text()=='NEXRAD · KATX +2 · ~5 min volumes · IEM / NOAA · from 5 dBZ'
+    assert page.locator('#rad-ramp').get_attribute('role')=='img'
+    assert page.locator('#rad-ramp').get_attribute('aria-label')=='Reflectivity scale, 5 to 75 dBZ. Below 10 dBZ in grey: clear-air return, not precipitation.'
+    dark=copy.deepcopy(site);dark['radar']['siteId']='KLGX';dark['radar']['sites'][0].update(contributing=False,primary=False,reason='not reporting')
+    dark['radar']['sites'][1]['primary']=True
+    dark['radar']['sites'].append(dict(id='KPDT',lat=45.7,lon=-118.9,contributing=True,primary=False,reason=None))
+    commit(dark)
+    assert page.locator('#rad-src-cap').inner_text()=='NEXRAD · KLGX +2 · ~5 min volumes · IEM / NOAA · from 5 dBZ · KATX not reporting'
+    assert page.locator('#rad-src-cap').bounding_box()['width']<=544
+    # A floor-only change must invalidate the key even with identical source/id.
+    same=copy.deepcopy(site);same['radar']['legend']=dict(ae._RADAR_RAMP,remapped=True);commit(same)
+    assert page.locator('#rad-ramp i').count()==9
+    assert page.locator('#rad-ramp').get_attribute('aria-label')=='Reflectivity scale, 10 to 75 dBZ.'
+    assert boxes()==baseline
+    commit(data)
+    # Drive a real zoom while newest is in flight; main staging decode completes,
+    # then the separate playback decoder is held at zero, one and four frames.
+    page.locator('#rad-zoom-in').click()
+    page.wait_for_function('radarIntent.targetSeq>0')
+    seq=page.evaluate('radarIntent.targetSeq')
+    zoom=copy.deepcopy(data);zr=zoom['radar'];zr.update(zoom=8,zoomDesired=8)
+    zr['intent'].update(seq=seq,zoom=8);zr['refresh']['forSeq']=seq
+    page.evaluate('d=>{testPayload=d;renderRadar(d)}',zoom)
+    page.evaluate('radarIntent.postedAt=Date.now()-1000;radarNoteRender()')
+    visible();disabled();box=page.locator('#rad-loop').bounding_box()
+    read=page.locator('#rad-frame-time')
+    assert read.inner_text()=='—' and read.get_attribute('aria-label')=='No radar frames decoded yet'
+    assert page.locator('#rad-note').inner_text()=='Refreshing · newest frame'
+    assert not any(t in read.inner_text() for t in ('Refreshing','Fetching'))
+    assert read.get_attribute('role') is None and read.get_attribute('aria-live') is None
+    assert page.locator('#rad-tick').evaluate('e=>getComputedStyle(e).display')=='none'
+    zr.update(geometryOnly=False,observedTs=1800000000,observedAt='17:12',frameCount=4,completeFrameCount=4)
+    zr['frames']=[dict(id='v32-'+str(i),ts=1800000000-(3-i)*300,at=['16:57','17:02','17:07','17:12'][i],complete=True,
+                       url='https://radar.test/v32/'+str(i)+'.png',legend=dict(remapped=True)) for i in range(4)]
+    zr['latest']='v32-3'
+    page.evaluate('d=>{testPayload=d;renderRadar(d)}',zoom)
+    visible();assert page.locator('#rad-loop').bounding_box()==box
+    page.wait_for_function("radarView.good && radarView.good.id==='v32-3' && !radarView.pending && decodeWaiters.length>0")
+    visible();disabled();assert page.locator('#rad-loop').bounding_box()==box
+    assert read.inner_text()=='—' and page.evaluate('radarReady().length')==0
+    page.evaluate('releaseFrames(["https://radar.test/v32/3.png"])')
+    page.wait_for_function('radarReady().length===1')
+    visible();disabled();assert page.locator('#rad-loop').bounding_box()==box
+    assert read.inner_text()=='Buffering · 1 of 4' and read.get_attribute('aria-label') is None
+    assert page.locator('#rad-tick').evaluate('e=>getComputedStyle(e).display')=='block'
+    assert page.locator('#rad-tick').evaluate('e=>getComputedStyle(e).left')=='218px'
+    page.evaluate('releaseFrames(["https://radar.test/v32/2.png"])')
+    page.wait_for_function('radarReady().length===2')
+    visible();assert page.locator('#rad-play').is_enabled()
+    assert read.inner_text()=='Buffering · 2 of 4' and page.locator('#rad-loop').bounding_box()==box
+    page.evaluate('releaseFrames([0,1].map(i=>"https://radar.test/v32/"+i+".png"))')
+    page.wait_for_function('radarReady().length===4 && radarView.bufferDone')
+    visible();assert page.locator('#rad-loop').bounding_box()==box
+    assert read.inner_text()=='17:12 · newest' and page.locator('#rad-play').is_enabled()
+    for i in range(4):
+        page.evaluate('i=>radarDraw(radarReady()[i])',i)
+        left=page.locator('#rad-tick').evaluate('e=>parseFloat(getComputedStyle(e).left)')
+        assert abs(left-i/3*218)<.1
+    # Content, not gesture/fetch/staleness, disables the control.
+    for state in ('pending','stale','failed'):
+        page.evaluate("state=>{if(state==='stale')radarView.data.stale=true;else radarView[state]=true;radarLoopSync()}",state)
+        visible();assert page.locator('#rad-play').is_enabled() and page.locator('#rad-loop').bounding_box()==box
+        page.evaluate("state=>{if(state==='stale')radarView.data.stale=false;else radarView[state]=null;radarLoopSync()}",state)
+    page.evaluate("radarView.clear=true;radarReady().forEach(f=>f.hasEcho=false);radarLoopSync()")
+    visible();disabled();assert read.inner_text()=='No echoes · clear'
+    assert page.locator('#rad-loop').bounding_box()==box
+    page.screenshot(path=str(output_dir/f'radar-v32-cluster-{theme}.png'))
+    page.evaluate("renderRadar({radar:{available:false}})")
+    assert page.locator('#rad-loop').get_attribute('hidden') is not None
+    assert not errors,errors
+    context.close()
+    print('RADAR V3.2 PASS:',theme,'; K7–K17 legend geometry/theme swatch/copy/aria, zoom 0→1→4 identical cluster box, disabled contrast, inventory/note separation and marker',flush=True)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--browser')
@@ -1601,6 +1742,7 @@ def main():
         check_forecast_blend(browser, html)
         check_loop(browser, html)
         for theme in ('paper', 'night'):
+            check_radar_v32(browser, html, args.output_dir, theme)
             check_radar_fast(browser, html, theme)
             check_radar_recovery(browser, html, theme)
             check_radar_v3(browser, html, args.output_dir, theme)
@@ -1621,7 +1763,7 @@ def main():
           '1024x600 alert layout in both themes; five-site zoom paper/night, real loopback persistence, '
           'pending/confirmed/coalescing/reset, keyboard/focus, bounds/caps/restore, geometry/paused history, '
           'refresh persistence, clear/stale, system dark theme, no accent zoom chrome; '
-          'v3 shared reflectivity, intent/refresh note and G2 in both themes; no page errors')
+          'v3 shared reflectivity, intent/refresh note and G2; v3.2 K7–K17 in both themes; no page errors')
 
 
 if __name__ == '__main__':

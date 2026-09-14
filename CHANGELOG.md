@@ -7,6 +7,19 @@ to shared upstream code that the classic console benefits from too.
 ## 2026-09-14
 
 ### Radar
+- **Faint returns in site mode, from 5 dBZ.** Single and neighbouring NEXRAD
+  sites gain one flat slate band at 5–10 dBZ, with alpha 180/255 multiplied by
+  native coverage. The nine rain bands keep their exact pixels; MRMS and the
+  global mosaic still start at 10, including the wide-view site fallback. The
+  legend re-ticks inside the same box, with a theme-composited swatch, a short
+  caption tail and an accessible explanation. Reflectivity only, never a
+  precipitation-type inference.
+- **The loop controls stay while frames arrive.** Zoom staging no longer hides
+  Play, the rail or the read. Play steps down to secondary ink until there are
+  two decoded frames, or when there is nothing to animate. With no frames the
+  read is “—” and the marker is absent; the single corner note owns refresh
+  progress. One frame pins the marker at newest. Every phase keeps the same box
+  on paper and night.
 - **Loop first, next zoom second, deep history last.** After the newest scan,
   acquire eight loop frames and warm adjacent zooms before spending requests on
   the rest of the hour. Deep history starts after 20 seconds of continuous viewing

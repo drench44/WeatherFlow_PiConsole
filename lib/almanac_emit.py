@@ -123,11 +123,11 @@ RADAR_RAINVIEWER_COLOR = 2
 RADAR_RAINVIEWER_TILE_OPTS = "0_0"
 RADAR_RAINVIEWER_MANIFEST_URL = "https://api.rainviewer.com/public/weather-maps.json"
 RADAR_DIR = os.environ.get("WFP_RADAR_DIR", os.path.expanduser("~/almanac_web/radar"))
-from lib.radar_palette import _RADAR_RAMP, _RADAR_LUT, REMAP_REVISION, remap
+from lib.radar_palette import _RADAR_RAMP, _RADAR_LUT, _RADAR_SITE_RAMP, REMAP_REVISION, remap, source_palette
 _RADAR_SOURCES = {
     'iem-nexrad-n0b': dict(provider='iem', attribution='IEM / NOAA',
         attribution_url='https://mesonet.agron.iastate.edu/GIS/ridge.phtml',
-        cadence=300, stale_sec=900, legend=_RADAR_RAMP, max_zoom=10),
+        cadence=300, stale_sec=900, legend=_RADAR_SITE_RAMP, max_zoom=10),
     'iem-mrms-lcref': dict(provider='iem', attribution='IEM / NOAA MRMS',
         attribution_url='https://mesonet.agron.iastate.edu/ogc/',
         cadence=RADAR_IEM_FRAME_INTERVAL_SEC, stale_sec=RADAR_IEM_STALE_SEC,
@@ -1351,7 +1351,7 @@ class AlmanacEmitter:
                                 # Raw cache entries were validated before insertion.
                                 with Image.open(io.BytesIO(raw)) as tile:
                                     crop = (max(0,-x), max(0,-y), min(256,RADAR_VIEWPORT_W-x), min(256,RADAR_VIEWPORT_H-y))
-                                    with remap(tile.crop(crop), source, _RADAR_LUT) as mapped:
+                                    with remap(tile.crop(crop), source, source_palette(source)) as mapped:
                                         layer_unknown.update(mapped.info['unmatchedColorValues'])
                                         layer_opaque.update(mapped.info['opaqueColorValues'])
                                         layer_pixels += mapped.info['unmatchedPixels']

@@ -10,7 +10,7 @@ from pathlib import Path
 _FILES = {'iem-mrms-lcref': 'ramp_mrms_lcref.csv',
           'iem-nexrad-n0b': 'ramp_n0b.csv',
           'rainviewer': 'rainviewer_api_colors_table.csv'}
-REMAP_REVISION = "native-v3-fix-2"
+REMAP_REVISION = "native-v3.2-1"
 _RGB_TOLERANCE = 3  # Euclidean RGB distance; alpha is coverage, not intensity.
 _LOG = logging.getLogger(__name__)
 
@@ -34,6 +34,14 @@ def sample_ramp():
     return tuple(result)
 
 _RADAR_LUT = sample_ramp()
+_CLEAR_AIR_BAND = dict(lo=5, hi=10, start='#7F8295', end='#7F8295', alpha=180, kind='clear-air')
+_RADAR_SITE_RAMP = dict(_RADAR_RAMP, floorDbz=5, bands=[_CLEAR_AIR_BAND] + _RADAR_RAMP['bands'])
+_RADAR_SITE_PALETTE = ((5.0, (0x7F, 0x82, 0x95, 180)),) + _RADAR_LUT
+
+
+def source_palette(source):
+    return _RADAR_SITE_PALETTE if source == 'iem-nexrad-n0b' else _RADAR_LUT
+
 # Reserved N0B codes still have a documented numeric formula, but no echo.
 INDEX_DBZ = {'iem-mrms-lcref': tuple(i/2-32 for i in range(256)),
              'iem-nexrad-n0b': tuple(None if i < 2 else i/2-33 for i in range(256))}
@@ -135,7 +143,7 @@ def _remap_indexed(image, source, palette, floors):
     for index,color in enumerate(actual):
         dbz=INDEX_DBZ[source][index]
         stop=bisect_right(floors,dbz)-1 if dbz is not None else -1
-        targets.append(palette[stop][1][:3]+(color[3],) if stop>=0 and palette[stop][1][3] else (0,0,0,0))
+        targets.append(palette[stop][1][:3]+(round(color[3]*palette[stop][1][3]/255),) if stop>=0 and palette[stop][1][3] else (0,0,0,0))
     result=image.copy(); result.info.pop('transparency',None)
     result.putpalette([v for c in targets for v in c],rawmode='RGBA');result=result.convert('RGBA')
     opaque={actual[i] for n,i in colors if actual[i][3]}
@@ -148,7 +156,7 @@ def _remap_indexed(image, source, palette, floors):
 def remap(image, source, palette):
     """Return RGBA using ordered (dBZ floor, RGBA) steps; top is open-ended.
 
-    Input alpha is preserved for visible stops (never multiplied a second time);
+    Input coverage alpha is multiplied by the selected target alpha, rounded once;
     a stop with alpha=0 explicitly suppresses its bin. Below the first floor and
     unknown colours become transparent. Warn once with unknown pixel/colour
     counts. Native inverse/stop selection runs once per distinct colour, and the
@@ -167,6 +175,7 @@ def remap(image, source, palette):
     with image.convert('RGBA') as rgba:
         mapping, unknown_pixels, unknown_colors, opaque_colors = {}, 0, 0, 0
         opaque_pixels, ambiguous_pixels = 0, 0
+        target_opacities = {}
         unknown_values = set()
         # maxcolors=pixel count guarantees a full histogram even for an unusual
         # input with >256 colours; normal native radar tiles have <100.
@@ -189,11 +198,12 @@ def remap(image, source, palette):
                     ambiguous_pixels += count
                 index = bisect_right(floors, dbz) - 1
                 if index >= 0 and palette[index][1][3]:
-                    target = palette[index][1][:3] + (color[3],)
+                    target = palette[index][1][:3] + (round(color[3]*palette[index][1][3]/255),)
+                    target_opacities[color] = palette[index][1][3]
             mapping[color] = target
         # Verify the adaptive RGBA palette before using it: Pillow's octree
         # can merge even fewer than 256 native colours. Exact RGB median-cut
-        # plus the untouched alpha channel handles those tiles without loss.
+        # plus rounded coverage alpha handles those tiles without loss.
         indexed = None
         if len(mapping) <= 256:
             candidate = rgba.convert('P', palette=Image.Palette.ADAPTIVE,
@@ -211,11 +221,18 @@ def remap(image, source, palette):
                     raise ValueError('native palette conversion was not lossless')
                 indexed = candidate
                 native = indexed.getpalette('RGB')
-                rgb_targets = {c[:3]: t[:3]+(255 if t[3] else 0,) for c,t in mapping.items() if c[3]}
+                rgb_targets = {c[:3]: t[:3]+(target_opacities[c] if t[3] else 0,)
+                               for c,t in mapping.items() if c[3]}
                 targets = [rgb_targets.get(tuple(native[i:i+3]), (0,0,0,0)) for i in range(0,len(native),3)]
                 indexed.putpalette([v for c in targets for v in c], rawmode='RGBA')
                 result = indexed.convert('RGBA')
-                result.putalpha(ImageChops.multiply(result.getchannel('A'), rgba.getchannel('A')))
+                target_alpha, coverage = result.getchannel('A'), rgba.getchannel('A')
+                alpha = ImageChops.multiply(target_alpha, coverage)
+                # ImageChops.multiply truncates; translucent stops require round.
+                for opacity in {t[3] for t in rgb_targets.values()} - {0, 255}:
+                    mask = target_alpha.point([255 if v == opacity else 0 for v in range(256)])
+                    alpha.paste(coverage.point([round(v*opacity/255) for v in range(256)]), (0, 0), mask)
+                result.putalpha(alpha)
         if indexed is None:
             result = Image.new('RGBA', rgba.size)
             channels = rgba.split()
