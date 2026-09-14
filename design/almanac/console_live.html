@@ -3565,7 +3565,7 @@
     /* the ack is consumed HERE: it vouches for the previous frame only, and a
        failed request after it must not re-send it */
     var ack = reportRender; reportRender = false;
-    var radarActive = $("s-radar").classList.contains("active");
+    var radarActive = $("s-radar").classList.contains("active") && !document.hidden;
     var zoomQuery = "", posting=radarIntent.ready && radarActive && radarGesture.state!=='gesturing';
     if (posting) {
       var r=radarView.data, center=radarCenter.desired!==null ? radarCenter.desired :

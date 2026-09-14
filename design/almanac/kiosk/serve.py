@@ -44,6 +44,43 @@ _renders    = 0
 _count_lock = threading.Lock()
 
 
+# A separate session marker preserves radar_viewed's 15-minute demand hint.
+# The engine admits deep history only during a continuous, live view session.
+RADAR_VIEW_POLL_GAP_SEC = 5
+
+
+def _write_radar_viewing(viewed):
+    marker = os.path.join(os.path.dirname(DATA), 'radar_viewing')
+    tmp = f'{marker}.tmp.{os.getpid()}'
+    try:
+        if not viewed:
+            try:
+                os.unlink(marker)
+            except FileNotFoundError:
+                pass
+            return
+        now = time.time()
+        since = now
+        try:
+            with open(marker) as f:
+                previous = json.load(f)
+            if (0 <= now-previous['last'] < RADAR_VIEW_POLL_GAP_SEC
+                    and previous['since'] <= previous['last']):
+                since = previous['since']
+        except (OSError, ValueError, TypeError, KeyError):
+            pass
+        with open(tmp, 'w') as f:
+            json.dump(dict(since=since, last=now), f)
+        os.replace(tmp, marker)
+    except OSError:
+        pass
+    finally:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+
+
 def _write_radar_zoom(values):
     return _write_radar_preference('radar_zoom', values)
 
@@ -175,6 +212,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 if rendered:
                     _renders += 1
                 if self.client_address[0] in LOOPBACK:
+                    _write_radar_viewing(viewed_radar)
                     params = parse_qs(query, keep_blank_values=True)
                     if 'radarSeq' in params:
                         _write_radar_intent(params)

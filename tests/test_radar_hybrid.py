@@ -203,7 +203,7 @@ def test_cache_identity_source_viewport_and_total_outage(make_emitter, hybrid):
     assert not emitter._radar_available and emitter._radar_center is None
 
 
-def test_cold_warm_unviewed_counts_history_limit_and_atomic(make_emitter, hybrid, monkeypatch):
+def test_cold_warm_unviewed_counts_history_limit_and_atomic(make_emitter, hybrid, monkeypatch, tmp_path):
     monkeypatch.setattr(ae, 'RADAR_REQUESTS_PER_MIN', 90)  # the counts below are budget-relative
     monkeypatch.setattr(ae, 'RADAR_HISTORY_RESERVE', 17)
     hybrid.view()
@@ -224,19 +224,27 @@ def test_cold_warm_unviewed_counts_history_limit_and_atomic(make_emitter, hybrid
     assert len(hybrid.calls) == 66  # five complete frames; reserve next newest
     assert sum(f['complete'] for f in snapshots[0].frames) == 1  # publish before backfill
     assert sum(f['complete'] for f in snapshots[-1].frames) == 5
-    for _ in range(6):
-        hybrid.now -= 60  # hold wall clock; this test exercises monotonic backfill budgets
+    # Finish the loop under the original small-window check, then exercise deep
+    # history under the production window (90 cannot fit metadata plus a frame
+    # above the 17+60 floor).
+    hybrid.now -= 60; hybrid.mono += 60; emitter._do_radar()
+    assert sum(f['complete'] for f in emitter._radar_frames) == 8
+    monkeypatch.setattr(ae, 'RADAR_REQUESTS_PER_MIN', 240)
+    monkeypatch.setattr(ae, 'RADAR_HISTORY_RESERVE', 34)
+    for _ in range(4):
+        hybrid.now -= 60  # hold wall clock; exercise monotonic backfill budgets
         hybrid.mono += 60
+        (tmp_path/'radar_viewing').write_text(json.dumps(dict(since=ae.time.time()-20, last=ae.time.time())))
         emitter._do_radar()
     r = emitter._build_payload()['radar']
     assert r['frameCount'] == r['completeFrameCount'] == 31
     assert r['historySpanSec'] == 3600 and r['frameSpacingSec'] == 120 and not r['historyGaps']
     assert r['frames'][-1]['ts'] - r['frames'][0]['ts'] == 3600
     starts = [c[3] for c in hybrid.calls]
-    assert all(sum(t <= v < t + 60 for v in starts) <= 90 for t in starts)
+    assert all(sum(t <= v < t + 60 for v in starts) <= (90 if t < 120 else 240) for t in starts)
     hybrid.now -= 60; hybrid.mono += 60; hybrid.calls.clear(); emitter._do_radar()
-    assert len(hybrid.calls) == 28  # warm crops + first eligible adjacent newest round
-    assert all(c[1] == 'GET' and '/8/' not in c[2] for c in hybrid.calls)
+    assert len(hybrid.calls) == 1  # neighbours warmed before deep history, crops now warm
+    assert hybrid.calls[0][2] == ae.RADAR_IEM_METADATA_URL
     hybrid.calls.clear(); emitter._do_radar()
     assert len(hybrid.calls) == 1  # once per stamp
     assert not list(Path(ae.RADAR_DIR).rglob('*.tmp.*'))
@@ -365,7 +373,11 @@ def test_total_deadline_and_backfill_keep_refresh_completion(make_emitter, hybri
     monkeypatch.setattr(ae, 'RADAR_REQUESTS_PER_MIN', 1000)
     hybrid.view()
     hybrid.failure = lambda *_: setattr(hybrid, 'mono', hybrid.mono + 1)
-    emitter = make_emitter(); emitter._do_radar()
+    emitter = make_emitter()
+    # This deadline test models a continuously-viewed geometry; the view gate has
+    # independent real-marker coverage in test_radar_priority.
+    monkeypatch.setattr(emitter, '_radar_deep_view_delay', lambda ctx: 0)
+    emitter._do_radar()
     assert hybrid.mono == ae.RADAR_BUILD_DEADLINE_SEC
     assert emitter._radar_result.source_id == 'iem-mrms-lcref'
     assert emitter._radar_ts_fetch == hybrid.now + 14  # metadata + HEAD + nine tiles

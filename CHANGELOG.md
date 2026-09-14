@@ -7,6 +7,14 @@ to shared upstream code that the classic console benefits from too.
 ## 2026-09-14
 
 ### Radar
+- **Loop first, next zoom second, deep history last.** After the newest scan,
+  acquire eight loop frames and warm adjacent zooms before spending requests on
+  the rest of the hour. Deep history starts after 20 seconds of continuous viewing
+  at the current geometry and leaves 60 spare requests above the interaction
+  reserve, including archive probes and transport retries. It resumes as capacity
+  returns and keeps the warmed newest tiles recent in the bounded cache. Each
+  geometry can warm its neighbours once per scan; scheduled new scans follow the
+  same order. New intents cancel at tile boundaries; multi-site keeps eight frames.
 - **Zoom without asking what is newest again.** Intent passes reuse validated
   source timestamps and per-site scan listings for one source cadence, then go
   straight to tiles. Scheduled refreshes, expiry and failures revalidate; purged

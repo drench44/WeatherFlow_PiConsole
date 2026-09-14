@@ -264,18 +264,48 @@ keys also include its server-side colour scheme and options. A pan or restarted
 crop reuses overlapping tiles without HTTP, even if the earlier crop never finished.
 Truncated, oversized, placeholder and invalid tiles never enter this cache.
 
-After a successful pass publishes `idle`, a fresh `radar_viewed` marker permits
-one adjacent-zoom prefetch round per source/newest timestamp. The rolling window
-must have at least 60 free requests above the 34-request interaction reserve.
-For the same centre, Z−1 and Z+1 within source bounds warm only newest native
-tiles in the same LRU. Site mode uses known scan listings and intersecting sites;
-it does not fetch extra metadata. RainViewer warms at most once per 10-minute
-stamp, including across zoom/centre changes. Interrupted rounds also count once.
-Prefetch never composites, publishes, creates history entries, or schedules a
-retry. Intent checkpoints stop new submissions immediately; active requests drain
-into the LRU. View freshness is checked again during warming. Every prefetch
-request and transport retry preserves the interaction reserve atomically. History
-can consume the available headroom, in which case the idle round is skipped.
+After newest publishes, viewed acquisition has three priorities, shared by intent,
+scheduled cadence and budget-resume passes:
+
+1. Build the newest eight loop slots (`RADAR_LOOP_FRAMES=8`), newest first. Reuse
+   complete cached crops immediately. Multi-site retains its existing eight-slot
+   cap; single-site/MRMS can still expose the full hour (up to 31 slots).
+2. Publish `idle` and admit adjacent-zoom newest-tile prefetch **before** attempting
+   any deeper history. A fresh `radar_viewed` demand hint and at least 60 free
+   requests above the 34-request interaction reserve admit Z−1 then Z+1, within
+   source bounds. Warm only native tiles at the same centre, using validated
+   stamps/listings without extra metadata. Admission is once per source/newest
+   stamp **at each zoom/centre**; repeat passes at that geometry do not rewarm.
+   A changed geometry may warm its own next neighbours at the same stamp. Old
+   stamp admission records are discarded when the source advances. Interrupted
+   rounds also count once. Errors do not invalidate the published crop or cause
+   provider fallback, negative caching or a prefetch-specific retry.
+3. Build slots 9…31 only after at least 20 seconds of continuous live viewing at
+   this geometry/intent. A frame starts only when its estimated requests fit
+   above **both** the interaction reserve and 60 spare requests. The atomic
+   per-request gate applies that same floor to tiles, archive HEAD probes and
+   transparent transport retries, so concurrent starts cannot cross it. On a
+   budget yield, retain published frames, return idle and schedule the next
+   capacity opportunity; on an active view still under 20 seconds, wait for the
+   remaining residence time as well. No worker sleeps while waiting for capacity.
+
+The loopback server atomically writes `radar_viewing` as `{since,last}` UTC epoch
+seconds during `view=radar` polls. Hidden documents omit that view signal.
+A loopback off-tab poll removes that session
+marker; a heartbeat gap of five seconds or more starts a new session. The emitter
+requires `last` younger than five seconds and measures geometry residence with a
+monotonic clock. New intents/geometries restart residence; scheduled stamps at an
+unchanged geometry do not. This separate marker leaves the existing 900-second
+`radar_viewed` hint and basemap/loop demand behavior intact. Missing, expired or
+malformed session markers deny deep history. An inactive view uses the ordinary
+retry cadence instead of polling the view gate in a tight loop.
+
+All tiers check intent at tile boundaries; active requests drain into the LRU.
+Deep history also rechecks continuous viewing there. Prefetch and loop requests
+preserve the interaction reserve; deep history preserves another 60 slots. Before
+each deep frame, newest native entries (including warmed neighbours) are touched
+in the existing LRU so least-urgent history cannot evict the next press's tiles.
+The cache size and compressed-byte representation are unchanged.
 
 The existing 400-entry limit already fits three zooms × 15 tiles × two stamps
 (90 entries), so it is unchanged. Only compressed PNG bytes are retained: memory
@@ -506,9 +536,10 @@ blocks it, retain the geometry-only view, publish idle, and retry at the necessa
 request-window or cooldown expiry. Retained failure records describe the retained
 intent and frame counts. Mid-newest budget exhaustion without any fresh retained
 result remains failed; history budget yields remain idle.
-History starts a frame only if it leaves at least 34 requests: two widest mosaics
+The first eight loop slots start a frame only if it leaves at least 34 requests: two widest mosaics
 of 5×3 tiles plus metadata and archive HEAD (or the current newest cost, if larger).
-This preserves the interactive reserve even when the next zoom needs more tiles.
+Deep history additionally leaves 60 free requests above that reserve and requires
+20 seconds of continuous viewing, as specified in the acquisition tiers above.
 Supersession queues one notice, but a newer intent's acknowledgement takes priority
 over an older queued notice. Neither failure nor cancellation changes the last
 successfully published crop.
@@ -721,9 +752,10 @@ while `radar_viewed` is in `[0,900)` seconds, and warm files are reused off-tab.
 
 PNG and SVG writes are atomic. Retired generations receive 120 seconds of decode
 grace, then owned namespaces are pruned; unrelated files are untouched. Full
-hour history is acquired only while viewed. At the wider crop, a frame commonly
-needs 12–15 tiles, so cold history spans several rate-limited passes. Scheduled
-checks remain 180s and retries 120s. `WFP_RADAR_DIR` stays below the static root.
+hour history follows the loop and neighbour priorities and the continuous-view
+gate above. At the wider crop, a frame commonly needs 12–15 tiles, so deep history
+spans several paced passes. Scheduled checks remain 180s and failure retries 120s;
+budget/view-residence yields schedule their next eligible opportunity. `WFP_RADAR_DIR` stays below the static root.
 
 Basemap: Natural Earth (public domain). Artifact provenance and reproducible
 build: [tools/RADAR_BASEMAP.md](../../tools/RADAR_BASEMAP.md).

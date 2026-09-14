@@ -85,7 +85,9 @@ def test_zoom_cache_identity_rebuild_and_retirement(make_emitter, hybrid, tmp_pa
         # Complete the viewed history before testing a fully warm pass.
         for _ in range(6):
             hybrid.now -= 60
-            hybrid.mono += 60; emitter._do_radar()
+            hybrid.mono += 60
+            (tmp_path/'radar_viewing').write_text(json.dumps(dict(since=ae.time.time()-20, last=ae.time.time())))
+            emitter._do_radar()
         assert all(f['complete'] for f in emitter._radar_frames)
     else:
         assert sum(f['complete'] for f in new.frames) == 1
@@ -178,6 +180,8 @@ def test_zoom_total_deadline_and_failure_keeps_geometry(make_emitter, hybrid, tm
     monkeypatch.setattr(ae, 'RADAR_REQUESTS_PER_MIN', 1000)
     monkeypatch.setattr(ae, 'RADAR_MAX_FRAME_BUILDS_PER_PASS', 100)
     hybrid.view(); start = hybrid.mono
+    # Isolate the total deadline with a continuously-viewed geometry.
+    monkeypatch.setattr(emitter, '_radar_deep_view_delay', lambda ctx: 0)
     hybrid.failure = lambda *_: setattr(hybrid, 'mono', hybrid.mono + 1)
     emitter._do_radar()
     assert hybrid.mono - start == ae.RADAR_BUILD_DEADLINE_SEC

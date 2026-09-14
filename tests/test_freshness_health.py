@@ -197,3 +197,25 @@ def test_marker_write_failure_does_not_break_polling(serve_at, tmp_path, monkeyp
     assert _get(url + '/wx.json?r=1&view=radar')[0] == 200
     assert (module._polls, module._renders) == (1, 1)
     assert not list(tmp_path.glob('radar_viewed*'))
+
+
+def test_radar_continuous_view_session_resets_off_tab_and_on_gap(serve_at, tmp_path, monkeypatch):
+    module, url = serve_at(_payload())
+    now = [1000.]
+    monkeypatch.setattr(module.time, 'time', lambda: now[0])
+    marker = tmp_path/'radar_viewing'
+    _get(url + '/wx.json?view=radar')
+    assert json.loads(marker.read_text()) == dict(since=1000., last=1000.)
+    for _ in range(10):
+        now[0] += 2
+        _get(url + '/wx.json?view=radar')
+    assert json.loads(marker.read_text()) == dict(since=1000., last=1020.)
+    _get(url + '/wx.json?r=1')
+    assert not marker.exists()
+    assert float((tmp_path/'radar_viewed').read_text()) == 1020.  # old demand hint survives
+    now[0] += 1; _get(url + '/wx.json?view=radar')
+    assert json.loads(marker.read_text())['since'] == 1021.
+    now[0] += module.RADAR_VIEW_POLL_GAP_SEC
+    _get(url + '/wx.json?view=radar')
+    assert json.loads(marker.read_text()) == dict(since=now[0], last=now[0])
+    assert not list(tmp_path.glob('radar_viewing.tmp.*'))

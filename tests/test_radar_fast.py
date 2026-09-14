@@ -22,6 +22,7 @@ def test_geometry_precedes_every_request(make_emitter, hybrid, tmp_path):
     emitter = make_emitter()
     emitter._do_radar()
     previous = emitter._radar_result
+    emitter._radar_tiles.clear()  # neighbours now warm before deep history; exercise a cold request
     intent = dict(seq=42, zoom=7, source='mosaic', center=dict(lat=47.7, lon=-122.2))
     (tmp_path/'radar_intent').write_text(json.dumps(intent))
     seen = []
@@ -29,7 +30,7 @@ def test_geometry_precedes_every_request(make_emitter, hybrid, tmp_path):
         if not seen:
             r = emitter._build_payload()['radar']
             assert r['geometryOnly'] and r['frames'] == [] and r['latest'] is None
-            assert r['intent'] == intent and r['refresh'] == dict(state='newest', frameIndex=0, frameTotal=1, forSeq=42)
+            assert r['intent'] == intent and r['refresh'] == dict(state='newest', frameIndex=0, frameTotal=31, forSeq=42)
             assert r['zoom'] == 7 and r['center'] == intent['center']
             assert r['bounds'] == ae._radar_viewport(47.7, -122.2, 7, 956, 490)[2]
             assert r['marker'] != dict(x=.5,y=.5) and r['rings'] and r['scaleBar']

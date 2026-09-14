@@ -325,7 +325,7 @@ def zoom_site_server(html, site):
         emitter = ae.AlmanacEmitter(SimpleNamespace(app=app, Obs={}, Met={}, Astro={}, Sager={}),
                                      output_path=str(root / 'wx.json'))
         state = SimpleNamespace(source_down=False, clear=slug == 'ocean', calls=[])
-        def request(source, url, deadline, method='GET', metadata=False):
+        def request(source, url, deadline, method='GET', metadata=False, reserve=0):
             state.calls.append(url)
             if source.startswith('iem') and state.source_down:
                 raise OSError('fixture primary outage')
@@ -1541,6 +1541,15 @@ def main():
             page.wait_for_function('n => pollURLs.length > n', arg=count)
             assert '&view=radar' in page.evaluate('pollURLs.at(-1)')
             assert '&r=1' in page.evaluate('pollURLs.at(-1)')
+            # A hidden document cannot keep the deep-history viewing session alive.
+            page.evaluate('Object.defineProperty(document, "hidden", {value:true, configurable:true}); document.dispatchEvent(new Event("visibilitychange"))')
+            count = page.evaluate('pollURLs.length')
+            page.wait_for_function('n => pollURLs.length > n', arg=count)
+            assert '&view=radar' not in page.evaluate('pollURLs.at(-1)')
+            page.evaluate('delete document.hidden; document.dispatchEvent(new Event("visibilitychange"))')
+            count = page.evaluate('pollURLs.length')
+            page.wait_for_function('n => pollURLs.length > n', arg=count)
+            assert '&view=radar' in page.evaluate('pollURLs.at(-1)')
             page.wait_for_function('document.querySelector("#rad-plate").dataset.state === "live"')
             # Progress must remain observable even while decoded pixels are
             # frozen by an outstanding gesture intent. This adds no visual UI.
