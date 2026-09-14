@@ -48,6 +48,12 @@ import pytz
 from lib.radar_geometry import (world_point, world_inverse, plate_point, parse_center,
                                 circle_intersects_bounds, distance_meters)
 from lib.radar_http import RadarSession, is_transport_error
+import logging
+# Pillow's PNG reader logs every chunk at DEBUG ("STREAM b'IDAT' ..."), and Kivy's
+# root logger passes DEBUG through to its file handler: on the Pi that was ~800 SD-card
+# writes per radar pass, serialising the four tile workers on the log lock (measured
+# 1.7 s of a 2.4 s zoom pass). Third-party chatter never belongs in the console log.
+logging.getLogger('PIL').setLevel(logging.INFO)
 
 # ==============================================================================
 # CONFIGURATION
@@ -1020,11 +1026,18 @@ class AlmanacEmitter:
             return record
         except (OSError, ValueError, KeyError, TypeError): return None
 
-    def _radar_preference_stamp(self):
-        stamps = []
+    def _radar_stamp_names(self):
+        """Which marker files carry intent right now (one JSON parse)."""
         record = self._radar_read_intent()
-        names = ('radar_intent',) if record is not None else ('radar_zoom', 'radar_source', 'radar_center', 'radar_intent')
-        for name in names:
+        return ('radar_intent',) if record is not None else ('radar_zoom', 'radar_source', 'radar_center', 'radar_intent')
+
+    def _radar_preference_stamp(self, names=None):
+        # Supersede checkpoints run at every tile boundary. A pass hands them the file
+        # set decided at its start so each checkpoint is one stat per file, not a JSON
+        # parse: on the Pi the parse-per-checkpoint was ~90 SD-card reads, 1.7 s of a
+        # 2.4 s zoom pass. Callers without a pass context still parse (watcher, publish).
+        stamps = []
+        for name in names or self._radar_stamp_names():
             try:
                 stat = os.stat(os.path.join(os.path.dirname(self.output_path), name))
                 stamps.append((stat.st_ino, stat.st_mtime_ns, stat.st_size))
@@ -1046,7 +1059,7 @@ class AlmanacEmitter:
                 self._check_radar()
 
     def _radar_checkpoint(self, ctx):
-        if 'preference_stamp' in ctx and ctx['preference_stamp'] != self._radar_preference_stamp():
+        if 'preference_stamp' in ctx and ctx['preference_stamp'] != self._radar_preference_stamp(ctx.get('stamp_names')):
             raise _RadarSuperseded('radar intent changed')
 
     def _radar_emit_now(self):
@@ -1616,7 +1629,8 @@ class AlmanacEmitter:
 
     def _do_radar(self, geometry_only=False):
         """Primary-first orchestration; radar failures never alter engine health."""
-        stamp = self._radar_preference_stamp()
+        stamp_names = self._radar_stamp_names()
+        stamp = self._radar_preference_stamp(stamp_names)
         if not geometry_only:
             self._radar_restart = False
             self._radar_zoom_stamp = stamp
@@ -1679,7 +1693,7 @@ class AlmanacEmitter:
             # One budget spans both attempts; geometry is source-specific, intent is not.
             ctx = dict(center=center, nexrad=_radar_nexrad(station_lat, station_lon, unit), viewed=viewed,
                 desired=desired, auto_zoom=auto_zoom, builds=0, station=station,
-                preference_stamp=stamp,
+                preference_stamp=stamp, stamp_names=stamp_names,
                 deadline=time.monotonic() + RADAR_BUILD_DEADLINE_SEC)
             if not geometry_only:
                 self._radar_negative = {k: v for k, v in self._radar_negative.items() if v > time.monotonic()}
