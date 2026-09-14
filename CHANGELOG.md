@@ -7,6 +7,12 @@ to shared upstream code that the classic console benefits from too.
 ## 2026-09-13
 
 ### Radar
+- **Zoom +/− responds instantly.** A stepper press now previews the new level on
+  screen at once (the same centre-scale, held-until-the-frame-lands path a pinch
+  uses) and posts the intent within a fraction of a second instead of waiting for
+  the next poll — a burst of presses still coalesces into a single re-composite at
+  the final level. Before, a press showed nothing until the poll and the server
+  round-trip (~5 s), which read as broken.
 - **Touch: pinch to zoom, drag to pan.** On the Pi's touchscreen (and with a mouse
   or trackpad in a browser) a two-finger pinch scales the whole plate live about your
   fingers and, on release, snaps to the nearest zoom level — the same remembered zoom

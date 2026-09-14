@@ -2763,13 +2763,20 @@
     if (step !== 0 && target === current) return;
     if (step === 0 && (radarZoom.desired === "auto" || (radarZoom.desired === null && r.zoomAuto))) return;
     radarZoom.desired = target; radarZoom.sent = false;
-    if (radarGesture.state==='committing') {
-      // Stepper/wheel supersede the same intent a pinch writes.
+    // Real-time feel: every press previews the new level instantly — the same
+    // centre-scale + held-transform path a pinch commits through — and the server
+    // frame at the new zoom replaces it when it lands (settle clears the transform).
+    // Without this a press showed nothing until the ~2 s poll + re-composite.
+    if (radarView.good && radarGesture.state!=='gesturing') {
       var scale=2**((target==='auto' ? r.zoomAutoLevel : target)-r.zoom);
       radarTransform(scale,(1-scale)*$('rad-plate').clientWidth/2,(1-scale)*$('rad-plate').clientHeight/2,true);
       radarGesturePending();
     }
-    radarZoomRender(); // rapid input coalesces into the next ordinary active poll
+    radarZoomRender();
+    // Post soon, not on the next 2 s tick — but debounced so a burst of presses
+    // still coalesces into ONE server re-composite at the final level.
+    clearTimeout(radarZoom.postTimer);
+    radarZoom.postTimer = setTimeout(function () { radarZoom.postTimer = null; poll(); }, 220);
   }
   $("rad-zoom-in").addEventListener("click", function () { radarZoomChange(1); });
   $("rad-zoom-out").addEventListener("click", function () { radarZoomChange(-1); });
