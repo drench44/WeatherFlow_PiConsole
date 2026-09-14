@@ -204,6 +204,7 @@ def test_cache_identity_source_viewport_and_total_outage(make_emitter, hybrid):
 
 
 def test_cold_warm_unviewed_counts_history_limit_and_atomic(make_emitter, hybrid, monkeypatch):
+    monkeypatch.setattr(ae, 'RADAR_REQUESTS_PER_MIN', 90)  # the counts below are budget-relative
     hybrid.view()
     emitter = make_emitter()
     snapshots = []
@@ -237,7 +238,8 @@ def test_cold_warm_unviewed_counts_history_limit_and_atomic(make_emitter, hybrid
     assert not list(Path(ae.RADAR_DIR).rglob('*.tmp.*'))
 
 
-def test_unviewed_counts_and_open_warms_unchanged(make_emitter, hybrid):
+def test_unviewed_counts_and_open_warms_unchanged(make_emitter, hybrid, monkeypatch):
+    monkeypatch.setattr(ae, 'RADAR_REQUESTS_PER_MIN', 90)  # the counts below are budget-relative
     emitter = make_emitter(); emitter._do_radar()
     assert len(hybrid.calls) == 14  # metadata + HEAD + 12 covering tiles
     assert sum(f['complete'] for f in emitter._radar_frames) == 1
@@ -297,8 +299,10 @@ def test_primary_deadline_leaves_time_for_fallback(make_emitter, hybrid):
             hybrid.mono += timeout
             raise TimeoutError('archive stalled')
     hybrid.failure = fail
-    emitter = make_emitter(); emitter._do_radar()
-    assert emitter._radar_result.source_id == 'rainviewer'
+    emitter = make_emitter()
+    # A timeout becomes an outage only after consecutive failed passes.
+    for _ in range(3): emitter._do_radar()
+    assert emitter._radar_result.available and emitter._radar_result.source_id == 'rainviewer'
     # The primary (IEM) attempt is capped so the fallback both runs and has time:
     # it gives up within its own deadline (+ one in-flight request), which stays
     # well under the whole-pass build deadline. Bounds track the constants, not a

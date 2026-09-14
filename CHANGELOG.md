@@ -14,10 +14,19 @@ to shared upstream code that the classic console benefits from too.
 - **Stop paying twice for the same tiles.** A bounded native-tile cache keeps valid
   downloads from superseded passes. Four concurrent tile fetches share persistent
   IPv4/SNI connections across passes; failures and idle sockets are discarded.
-  The 90/minute limiter remains shared, with enough history reserve for the next
-  widest mosaic. Worker publications emit immediately, intent checks run at 100 ms,
-  and the page polls at 400 ms until acknowledged, capped at 20 seconds. The single
-  refresh note keeps its 600 ms suppression and honest restarted/failure copy.
+  The shared limiter keeps its history reserve for the next widest mosaic. Worker
+  publications emit immediately, intent checks run at 100 ms, and the page polls at
+  400 ms until acknowledged with a frame, capped at 20 seconds. The single refresh
+  note keeps its 600 ms suppression and honest restarted/failure copy.
+- **A dropped keep-alive socket is not an outage.** The provider closes idle
+  connections after a few seconds; a reused one that fails before any response
+  byte is retried once on a fresh connection, idle reuse is bounded to four
+  seconds (or the advertised Keep-Alive window), and a transport hiccup on the
+  primary keeps the drawn scan and retries in seconds instead of switching to
+  the global mosaic. The request cap rises from 90 to 240 a minute so an hour of
+  history fills in about a minute and a half rather than five; the tile cache
+  means re-zooms do not spend it again. The attribution in the caption is text,
+  never a link: a kiosk has no way back from another site.
 
 ## 2026-09-13
 

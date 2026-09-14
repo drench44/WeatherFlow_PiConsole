@@ -376,6 +376,7 @@ def test_legend_fidelity_against_published_colortable():
 
 
 def test_cold_start_rate_limit_covers_all_frames(make_emitter, radar_net, monkeypatch, radar_viewed, radar_dir):
+    monkeypatch.setattr(ae, 'RADAR_REQUESTS_PER_MIN', 90)  # frame counts below are budget-relative
     clock = [0.0]
     starts = []
     original_fetch = ae.RadarSession().open

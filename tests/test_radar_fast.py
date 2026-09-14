@@ -130,12 +130,12 @@ def test_pool_supersession_drains_and_reuses_all_completed_tiles(make_emitter, m
 
 def test_pool_rate_gate_is_atomic_and_lru_is_bounded(make_emitter, hybrid, monkeypatch):
     emitter = make_emitter(); emitter._radar_session = http.RadarSession()
-    emitter._radar_request_times = [0.] * 88
+    emitter._radar_request_times = [0.] * (ae.RADAR_REQUESTS_PER_MIN - 2)
     monkeypatch.setattr(ae, 'RADAR_TILE_CACHE_SIZE', 2)
     with ThreadPoolExecutor(max_workers=8) as pool:
         futures = [pool.submit(emitter._radar_request, 'iem-mrms-lcref', f'https://example/mrms::lcref-{i}', 10) for i in range(12)]
     assert sum(f.exception() is None for f in futures) == 2
-    assert len(emitter._radar_request_times) == 90
+    assert len(emitter._radar_request_times) == ae.RADAR_REQUESTS_PER_MIN
     assert all(f.exception() is None or isinstance(f.exception(),ae._RadarBudget) for f in futures)
     emitter._radar_request_times.clear()
     list(emitter._radar_tile_batch('iem-mrms-lcref',100,tile_ctx(8),10,lambda x,y:f'https://example/mrms::lcref-{x}',None))

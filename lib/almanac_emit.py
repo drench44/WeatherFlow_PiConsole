@@ -47,7 +47,7 @@ import pytz
 
 from lib.radar_geometry import (world_point, world_inverse, plate_point, parse_center,
                                 circle_intersects_bounds, distance_meters)
-from lib.radar_http import RadarSession
+from lib.radar_http import RadarSession, is_transport_error
 
 # ==============================================================================
 # CONFIGURATION
@@ -70,7 +70,12 @@ RADAR_IEM_FRAME_INTERVAL_SEC = 120
 RADAR_RAINVIEWER_FRAME_INTERVAL_SEC = 600
 RADAR_IEM_STALE_SEC = 600
 RADAR_RAINVIEWER_STALE_SEC = 1200
-RADAR_REQUESTS_PER_MIN = 90
+# Politeness cap for one console against a public tile cache. 90 made an hour of
+# history at zoom 8 (31 frames x 12 tiles) crawl in at ~5 frames a minute behind the
+# 17-request interaction reserve; 240 fills it in about 1.5 minutes and is still a
+# fraction of what one web-map pan asks of the same cache. The native-tile LRU means
+# re-zooms and pans do not spend it again.
+RADAR_REQUESTS_PER_MIN = 240
 RADAR_HISTORY_RESERVE = 17  # worst-case 5x3 mosaic tiles + metadata and archive probe
 RADAR_MAX_FRAME_BUILDS_PER_PASS = 20
 RADAR_BUILD_DEADLINE_SEC = 150
@@ -813,6 +818,9 @@ class AlmanacEmitter:
         self._radar_geometry_result = None
         self._radar_emit_pending = None
         self._radar_cooldowns = {}
+        self._radar_transport_failures = {}
+        self._radar_transport_retries = 0
+        self._radar_geometry_stamp = None
         self._radar_metadata = {}
         self._radar_zoom_stamp = None
         self._radar_refresh = dict(state='idle', frameIndex=0, frameTotal=0, forSeq=0)
@@ -1021,12 +1029,17 @@ class AlmanacEmitter:
         return tuple(stamps)
 
     def _check_radar_zoom(self, _dt=None):
-        # Prompt input feedback through the SAME single-flight worker and transport
-        # budgets. While busy, keep only the latest file change for the next tick.
+        # Geometry can publish while the single-flight transport worker drains.
+        # Keep only the newest intent for network work; share all request budgets.
         stamp = self._radar_preference_stamp()
-        if self._running and 'radar' not in self._inflight and stamp != self._radar_zoom_stamp:
-            self._radar_zoom_stamp = stamp
-            self._check_radar()
+        if self._running and stamp != self._radar_zoom_stamp:
+            if 'radar' in self._inflight:
+                if stamp != self._radar_geometry_stamp:
+                    # Map feedback is independent of a draining network worker.
+                    self._do_radar(geometry_only=True)
+            else:
+                self._radar_zoom_stamp = stamp
+                self._check_radar()
 
     def _radar_checkpoint(self, ctx):
         if 'preference_stamp' in ctx and ctx['preference_stamp'] != self._radar_preference_stamp():
@@ -1048,7 +1061,13 @@ class AlmanacEmitter:
         ctx['refresh'] = refresh
         # One immutable record keeps the pass intent and its phase inseparable.
         with self._radar_lock:
+            if (self._radar_geometry_result is not None and
+                    self._radar_geometry_stamp == self._radar_preference_stamp() and
+                    ctx.get('preference_stamp', self._radar_geometry_stamp) != self._radar_geometry_stamp):
+                return  # a draining pass cannot replace the newer intent's map
             self._radar_geometry_result = ctx.get('geometry_result')
+            if self._radar_geometry_result is not None:
+                self._radar_geometry_stamp = ctx.get('preference_stamp')
             self._radar_refresh = dict(refresh, intent=ctx['intent'])
         self._radar_emit_now()
 
@@ -1081,11 +1100,7 @@ class AlmanacEmitter:
                                       frameTotal=len(snap.frames), forSeq=intent['seq'], intent=intent)
         self._radar_emit_now()
 
-    def _radar_request(self, source, url, deadline, method='GET', metadata=False):
-        """Validated transport; every attempt uses one monotonic rate/cooldown gate."""
-        import urllib.request
-        import urllib.error
-        from email.utils import parsedate_to_datetime
+    def _radar_request_gate(self, source, deadline):
         with self._radar_lock:
             now = time.monotonic()
             self._radar_request_times = [t for t in self._radar_request_times if now - t < 60]
@@ -1093,6 +1108,21 @@ class AlmanacEmitter:
                     len(self._radar_request_times) >= RADAR_REQUESTS_PER_MIN):
                 raise _RadarBudget('radar request budget/cooldown')
             self._radar_request_times.append(now)
+        return now
+
+    def _radar_transport_retry(self, source, deadline):
+        self._radar_request_gate(source, deadline)
+        with self._radar_lock:
+            self._radar_transport_retries += 1
+            count = self._radar_transport_retries
+        Logger.info(f'almanac_emit: radar {source} stale connection retry; transport_retries={count}')
+
+    def _radar_request(self, source, url, deadline, method='GET', metadata=False):
+        """Validated transport; every attempt uses one monotonic rate/cooldown gate."""
+        import urllib.request
+        import urllib.error
+        from email.utils import parsedate_to_datetime
+        now = self._radar_request_gate(source, deadline)
         headers = {'User-Agent': 'WeatherFlow-PiConsole-almanac'}
         cached = self._radar_metadata.get(url)
         if metadata:
@@ -1321,6 +1351,8 @@ class AlmanacEmitter:
             raise
         except Exception as error:
             self._radar_checkpoint(ctx)
+            if is_transport_error(error):
+                raise  # dropped sockets do not mean this frame is unavailable
             ctx['last_error'] = f'{type(error).__name__}: {error}'
             self._radar_negative[frame['id']] = time.monotonic() + RADAR_NEGATIVE_CACHE_SEC
         return frame
@@ -1504,6 +1536,7 @@ class AlmanacEmitter:
                 partial_coverage=source == 'iem-mrms-lcref' and any(
                     ctx['bounds'][k] < _RADAR_IEM_DOMAIN[k] if k in ('w', 's') else
                     ctx['bounds'][k] > _RADAR_IEM_DOMAIN[k] for k in ('w', 'e', 's', 'n')))
+            self._radar_transport_failures.pop(source, None)
             ctx.pop('geometry_result', None)
             self._radar_publish_refresh(ctx, frameIndex=sum(f['complete'] for f in frames.values()))
             return True
@@ -1577,11 +1610,12 @@ class AlmanacEmitter:
                     if ident not in keep and time.time() - os.path.getmtime(path) >= RADAR_CACHE_GRACE_SEC:
                         os.unlink(path)
 
-    def _do_radar(self):
+    def _do_radar(self, geometry_only=False):
         """Primary-first orchestration; radar failures never alter engine health."""
-        self._radar_restart = False
         stamp = self._radar_preference_stamp()
-        self._radar_zoom_stamp = stamp
+        if not geometry_only:
+            self._radar_restart = False
+            self._radar_zoom_stamp = stamp
         try:
             config = getattr(self.app, 'config', {}) or {}
             lat = _num(_cfg(config, 'Station', 'Latitude'))
@@ -1593,9 +1627,10 @@ class AlmanacEmitter:
             previous = self._radar_result
             station_lat, station_lon = lat, lon
             station = (lat, lon)
-            if getattr(self, '_radar_station', station) != station:
+            if not geometry_only and getattr(self, '_radar_station', station) != station:
                 self._radar_result = _RADAR_NONE  # a changed station must never inherit old pixels
-            self._radar_station = station
+            if not geometry_only:
+                self._radar_station = station
             try:
                 with open(os.path.join(os.path.dirname(self.output_path), 'radar_center')) as preference:
                     raw = preference.read(1024)
@@ -1642,7 +1677,8 @@ class AlmanacEmitter:
                 desired=desired, auto_zoom=auto_zoom, builds=0, station=station,
                 preference_stamp=stamp,
                 deadline=time.monotonic() + RADAR_BUILD_DEADLINE_SEC)
-            self._radar_negative = {k: v for k, v in self._radar_negative.items() if v > time.monotonic()}
+            if not geometry_only:
+                self._radar_negative = {k: v for k, v in self._radar_negative.items() if v > time.monotonic()}
             adapters = [('rainviewer', self._radar_rainviewer_frames)]
             if _radar_iem_eligible(station_lat, station_lon):
                 adapters.insert(0, ('iem-mrms-lcref', self._radar_iem_frames))
@@ -1710,12 +1746,15 @@ class AlmanacEmitter:
                     sources=tuple(ctx['sources']), sites=tuple(dict(s, contributing=False,
                         newestTs=None, reason=None) for s in sites), sites_considered=considered)
                 self._radar_publish_refresh(ctx, state='newest', frameIndex=0, frameTotal=1)
+                if geometry_only:
+                    return
                 provider = _RADAR_SOURCES[source]['provider']
                 if self._radar_session is None or self._radar_provider != provider:
                     if self._radar_session is not None:
                         self._radar_session.close()
                     self._radar_session = RadarSession()
                     self._radar_provider = provider
+                self._radar_session.on_retry = lambda end, source=source: self._radar_transport_retry(source, end)
                 self._radar_session.begin_pass()
                 needed = len(tiles) + 2
                 if self._radar_headroom_delay(source, needed):
@@ -1725,6 +1764,7 @@ class AlmanacEmitter:
                 started = time.monotonic()
                 try:
                     adapter(ctx)
+                    self._radar_transport_failures.pop(source, None)
                     if previous.available and previous.source_id != self._radar_result.source_id:
                         Logger.info(f'almanac_emit: radar source SWITCH {previous.source_id} -> {self._radar_result.source_id}')
                     try:
@@ -1751,9 +1791,24 @@ class AlmanacEmitter:
                     errors.append(str(error))
                     Logger.warning(f'almanac_emit: radar {source} failed: {type(error).__name__}: {error}; '
                                    f'candidates={ctx["candidates"]}; elapsed={time.monotonic()-started:.3f}s')
+                    transport = is_transport_error(error)
+                    if transport:
+                        failures = self._radar_transport_failures.get(source, 0) + 1
+                        self._radar_transport_failures[source] = failures
+                        if source == 'iem-mrms-lcref' and failures < 3:
+                            # Keep the last completed crop even at a new geometry.
+                            # Only repeated failed passes establish a transport outage.
+                            if self._radar_result.available:
+                                self._radar_retained_refresh('failed')
+                            else:
+                                self._radar_publish_refresh(ctx, state='failed')
+                            self._radar_budget_retry(source, needed)
+                            return
+                    else:
+                        self._radar_transport_failures.pop(source, None)
                     if source == 'iem-nexrad-n0b':
                         ctx['sources'][1].update(available=False, reason=ctx.get('site_failure', 'scan unavailable'))
-                    if (source == 'iem-mrms-lcref' and previous.available and previous.source_id == source
+                    if (not transport and source == 'iem-mrms-lcref' and previous.available and previous.source_id == source
                             and previous.center == center and previous.zoom == zoom
                             and 0 <= time.time() - previous.ts_frame < RADAR_IEM_STALE_SEC):
                         self._radar_result = previous
@@ -1762,9 +1817,11 @@ class AlmanacEmitter:
                         return
             raise ValueError('; '.join(errors))
         except _RadarSuperseded:
+            if geometry_only:
+                return
             if 'ctx' in locals():
                 self._radar_publish_refresh(ctx, state='superseded')
-                self._radar_superseded.append(self._radar_refresh)
+                self._radar_superseded.append(dict(ctx['refresh'], intent=ctx['intent']))
             self._radar_restart = True
             # The worker's single-flight guard releases before its immediate wakeup.
             # The 100 ms watcher also sees the unserved preference stamp.

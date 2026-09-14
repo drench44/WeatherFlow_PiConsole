@@ -1,0 +1,340 @@
+"""Real TLS keep-alive regressions, including response-byte and worker fences."""
+from http import client
+import json
+import socket
+import ssl
+import subprocess
+import threading
+import time
+import urllib.request
+from datetime import datetime, timezone
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from types import SimpleNamespace
+
+import pytest
+
+from lib import almanac_emit as ae, radar_http as http
+from tests.test_emitter_lifecycle import FakeClock
+from tests.test_radar_hybrid import hybrid, png  # noqa: F401
+
+
+@pytest.fixture
+def origin(tmp_path, monkeypatch):
+    cert, key = tmp_path/'cert.pem', tmp_path/'key.pem'
+    subprocess.run(['openssl', 'req', '-x509', '-newkey', 'rsa:2048', '-nodes',
+                    '-keyout', str(key), '-out', str(cert), '-days', '1',
+                    '-subj', '/CN=localhost', '-addext', 'subjectAltName=DNS:localhost'],
+                   check=True, capture_output=True)
+    state = SimpleNamespace(connections=0, requests=[], closed=0, idle=2,
+                            close_after=0, alternate=False, fail_fresh=False,
+                            headers={}, second=None, delay=0, active=0, peak=0, body=png())
+    lock = threading.Lock()
+    class Handler(BaseHTTPRequestHandler):
+        protocol_version = 'HTTP/1.1'
+        def setup(self):
+            super().setup()
+            with lock:
+                state.connections += 1
+                self.ident = state.connections
+            self.count = 0
+            self.connection.settimeout(state.idle)
+        def finish(self):
+            try:
+                super().finish()
+            finally:
+                with lock: state.closed += 1
+        def log_message(self, *args): pass
+        def do_HEAD(self): self.do_GET()
+        def do_GET(self):
+            self.count += 1
+            with lock: state.requests.append((self.ident, self.command, self.path))
+            if state.fail_fresh:
+                self.close_connection = True
+                return
+            if state.second is not None and self.count == 2:
+                self.wfile.write(state.second)
+                self.wfile.flush()
+                time.sleep(.2)
+                self.close_connection = True
+                return
+            with lock:
+                state.active += 1
+                state.peak = max(state.peak, state.active)
+            time.sleep(state.delay)
+            with lock: state.active -= 1
+            raw = state.body
+            if self.path == '/metadata':
+                stamp = int(time.time())//120*120
+                raw = json.dumps(dict(meta=dict(product='lcref', units='0.5 dBZ',
+                    end_valid=datetime.fromtimestamp(stamp, timezone.utc).isoformat()))).encode()
+            self.send_response(200)
+            self.send_header('Content-Length', str(len(raw)))
+            for k, v in state.headers.items(): self.send_header(k, v)
+            self.end_headers()
+            if self.command != 'HEAD': self.wfile.write(raw)
+            if state.close_after and self.count >= state.close_after and (not state.alternate or self.ident % 2 == 0):
+                # Deliberately omit Connection: close, as an idle upstream can do.
+                self.close_connection = True
+    server = ThreadingHTTPServer(('127.0.0.1', 0), Handler)
+    context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    context.load_cert_chain(cert, key)
+    server.socket = context.wrap_socket(server.socket, server_side=True)
+    original = http._Connection
+    class LocalConnection(original):
+        def __init__(self, *args):
+            super().__init__(*args)
+            self._context = ssl.create_default_context(cafile=str(cert))
+    monkeypatch.setattr(http, '_Connection', LocalConnection)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    state.url = f'https://localhost:{server.server_port}'
+    try:
+        yield state
+    finally:
+        server.shutdown(); server.server_close(); thread.join(5)
+
+
+def get(session, origin, method='GET', timeout=2):
+    with session.open(urllib.request.Request(origin.url+'/tile', method=method), timeout) as response:
+        return response.read()
+
+
+def until(predicate):
+    end = time.perf_counter()+2
+    while not predicate():
+        assert time.perf_counter() < end
+        time.sleep(.005)
+
+
+@pytest.mark.parametrize('mode', ['idle', 'requests'])
+@pytest.mark.parametrize('method', ['GET', 'HEAD'])
+def test_stale_socket_retried_once(origin, mode, method):
+    origin.idle = .06
+    origin.close_after = 1 if mode == 'requests' else 0
+    session = http.RadarSession()
+    try:
+        get(session, origin, method)
+        until(lambda: origin.closed == 1)
+        get(session, origin, method)
+        assert session.retries == 1 and origin.connections == 2
+        assert len(origin.requests) == 2
+    finally: session.close()
+
+
+def test_fresh_failure_and_failed_retry_propagate(origin):
+    origin.close_after = 1
+    session = http.RadarSession()
+    try:
+        get(session, origin)
+        until(lambda: origin.closed == 1)
+        origin.fail_fresh = True
+        with pytest.raises(client.RemoteDisconnected): get(session, origin)
+        assert session.retries == 1 and origin.connections == 2
+        with pytest.raises(client.RemoteDisconnected): get(session, origin)
+        assert session.retries == 1 and origin.connections == 3
+    finally: session.close()
+
+
+@pytest.mark.parametrize('headers,age,reconnect', [
+    ({}, 3.9, False), ({}, 4.01, True),
+    ({'Keep-Alive': 'max=100, timeout=1'}, .8, True),
+    ({'Keep-Alive': 'timeout=75'}, 4.01, True),
+    ({'Keep-Alive': 'timeout=0'}, 0, True),
+    ({'Connection': 'close'}, 0, True),
+])
+def test_idle_bounds_and_headers(origin, headers, age, reconnect):
+    origin.headers = headers
+    session = http.RadarSession()
+    try:
+        get(session, origin)
+        # Age only the pool's idle timestamp; no global/fake network clock.
+        for conn in session._used: session._used[conn] -= age
+        get(session, origin)
+        assert origin.connections == (2 if reconnect else 1)
+        assert session.retries == 0
+    finally: session.close()
+
+
+@pytest.mark.parametrize('partial', [b'garbage\r\n', b'H', b'HTTP/1.1 200 OK\r\nX: '])
+def test_response_bytes_never_replayed(origin, partial):
+    session = http.RadarSession()
+    try:
+        get(session, origin)
+        origin.second = partial
+        with pytest.raises((client.BadStatusLine, socket.timeout)):
+            get(session, origin, timeout=.1)
+        assert session.retries == 0 and origin.connections == 1
+    finally: session.close()
+
+
+def test_zero_byte_timeout_uses_original_deadline(origin):
+    session = http.RadarSession()
+    try:
+        get(session, origin)
+        origin.second = b''
+        start = time.perf_counter()
+        with pytest.raises(socket.timeout): get(session, origin, timeout=.08)
+        # No remaining time to retry; never grant a second full timeout.
+        assert time.perf_counter()-start < .18
+        assert session.retries == 0 and origin.connections == 1
+    finally: session.close()
+
+
+@pytest.mark.parametrize('error', [client.RemoteDisconnected(), client.BadStatusLine(''),
+    ConnectionResetError(), BrokenPipeError(), ssl.SSLEOFError(), ssl.SSLZeroReturnError(), socket.timeout()])
+def test_zero_byte_failures_retry_but_post_does_not(origin, monkeypatch, error):
+    session = http.RadarSession()
+    try:
+        get(session, origin)
+        conn = next(iter(session._used))
+        def fail(*args, **kwargs): raise error
+        monkeypatch.setattr(conn, 'getresponse', fail)
+        get(session, origin)
+        assert session.retries == 1
+        conn = next(iter(session._used))
+        monkeypatch.setattr(conn, 'request', fail)
+        with pytest.raises(type(error)): get(session, origin, method='POST')
+        assert session.retries == 1
+    finally: session.close()
+
+
+def test_four_workers_complete_frame_with_closing_connections(make_emitter, origin, tmp_path, monkeypatch):
+    origin.close_after = 1
+    origin.alternate = True
+    origin.delay = .02
+    monkeypatch.setattr(ae, 'RADAR_DIR', str(tmp_path/'radar'))
+    monkeypatch.setattr(ae, 'RADAR_IEM_METADATA_URL', origin.url+'/metadata')
+    monkeypatch.setattr(ae, 'RADAR_IEM_ARCHIVE_TEMPLATE', origin.url+'/archive/%Y%m%d%H%M')
+    monkeypatch.setattr(ae, 'RADAR_IEM_TILE_TEMPLATE', origin.url+'/tile/{stamp}/{z}/{x}/{y}')
+    warnings, infos = [], []
+    monkeypatch.setattr(ae.Logger, 'warning', warnings.append)
+    monkeypatch.setattr(ae.Logger, 'info', infos.append)
+    emitter = make_emitter()
+    try:
+        emitter._do_radar()
+        assert emitter._radar_result.available
+        assert emitter._radar_result.source_id == 'iem-mrms-lcref'
+        assert sum(f['complete'] for f in emitter._radar_result.frames) == 1
+        session = emitter._radar_session
+        assert origin.peak == 4
+        assert len(session.connections[('localhost', int(origin.url.rsplit(':',1)[1]))]) <= 4
+        assert emitter._radar_transport_retries == session.retries > 0
+        assert len(emitter._radar_request_times) == len(origin.requests) + session.retries
+        assert not warnings and not any('SWITCH' in line for line in infos)
+    finally:
+        if emitter._radar_session: emitter._radar_session.close()
+
+
+@pytest.mark.parametrize('phase', ['metadata', 'tile'])
+def test_primary_transport_failure_retains_new_geometry_then_recovers(make_emitter, hybrid, tmp_path, monkeypatch, phase):
+    emitter = make_emitter(); emitter._do_radar()
+    previous = emitter._radar_result
+    clock = FakeClock(); monkeypatch.setattr(ae, 'Clock', clock); emitter._running = True
+    (tmp_path/'radar_intent').write_text(json.dumps(dict(seq=1, zoom=7, source='mosaic', center='station')))
+    def fail(req, timeout):
+        if (phase == 'metadata' and req.full_url == ae.RADAR_IEM_METADATA_URL or
+                phase == 'tile' and 'mrms::' in req.full_url):
+            raise client.RemoteDisconnected('stale socket')
+    hybrid.failure = fail
+    hybrid.calls.clear()
+    emitter._do_radar()
+    assert emitter._radar_result is previous
+    assert emitter._radar_refresh['state'] == 'failed'
+    assert emitter._retries['radar'].timeout == 2
+    assert not emitter._radar_negative and all(c[0] == 'iem' for c in hybrid.calls)
+    hybrid.failure = None
+    emitter._do_radar()
+    assert emitter._radar_result.zoom == 7 and emitter._radar_result.source_id == 'iem-mrms-lcref'
+    assert not emitter._radar_transport_failures
+    emitter.stop()
+
+
+def test_repeated_transport_outage_falls_back_and_recovers(make_emitter, hybrid):
+    emitter = make_emitter(); emitter._do_radar()
+    previous = emitter._radar_result
+    def fail(req, timeout):
+        if 'iastate.edu' in req.full_url: raise ConnectionResetError('outage')
+    hybrid.failure = fail
+    for _ in range(2):
+        emitter._do_radar()
+        assert emitter._radar_result is previous
+    emitter._do_radar()
+    assert emitter._radar_result.source_id == 'rainviewer'
+    hybrid.failure = None
+    emitter._do_radar()
+    assert emitter._radar_result.source_id == 'iem-mrms-lcref'
+
+
+@pytest.mark.parametrize('busy', [False, True])
+def test_geometry_after_failed_pass_does_not_wait_for_retry_or_worker(make_emitter, hybrid, tmp_path, monkeypatch, busy):
+    emitter = make_emitter(); emitter._do_radar()
+    clock = FakeClock(); monkeypatch.setattr(ae, 'Clock', clock); emitter._running = True
+    hybrid.failure = lambda *args: (_ for _ in ()).throw(ConnectionResetError())
+    emitter._do_radar()
+    assert emitter._retries['radar'].timeout == 2
+    emitter._radar_cooldowns['iem-mrms-lcref'] = 60
+    if busy: emitter._inflight.add('radar')
+    else: monkeypatch.setattr(emitter, '_check_radar', emitter._do_radar)
+    intent = dict(seq=2, zoom=6, source='mosaic', center='station')
+    (tmp_path/'radar_intent').write_text(json.dumps(intent))
+    hybrid.calls.clear()
+    start = time.perf_counter()
+    emitter._check_radar_zoom()
+    clock.advance(0)  # inspect the actual wx.json publication
+    result = json.loads((tmp_path/'wx.json').read_text())['radar']
+    elapsed = (time.perf_counter()-start)*1000
+    print(f'geometry after failure: {elapsed:.1f} ms; busy={busy}')
+    assert elapsed < 100
+    assert result['intent'] == intent and result['geometryOnly'] and result['zoom'] == 6
+    assert not hybrid.calls
+    emitter._inflight.clear(); emitter.stop()
+
+
+def test_new_map_survives_old_worker_drain(make_emitter, hybrid, tmp_path, monkeypatch):
+    emitter = make_emitter(); emitter._do_radar()
+    clock = FakeClock(); monkeypatch.setattr(ae, 'Clock', clock); emitter._running = True
+    hybrid.failure = lambda *args: (_ for _ in ()).throw(ConnectionResetError())
+    emitter._do_radar()
+    entered, release = threading.Event(), threading.Event()
+    def stalled(*args):
+        entered.set()
+        assert release.wait(5)
+        raise ConnectionResetError('old pass')
+    hybrid.failure = stalled
+    emitter._check_radar()
+    try:
+        assert entered.wait(5)
+        intent = dict(seq=3, zoom=7, source='mosaic', center='station')
+        (tmp_path/'radar_intent').write_text(json.dumps(intent))
+        start = time.perf_counter()
+        emitter._check_radar_zoom(); clock.advance(0)
+        r = json.loads((tmp_path/'wx.json').read_text())['radar']
+        elapsed = (time.perf_counter()-start)*1000
+        print(f'geometry while real failed worker drains: {elapsed:.1f} ms')
+        assert elapsed < 100
+        assert r['geometryOnly'] and r['intent'] == intent
+        assert 'radar' in emitter._inflight
+    finally:
+        release.set()
+        until(lambda: 'radar' not in emitter._inflight)
+    assert emitter._radar_superseded[-1]['state'] == 'superseded'
+    assert emitter._build_payload()['radar']['intent'] == intent
+    emitter.stop()
+
+
+def test_retry_obeys_shared_request_gate(make_emitter, origin):
+    origin.close_after = 1
+    emitter = make_emitter()
+    source = 'iem-mrms-lcref'
+    session = http.RadarSession(on_retry=lambda end: emitter._radar_transport_retry(source, end))
+    emitter._radar_session = session
+    try:
+        get(session, origin)
+        until(lambda: origin.closed == 1)
+        emitter._radar_request_times = [time.monotonic()] * (ae.RADAR_REQUESTS_PER_MIN-1)
+        with pytest.raises(ae._RadarBudget):
+            emitter._radar_request(source, origin.url+'/tile', time.monotonic()+2)
+        assert len(emitter._radar_request_times) == ae.RADAR_REQUESTS_PER_MIN
+        assert session.retries == emitter._radar_transport_retries == 0
+        assert origin.connections == 1
+    finally: session.close()
