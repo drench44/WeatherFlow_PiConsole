@@ -119,89 +119,40 @@ def test_k6_site_zoom_floor(make_emitter, hybrid, tmp_path):
     assert all(b.get('kind') != 'clear-air' for b in r['legend']['bands'])
 
 
-@pytest.mark.skipif(os.environ.get('RADAR_NET_TEST') != '1', reason='opt in with RADAR_NET_TEST=1')
-@pytest.mark.parametrize('name,lat,lon,mode', [('aberdeen',46.98,-123.82,'site'), ('seattle',47.61,-122.33,'mosaic')])
-def test_live_v32_crop(make_emitter, tmp_path, monkeypatch, name, lat, lon, mode):
-    """Live clipped native returns, independent layer rebuild, and saved evidence."""
-    import io
-    import json
-    import os
-    from datetime import datetime, timezone
+
+
+@pytest.mark.skipif(os.environ.get('RADAR_NET_TEST')!='1',reason='opt in with RADAR_NET_TEST=1')
+@pytest.mark.parametrize('place,lat,lon,mode',[('Seattle',47.61,-122.33,'mosaic'),('Aberdeen',46.975,-123.815,'site')])
+def test_live_tile_set_matches_provider_bytes(make_emitter,tmp_path,place,lat,lon,mode):
+    """Real source PNGs remap byte-for-byte to independently stored XYZ tiles."""
+    import io,json,time
     from pathlib import Path
     from tests.fixtures.config import make_config
-
-    root = Path(os.environ.get('RADAR_V32_ARTIFACTS', str(tmp_path/'evidence')))/name
-    root.mkdir(parents=True, exist_ok=True)
-    monkeypatch.setattr(ae, 'RADAR_DIR', str(tmp_path/'radar'))
-    monkeypatch.setattr(ae.Logger, 'warning', print)
-    (tmp_path/'radar_source').write_text(mode); (tmp_path/'radar_zoom').write_text('7')
-    emitter = make_emitter(config=make_config(Station={'Latitude':str(lat),'Longitude':str(lon)}))
-    raw_tiles = {}; tile_order = {}; original = emitter._radar_request
-    def request(source, url, *args, **kwargs):
-        raw = original(source, url, *args, **kwargs)
-        if '.png' in url: raw_tiles[url] = raw
-        return raw
-    monkeypatch.setattr(emitter, '_radar_request', request)
-    original_batch = emitter._radar_tile_batch
-    def batch(source, stamp, ctx, deadline, url, site=None):
-        # Integer paste registration can overlap one boundary row. Preserve
-        # actual tile arrival order when reconstructing those shared pixels.
-        order = tile_order.setdefault((source, site, stamp), [])
-        for item in original_batch(source, stamp, ctx, deadline, url, site):
-            order.append(item[0])
-            yield item
-    monkeypatch.setattr(emitter, '_radar_tile_batch', batch)
-    emitter._do_radar(); payload = emitter._build_payload(); r = payload['radar']
-    assert r['available'] and r['sourceMode'] == mode and r['zoom'] == 7
-    assert r['sourceId'] == ('iem-nexrad-n0b' if mode == 'site' else 'iem-mrms-lcref')
-    assert r['legend']['floorDbz'] == (5 if mode == 'site' else 10)
-    frame = next(f for f in r['frames'] if f['id'] == r['latest'])
-    source = r['sourceId']; native_clear_pixels = 0; mapped_clear_pixels = 0
-    # Rebuild the actual newest crop from captured provider bytes in paste order.
-    expected = Image.new('RGBA', (956,490))
-    pairs = frame['siteScans'] if mode == 'site' else [dict(id=None,ts=frame['ts'])]
-    for pair in pairs:
-        stamp = datetime.fromtimestamp(pair['ts'],timezone.utc).strftime('%Y%m%d%H%M')
-        layer = Image.new('RGBA',expected.size)
-        for tx,ty,x,y in tile_order[source, pair['id'], pair['ts']]:
-            if mode == 'site':
-                url = ae.RADAR_SITE_TILE_TEMPLATE.format(site=pair['id'][1:],stamp=stamp,z=7,x=tx,y=ty)
-            else:
-                matches = [u for u in raw_tiles if f'/7/{tx}/{ty}.png' in u]
-                assert len(matches) == 1, matches
-                url = matches[0]
-            raw = raw_tiles[url]
-            (root/f'native-{pair["id"] or "mrms"}-{tx}-{ty}.png').write_bytes(raw)
-            with Image.open(io.BytesIO(raw)) as tile:
-                crop=(max(0,-x),max(0,-y),min(256,956-x),min(256,490-y))
-                clipped=tile.crop(crop)
-                # Native intensity independently establishes the 5–10 dBZ input.
-                if clipped.mode == 'P':
-                    native_clear_pixels += sum(n for n,i in clipped.getcolors(65536)
-                        if rp.INDEX_DBZ[source][i] is not None and 5 <= rp.INDEX_DBZ[source][i] < 10)
-                else:
-                    native_clear_pixels += sum(n for n,c in clipped.convert('RGBA').getcolors(65536)
-                        if (rp.native_dbz(source,c) is not None and 5 <= rp.native_dbz(source,c) < 10))
-                mapped=rp.remap(clipped,source,rp.source_palette(source))
-                mapped_clear_pixels += sum(n for n,c in mapped.getcolors(65536) if c==(127,130,149,180))
-                layer.paste(mapped,(x+crop[0],y+crop[1]))
-        expected.alpha_composite(layer)
-        layer.save(root/f'layer-{pair["id"] or "mrms"}.png')
-    with Image.open(Path(ae.RADAR_DIR)/(r['latest']+'.png')) as actual:
-        assert actual.tobytes() == expected.tobytes()
-        colors = actual.convert('RGBA').getcolors(956*490)
-        exact = sum(n for n,c in colors if c==(127,130,149,180))
-        clear_rgb = sum(n for n,c in colors if c[3] and c[:3]==(127,130,149))
-        actual.save(root/'crop.png')
-    evidence = dict(sourceId=source,zoom=7,center=r['center'],floorDbz=r['legend']['floorDbz'],
-                    observedAt=r['observedAt'],observedTs=r['observedTs'],native5to10Pixels=native_clear_pixels,
-                    layerClearAir180Pixels=mapped_clear_pixels,cropClearAir180Pixels=exact,cropClearAirRgbPixels=clear_rgb,
-                    requests=len(emitter._radar_request_times),sites=r.get('sites'),reconstruction='byte-identical')
-    (root/'evidence.json').write_text(json.dumps(evidence,indent=2))
-    (root/'payload.json').write_text(json.dumps(payload,indent=2))
-    print('V3.2 LIVE',name,json.dumps(evidence),flush=True)
-    if mode == 'site':
-        assert native_clear_pixels > 0 and mapped_clear_pixels > 0 and exact > 0
-    else:
-        assert mapped_clear_pixels == exact == clear_rgb == 0
-    emitter.stop()
+    config=make_config();config['Station']['Latitude']=str(lat);config['Station']['Longitude']=str(lon)
+    (tmp_path/'radar_source').write_text(mode)
+    emitter=make_emitter(config=config)
+    started=time.perf_counter();emitter._do_radar()
+    expected_source='iem-nexrad-n0b' if mode=='site' else 'iem-mrms-lcref'
+    assert emitter._radar_result.source_id==expected_source and emitter._radar_result.ts_frame,emitter._build_payload()['radar']
+    count=visible=0;sites=set();max_error=0
+    try:
+        for key,native in emitter._radar_tiles.items():
+            source,site,_,stamp,z,x,y=key
+            if source!=expected_source:continue
+            path=ae._radar_tile_path(source,site,stamp,z,x,y)
+            if not path.exists():continue
+            with Image.open(io.BytesIO(native)) as im:
+                with rp.remap(im,source,rp.source_palette(source)) as mapped:
+                    with Image.open(path) as cached:
+                        assert cached.size==(256,256)
+                        assert cached.convert('RGBA').tobytes()==mapped.tobytes(),str(path)
+                        meta=json.loads(cached.info['radarRemap'])
+                        assert set(meta)=={'remapped','unmatchedColors','opaqueColors','unmatchedPixels','opaquePixels','ambiguousPixels','revision'}
+                        assert meta['revision']==ae.REMAP_REVISION
+                        visible+=sum(p[3]>0 for p in cached.convert('RGBA').getdata())
+                        max_error=max(max_error,meta['unmatchedPixels']/max(1,meta['opaquePixels']))
+            count+=1;sites.add(site or '-')
+        assert count>=4,count
+        print('LIVE TILE SET',json.dumps(dict(place=place,source=expected_source,tiles=count,sites=sorted(sites),visiblePixels=visible,maxUnmatchedFraction=max_error,stamp=emitter._radar_result.ts_frame,seconds=round(time.perf_counter()-started,3),byteIdentical=True)),flush=True)
+    finally:
+        if emitter._radar_session:emitter._radar_session.close()

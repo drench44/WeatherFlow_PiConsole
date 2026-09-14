@@ -7,6 +7,26 @@ to shared upstream code that the classic console benefits from too.
 ## 2026-09-14
 
 ### Radar
+- **Radar v4.1 raster basemaps.** Paper and night now use opaque, versioned
+  Natural Earth PNG-8 tiles with 4× antialiased strokes. The vector cell service
+  and backing canvas are removed. Missing geography remains visible as a true
+  latitude-adaptive graticule; local maps survive a cold provider outage.
+- **Bounded graphics and immutable identities.** One 40 MiB admission budget
+  covers both tile LRUs, history, canvases and decode reservations. Geography
+  has a separate 32 MB/6,000-file disk cap with pinned home tiles. Radar tiles
+  include the remap/ramp/basemap revision; the site table is independently
+  versioned. Pruning removes empty directories and tile logs no longer grow.
+- **Review fixes.** Dateline placement uses unwrapped rectangles; site range and
+  acquisition completeness are separate. Historical echoes are composited once.
+  AS OF and age both name the newest primary scan. Durable zoom/source caps,
+  pointer cancellation, stationary release, abandoned source transitions,
+  primary-site timestamp changes, viewport retries and first-view warming now
+  preserve their state invariants. Partial histories no longer count as complete.
+- **Verification.** Both-theme loopback checks include real captured input,
+  cold acquisition, source recovery, fetch/decode instrumentation and independent
+  graphics accounting. `tools/benchmark_radar_kiosk.py` prints live-page CDP
+  pan/pinch frame times, draw counts, cached first paint and memory as JSON.
+  Panel measurements remain the performance acceptance authority.
 - **Tab-to-loop uses the warm hour immediately.** Entering Radar posts its view
   marker immediately and polls at 100ms until history arrives (20-second cap).
   The intent watcher schedules one view-start pass; an unchanged warm cache

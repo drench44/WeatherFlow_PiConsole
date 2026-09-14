@@ -45,7 +45,7 @@ from threading import RLock as _RLock   # kept apart from `threading`, which tes
 import time
 import pytz
 
-from lib.radar_geometry import (world_point, world_inverse, plate_point, parse_center,
+from lib.radar_geometry import (world_point, world_inverse, parse_center,
                                 circle_intersects_bounds, distance_meters)
 from lib.radar_http import RadarSession, is_transport_error
 import logging
@@ -621,7 +621,7 @@ def _radar_zoom_for(lat):
 
 
 def _radar_viewport(lat, lon, zoom, size, height=None):
-    """Pure Web Mercator crop geometry; offsets refer to unwrapped world pixels."""
+    """Pure Web Mercator viewport geometry; offsets refer to unwrapped world pixels."""
     lat = max(-85.05112878, min(85.05112878, lat))
     n = 2 ** zoom
     world = n * 256
@@ -705,38 +705,68 @@ def _radar_site_tiles(ctx, site):
     return [tile for tile in ctx['tiles'] if intersects(tile)]
 
 
-def _radar_cached_frame(frame, path):
+@lru_cache(maxsize=1)
+def _radar_native_table_revision():
+    from lib.radar_palette import _FILES
+    return hashlib.sha256(b''.join((Path(__file__).parent/'data'/name).read_bytes()
+                                  for name in sorted(_FILES.values()))).hexdigest()
+
+
+@lru_cache(maxsize=8)
+def _radar_revision_digest(remap_revision,basemap_revision,native_revision):
+    # Render constants are code, fixed for a process. Compute their identity once
+    # per revision, rather than serializing three palettes for every inventory stat.
+    pixels=repr([(source,source_palette(source)) for source in sorted(_RADAR_SOURCES)])
+    return hashlib.sha256(('tile-wire-visible-v41-1'+remap_revision+repr(_RADAR_RAMP)+
+                          repr(_RADAR_SITE_RAMP)+pixels+native_revision+basemap_revision).encode()).hexdigest()[:12]
+
+
+def _radar_render_revision():
+    from lib.radar_basemap import version
+    return _radar_revision_digest(REMAP_REVISION,version(),_radar_native_table_revision())
+
+
+def _radar_sites_revision():
+    return hashlib.sha256(json.dumps(_NEXRAD_SITES,sort_keys=True).encode()).hexdigest()[:12]
+
+
+def _radar_tile_path(source, site, stamp, zoom, x, y):
+    if isinstance(stamp, (int, float)):
+        stamp = datetime.fromtimestamp(stamp, timezone.utc).strftime('%Y%m%d%H%M')
+    return Path(RADAR_DIR) / 't' / _radar_render_revision() / source / (site or '-') / stamp / str(zoom) / str(x % 2**zoom) / f'{y}.png'
+
+
+def _radar_tile_metadata(path, source):
     from PIL import Image
-    try:
-        with Image.open(path) as image:
-            if image.format != 'PNG' or image.size != (RADAR_VIEWPORT_W, RADAR_VIEWPORT_H):
-                raise ValueError('invalid cached radar dimensions/format')
-            image.load()
-            metadata = json.loads(image.info['radarRemap'])
-            pixels = image.convert('RGBA').getcolors(RADAR_VIEWPORT_W*RADAR_VIEWPORT_H)
-            allowed = {c[:3] for _,c in _RADAR_LUT}
-            # Alpha blending can introduce colours between LUT samples in a
-            # multisite crop; single-source crops must remain exact LUT RGB.
-            if '/iem-nexrad-n0b/' not in frame['id'] and any(c[3] and c[:3] not in allowed for n,c in pixels):
-                raise ValueError('invalid cached radar pixels')
-            visible = sum(n for n,c in pixels if c[3])
-            for key in ('unmatchedColors','opaqueColors','unmatchedPixels','opaquePixels','ambiguousPixels'):
-                if type(metadata[key]) is not int or metadata[key] < 0:
-                    raise ValueError('invalid cached radar counts')
-            if (metadata.get('revision') != REMAP_REVISION or type(metadata['remapped']) is not bool
-                    or metadata['unmatchedColors'] > metadata['opaqueColors']
-                    or metadata['unmatchedPixels'] > metadata['opaquePixels']
-                    or visible > metadata['opaquePixels']-metadata['unmatchedPixels']
-                    or metadata['opaquePixels'] > RADAR_VIEWPORT_W*RADAR_VIEWPORT_H*RADAR_SITE_MAX_COUNT
-                    or metadata['ambiguousPixels'] > metadata['opaquePixels']
-                    or metadata['remapped'] != (metadata['unmatchedPixels'] <= .02*metadata['opaquePixels'] and not metadata['ambiguousPixels'])):
-                raise ValueError('inconsistent cached radar metadata')
-        return dict(frame, complete=True, url='radar/' + frame['id'] + '.png',
-                    legend=dict(remapped=metadata['remapped']), **metadata)
-    except (OSError, ValueError, KeyError, TypeError):
-        try: os.unlink(path)
-        except OSError: pass
-        return frame
+    with Image.open(path) as image:
+        if image.format != 'PNG' or image.size != (256,256):
+            raise ValueError('invalid cached tile')
+        image.load()
+        meta=json.loads(image.info['radarRemap'])
+        if meta['revision'] != REMAP_REVISION or type(meta['remapped']) is not bool:
+            raise ValueError('cached tile revision')
+        for key in ('unmatchedColors','opaqueColors','unmatchedPixels','opaquePixels','ambiguousPixels'):
+            if type(meta[key]) is not int or meta[key]<0: raise ValueError('cached tile counts')
+        if (meta['opaquePixels']>65536 or meta['unmatchedColors']>meta['opaqueColors'] or
+                meta['unmatchedPixels']>meta['opaquePixels'] or meta['ambiguousPixels']>meta['opaquePixels'] or
+                meta['remapped'] != (meta['unmatchedPixels']<=.02*meta['opaquePixels'] and not meta['ambiguousPixels'])):
+            raise ValueError('cached tile honesty')
+        allowed={color[:3] for _,color in source_palette(source)}
+        with image.convert('RGBA') as rgba:
+            colors=rgba.getcolors(65536)
+            if any(color[3] and color[:3] not in allowed for _,color in colors): raise ValueError('cached tile palette')
+            visible=sum(n for n,color in colors if color[3])
+            if int(image.info['radarVisiblePixels'])!=visible:raise ValueError('cached tile visibility count')
+            if visible>meta['opaquePixels']-meta['unmatchedPixels']:
+                raise ValueError('cached tile visibility')
+        return meta
+
+
+def _radar_grid(ctx, zoom=None, margin=0):
+    zoom = ctx['zoom'] if zoom is None else zoom
+    tiles, _, _, _ = _radar_viewport(ctx['center']['lat'], ctx['center']['lon'], zoom,
+                                   RADAR_VIEWPORT_W + margin*512, RADAR_VIEWPORT_H + margin*512)
+    return tiles
 
 
 def _radar_site_pairs(ctx, ts):
@@ -751,14 +781,54 @@ def _radar_site_pairs(ctx, ts):
 
 
 def _radar_frame(source, ts, ctx, pairs=None):
-    identity = ctx['identity'] + '/' + REMAP_REVISION
-    if pairs is not None:
-        identity += '/' + hashlib.sha256(repr(tuple(pairs)).encode()).hexdigest()[:20]
-    ident = _RADAR_SOURCES[source]['legend']['id'] + '/' + source + '/' + identity + '/' + str(ts)
-    frame = dict(id=ident, ts=ts, complete=False)
-    if pairs is not None:
-        frame['siteScans'] = [dict(id=site, ts=stamp) for site, stamp in pairs]
-    return frame
+    return dict(ts=ts, stamp=datetime.fromtimestamp(ts, timezone.utc).strftime('%Y%m%d%H%M'),
+                complete=False, levels={}, siteScans=[dict(id=site, ts=scan) for site,scan in pairs or ()])
+
+
+def _radar_tile_manifest(source, frames, ctx):
+    """Exact disk availability; frame booleans use the viewport at each level.
+
+    The newest mask is the union of available site tiles. Site scans retain their
+    own stamps and are fetched/drawn in farthest-to-nearest order on the page.
+    """
+    levels = [z for z in (ctx['zoom']-1,ctx['zoom'],ctx['zoom']+1)
+              if RADAR_MIN_ZOOM <= z <= _RADAR_SOURCES[source]['max_zoom']]
+    px,py=world_point(ctx['center']['lat'],ctx['center']['lon'],ctx['zoom'])
+    x0,y0=math.floor((px-RADAR_VIEWPORT_W/2)/256),max(0,math.floor((py-RADAR_VIEWPORT_H/2)/256))
+    grid=dict(x0=x0,y0=y0,w=math.ceil((px+RADAR_VIEWPORT_W/2)/256)-x0,
+              h=min(2**ctx['zoom'],math.ceil((py+RADAR_VIEWPORT_H/2)/256))-y0)
+    def inventory(frame,z,tiles):
+        pairs=[(p['id'],p['ts']) for p in frame.get('siteScans',())] or [(None,frame['ts'])]
+        availability=expected=complete=0
+        for i,(x,y) in enumerate(tiles):
+            required=[]
+            for site,stamp in pairs:
+                if site:
+                    lat,lon,_=_NEXRAD_SITES[site]
+                    n,w=world_inverse(x*256,y*256,z);south,e=world_inverse((x+1)*256,(y+1)*256,z)
+                    if not circle_intersects_bounds(lat,lon,RADAR_SITE_RANGE_METERS,dict(n=n,s=south,w=w,e=e)):continue
+                required.append(_radar_tile_path(source,site,stamp,z,x,y).is_file())
+            if required:expected|=1<<i
+            if any(required):availability|=1<<i
+            if required and all(required):complete|=1<<i
+        return availability,expected,complete
+    result=[]
+    for frame in frames:
+        present={}
+        for z in levels:
+            factor=2**(z-ctx['zoom'])
+            tiles=[(x,y) for y in range(math.floor(grid['y0']*factor),math.ceil((grid['y0']+grid['h'])*factor))
+                   for x in range(math.floor(grid['x0']*factor),math.ceil((grid['x0']+grid['w'])*factor))]
+            _,expected,complete=inventory(frame,z,tiles)
+            present[str(z)]=bool(expected) and complete==expected
+        result.append(dict(frame,levels=present))
+    grid_tiles=[(x,y) for y in range(y0,y0+grid['h']) for x in range(x0,x0+grid['w'])]
+    mask,expected,complete=inventory(result[-1],ctx['zoom'],grid_tiles) if result else (0,0,0)
+    width=math.ceil(grid['w']*grid['h']/4)
+    return dict(base='radar/t/',revision=_radar_render_revision(),remapRevision=REMAP_REVISION,
+                source=source,site=ctx.get('site_id') or '-',z=ctx['zoom'],levels=levels,grid=grid,
+                newest=dict(stamp=result[-1]['stamp'] if result else None,mask=f'{mask:0{width}x}',
+                            expectedMask=f'{expected:0{width}x}',completeMask=f'{complete:0{width}x}'),frames=result)
 
 
 # ==============================================================================
@@ -771,14 +841,14 @@ def _radar_frame(source, ts, ctx, pairs=None):
 # result locally and publishes it with a single attribute assignment, and the
 # tick reads that one reference once.
 _RadarResult = namedtuple('_RadarResult',
-    'available reason frames latest ts_frame center zoom mpp bounds scalebar rings nexrad ts_fetch '
+    'available reason frames ts_frame center zoom mpp bounds scalebar rings nexrad ts_fetch '
     'source_id provider attribution attribution_url cadence stale_sec legend partial_coverage '
-    'max_zoom zoom_desired zoom_auto_level basemap source_mode site_id sources scanning_slowly marker centered sites sites_considered source_pref source_fallback intent',
+    'max_zoom zoom_desired zoom_auto_level geo source_mode site_id sources scanning_slowly sites sites_considered source_pref source_fallback tiles units',
     defaults=('rainviewer', 'rainviewer', 'RainViewer', 'https://www.rainviewer.com/',
               RADAR_RAINVIEWER_FRAME_INTERVAL_SEC, RADAR_RAINVIEWER_STALE_SEC, _RADAR_RAMP, False,
-              7, None, 7, None, 'mosaic', None, (), False, None, True, (), 0, 'mosaic', None, None))
+              7, None, 7, None, 'mosaic', None, (), False, (), 0, 'mosaic', None, None, 'mi'))
 _RADAR_NONE = _RadarResult(False, 'no data yet', (), None, None, None, None, None,
-                           None, None, None, None, None)
+                           None, None, None, None)
 
 _AqiResult = namedtuple('_AqiResult',
                         'aqi category pm25 ts forecast peak peak_time fc_cat trend trend_text')
@@ -832,6 +902,8 @@ class AlmanacEmitter:
         self._radar_newest = {}  # (source, site) -> (validated monotonic, knowledge)
         self._radar_archive_positive = set()  # immutable successful archive URLs
         self._radar_tiles = OrderedDict()
+        self._radar_disk_files = 0
+        self._radar_disk_bytes = 0
         self._radar_prefetched = {}  # (source, zoom, centre) -> attempted scan set
         self._radar_was_viewed = False
         self._radar_view_pending = False
@@ -841,16 +913,13 @@ class AlmanacEmitter:
         self._radar_lock = _RLock()
         self._radar_session = None
         self._radar_provider = None
-        self._radar_geometry_result = None
         self._radar_emit_pending = None
         self._radar_cooldowns = {}
         self._radar_transport_failures = {}
         self._radar_transport_retries = 0
-        self._radar_geometry_stamp = None
         self._radar_metadata = {}
         self._radar_zoom_stamp = None
-        self._radar_refresh = dict(state='idle', frameIndex=0, frameTotal=0, forSeq=0)
-        self._radar_superseded = deque(maxlen=1)
+        self._radar_refresh = dict(state='idle', frameIndex=0, frameTotal=0)
         self._radar_restart = False
         # scheduling registry: EVERY handle we hand to Clock (intervals and
         # one-shots alike) so stop() can cancel all of them, plus the guards
@@ -882,7 +951,6 @@ class AlmanacEmitter:
     _radar_available = _snapshot_field('_radar_result', 'available')
     _radar_reason = _snapshot_field('_radar_result', 'reason')
     _radar_frames = _snapshot_field('_radar_result', 'frames')
-    _radar_latest = _snapshot_field('_radar_result', 'latest')
     _radar_ts_frame = _snapshot_field('_radar_result', 'ts_frame')
     _radar_center = _snapshot_field('_radar_result', 'center')
     _radar_zoom = _snapshot_field('_radar_result', 'zoom')
@@ -1083,15 +1151,44 @@ class AlmanacEmitter:
         if not viewed:
             self._radar_view_pending = False
         if self._running and (stamp != self._radar_zoom_stamp or self._radar_view_pending):
-            if 'radar' in self._inflight:
-                if stamp != self._radar_geometry_stamp:
-                    # Map feedback is independent of a draining network worker.
-                    self._do_radar(geometry_only=True)
-            else:
+            if 'radar' not in self._inflight:
                 view_started = self._radar_view_pending
                 self._radar_view_pending = False
                 self._radar_zoom_stamp = stamp
                 self._spawn('radar', lambda: self._do_radar(intent_triggered=True, view_started=view_started))
+
+        elif (self._running and viewed and session is not None and 'radar' not in self._inflight
+              and hasattr(self,'_radar_geo_context') and time.monotonic()>=getattr(self,'_radar_geo_next',0)):
+            self._radar_geo_next=time.monotonic()+.25
+            self._spawn('radar',self._radar_geo_work)
+
+    def _radar_geo_work(self):
+        from lib.radar_basemap import warm
+        try:
+            activity=json.loads(Path(self.output_path).with_name('radar_activity').read_text())
+            if activity.get('moving') or time.time()-activity['at']>5:return
+            station,center,zoom,home=self._radar_geo_context
+            warm(RADAR_DIR,station,center,zoom,home,activity.get('theme','paper'))
+        except (OSError,ValueError,KeyError):return
+
+    def _radar_inventory_valid(self,snap):
+        grid=(snap.tiles or {}).get('grid')
+        if not grid:return False
+        for frame in snap.frames[-8:]:
+            pairs=[(p['id'],p['ts']) for p in frame.get('siteScans',())] or [(None,frame['ts'])]
+            expected=False
+            for y in range(grid['y0'],grid['y0']+grid['h']):
+                for x in range(grid['x0'],grid['x0']+grid['w']):
+                    for site,stamp in pairs:
+                        if site:
+                            lat,lon,_=_NEXRAD_SITES[site];n,w=world_inverse(x*256,y*256,snap.zoom);south,e=world_inverse((x+1)*256,(y+1)*256,snap.zoom)
+                            if not circle_intersects_bounds(lat,lon,RADAR_SITE_RANGE_METERS,dict(n=n,s=south,w=w,e=e)):continue
+                        expected=True
+                        path=_radar_tile_path(snap.source_id,site,stamp,snap.zoom,x,y)
+                        try:_radar_tile_metadata(path,snap.source_id)
+                        except (OSError,ValueError,KeyError,TypeError):return False
+            if not expected:return False
+        return True
 
     def _radar_checkpoint(self, ctx):
         if 'preference_stamp' in ctx and ctx['preference_stamp'] != self._radar_preference_stamp(ctx.get('stamp_names')):
@@ -1135,22 +1232,13 @@ class AlmanacEmitter:
                 self._events.append(self._radar_emit_pending)
 
     def _radar_publish_refresh(self, ctx, **changes):
-        if 'intent' not in ctx:
-            return
-        refresh = dict(state='newest', frameIndex=0, frameTotal=1, forSeq=ctx['intent']['seq'])
+        self._radar_checkpoint(ctx)
+        refresh = dict(state='newest', frameIndex=0, frameTotal=1)
         refresh.update(ctx.get('refresh', {}))
         refresh.update({k:v for k,v in changes.items() if k in refresh})
         ctx['refresh'] = refresh
-        # One immutable record keeps the pass intent and its phase inseparable.
         with self._radar_lock:
-            if (self._radar_geometry_result is not None and
-                    self._radar_geometry_stamp == self._radar_preference_stamp() and
-                    ctx.get('preference_stamp', self._radar_geometry_stamp) != self._radar_geometry_stamp):
-                return  # a draining pass cannot replace the newer intent's map
-            self._radar_geometry_result = ctx.get('geometry_result')
-            if self._radar_geometry_result is not None:
-                self._radar_geometry_stamp = ctx.get('preference_stamp')
-            self._radar_refresh = dict(refresh, intent=ctx['intent'])
+            self._radar_refresh = dict(refresh)
         self._radar_emit_now()
 
     def _radar_headroom_delay(self, source, needed):
@@ -1175,11 +1263,9 @@ class AlmanacEmitter:
 
     def _radar_retained_refresh(self, state):
         snap = self._radar_result
-        intent = snap.intent or dict(seq=0, zoom='auto', source='mosaic', center='station')
         with self._radar_lock:
-            self._radar_geometry_result = None
             self._radar_refresh = dict(state=state, frameIndex=sum(f['complete'] for f in snap.frames),
-                                      frameTotal=len(snap.frames), forSeq=intent['seq'], intent=intent)
+                                      frameTotal=len(snap.frames))
         self._radar_emit_now()
 
     def _radar_request_gate(self, source, deadline, reserve=0):
@@ -1256,6 +1342,13 @@ class AlmanacEmitter:
         workers = ctx.get('tile_workers', RADAR_TILE_WORKERS)
         def fetch(tile):
             tx, ty, _, _ = tile
+            target = _radar_tile_path(source, site, stamp, ctx['zoom'], tx, ty)
+            if target.is_file():
+                try:
+                    _radar_tile_metadata(target,source)
+                    return tile, target.read_bytes()
+                except (OSError, KeyError, ValueError, TypeError):
+                    target.unlink(missing_ok=True)
             # Native IEM bytes have no dependency on our remapping revision.
             # RainViewer's server-side colour scheme/options DO affect raw bytes.
             native = (RADAR_RAINVIEWER_COLOR, RADAR_RAINVIEWER_TILE_OPTS) if source == 'rainviewer' else None
@@ -1264,11 +1357,11 @@ class AlmanacEmitter:
                 raw = self._radar_tiles.get(key)
                 if raw is not None:
                     self._radar_tiles.move_to_end(key)
-                    return tile, raw
             self._radar_checkpoint(ctx)
             reserve = ctx.get('request_reserve', RADAR_HISTORY_RESERVE if ctx.get('prefetch') else 0)
             options = dict(reserve=reserve) if reserve else {}
-            raw = self._radar_request(source, url(tx, ty), deadline, **options)
+            if raw is None:
+                raw = self._radar_request(source, url(tx, ty), deadline, **options)
             if not raw.startswith(b'\x89PNG\r\n\x1a\n'):
                 raise ValueError('radar response is not PNG')
             with Image.open(io.BytesIO(raw)) as image:
@@ -1284,7 +1377,31 @@ class AlmanacEmitter:
                 self._radar_tiles.move_to_end(key)
                 while len(self._radar_tiles) > RADAR_TILE_CACHE_SIZE:
                     self._radar_tiles.popitem(last=False)
-            return tile, raw
+            from PIL.PngImagePlugin import PngInfo
+            with Image.open(io.BytesIO(raw)) as native_tile:
+                with remap(native_tile, source, source_palette(source)) as mapped:
+                    metadata = {k:mapped.info[k] for k in ('remapped','unmatchedColors','opaqueColors',
+                        'unmatchedPixels','opaquePixels','ambiguousPixels')}
+                    metadata['revision'] = REMAP_REVISION
+                    info = PngInfo(); info.add_text('radarRemap',json.dumps(metadata,separators=(',',':')))
+                    with mapped.getchannel('A') as alpha:
+                        info.add_text('radarVisiblePixels',str(65536-alpha.histogram()[0]))
+                    target.parent.mkdir(parents=True,exist_ok=True)
+                    import threading
+                    tmp = str(target) + '.tmp.' + str(threading.get_ident())
+                    try:
+                        mapped.save(tmp, format='PNG', pnginfo=info)
+                        with self._radar_lock:
+                            length=os.path.getsize(tmp)
+                            if self._radar_disk_files+1>8000 or self._radar_disk_bytes+length>64_000_000:
+                                self._radar_prune(incoming_size=length,incoming_files=1)
+                            if self._radar_disk_files+1>8000 or self._radar_disk_bytes+length>64_000_000:
+                                raise _RadarBudget('protected tile cache full')
+                            os.replace(tmp,target)
+                            self._radar_disk_files+=1;self._radar_disk_bytes+=length
+                    finally:
+                        if os.path.exists(tmp): os.unlink(tmp)
+            return tile, target.read_bytes()
 
         tiles = iter(_radar_site_tiles(ctx, site))
         with ThreadPoolExecutor(max_workers=workers, thread_name_prefix='radar-tile') as pool:
@@ -1299,9 +1416,13 @@ class AlmanacEmitter:
                     done, pending = wait(pending, return_when=FIRST_COMPLETED)
                     self._radar_checkpoint(ctx)
                     # Inspect the whole completed batch before submitting more.
-                    ready = [future.result() for future in done]
+                    ready=[];error=None
+                    for future in done:
+                        try:ready.append(future.result())
+                        except Exception as caught:error=error or caught
                     for result in ready:
                         yield result
+                    if error is not None:raise error
                     for _ in done:
                         self._radar_checkpoint(ctx)
                         tile = next(tiles, None)
@@ -1313,153 +1434,73 @@ class AlmanacEmitter:
                 # The executor drains active requests, whose successes enter LRU
                 # even when the main worker has already detected supersession.
 
-    def _radar_composite(self, source, ts, ctx, deadline, tile_url, archive_url=None, layers=None, on_validated=None):
-        """Atomic crop; site layers are all-or-nothing and alpha-composited in order.
-
-        Degraded crops are keyed by their actual contributors, never cached under
-        the full requested set. Negative entries are committed only after the
-        frame finishes, so cancellation/budget exhaustion cannot poison a retry.
-        """
-        from contextlib import ExitStack, closing
-        from PIL import Image
+    def _radar_fill_frame(self, source, ts, ctx, deadline, tile_url, archive_url=None, layers=None, on_validated=None):
+        """Fill independent immutable tiles; never allocate viewport RGBA buffers."""
         self._radar_checkpoint(ctx)
-        def site_key(site, stamp):
-            return _radar_frame(source, stamp, ctx, ((site, stamp),))['id'] + '/site'
-        if layers is not None:
-            reasons = ctx.setdefault('site_reasons', {})
-            for site, stamp, _ in layers:
-                if time.monotonic() < self._radar_negative.get(site_key(site, stamp), 0):
-                    entry = self._radar_newest.get((source, site))
-                    if entry and entry[1]['newest'] == stamp:
-                        self._radar_forget(source, site)
-                    if ctx.get('reuse_newest'):
-                        raise _RadarRevalidate('remembered site scan unavailable')
-                    reasons[site] = 'scan unavailable'
-            layers = [(site, stamp, url) for site, stamp, url in layers
-                      if time.monotonic() >= self._radar_negative.get(site_key(site, stamp), 0)]
-        pairs = tuple((s, t) for s, t, _ in layers) if layers is not None else None
-        frame = _radar_frame(source, ts, ctx, pairs)
-        target = os.path.join(RADAR_DIR, frame['id'] + '.png')
-        work = list(reversed(layers)) if layers is not None else [(None, ts, tile_url)]
-        if os.path.isfile(target):
-            frame = _radar_cached_frame(frame, target)
-            if frame['complete']:
-                if on_validated is not None:
-                    self._radar_archive_probe(source, archive_url, deadline, ctx.get('request_reserve', 0))
-                    on_validated()
-                return frame
-        if not work or time.monotonic() < self._radar_negative.get(frame['id'], 0):
-            return frame
+        pairs = tuple((s,t) for s,t,_ in layers) if layers is not None else None
+        frame = _radar_frame(source,ts,ctx,pairs)
         if ctx['builds'] >= RADAR_MAX_FRAME_BUILDS_PER_PASS or time.monotonic() >= deadline:
-            raise _RadarBudget('radar build budget')
+            raise _RadarBudget('radar tile-set budget')
         ctx['builds'] += 1
-        negatives, drawn = {}, []
-        unmatched, opaque, unknown_pixels = set(), set(), 0
-        opaque_pixels, ambiguous_pixels = 0, 0
-        try:
-            if archive_url:
-                self._radar_archive_probe(source, archive_url, deadline, ctx.get('request_reserve', 0))
-            if on_validated is not None:
-                on_validated()
-            with ExitStack() as buffers:
-                composite = buffers.enter_context(Image.new('RGBA', (RADAR_VIEWPORT_W, RADAR_VIEWPORT_H)))
-                for site, stamp, url in work:
-                    layer = buffers.enter_context(Image.new('RGBA', composite.size))
-                    layer_unknown, layer_opaque, layer_pixels = set(), set(), 0
-                    layer_opaque_pixels, layer_ambiguous_pixels = 0, 0
-                    try:
-                        with closing(self._radar_tile_batch(source, stamp, ctx, deadline, url, site)) as batch:
-                            for (_, _, x, y), raw in batch:
-                                self._radar_checkpoint(ctx)
-                                # Raw cache entries were validated before insertion.
-                                with Image.open(io.BytesIO(raw)) as tile:
-                                    crop = (max(0,-x), max(0,-y), min(256,RADAR_VIEWPORT_W-x), min(256,RADAR_VIEWPORT_H-y))
-                                    with remap(tile.crop(crop), source, source_palette(source)) as mapped:
-                                        layer_unknown.update(mapped.info['unmatchedColorValues'])
-                                        layer_opaque.update(mapped.info['opaqueColorValues'])
-                                        layer_pixels += mapped.info['unmatchedPixels']
-                                        layer_opaque_pixels += mapped.info['opaquePixels']
-                                        layer_ambiguous_pixels += mapped.info['ambiguousPixels']
-                                        layer.paste(mapped, (x+crop[0], y+crop[1]))
-                                self._radar_checkpoint(ctx)
-                    except (_RadarSuperseded, _RadarRevalidate):
-                        raise
-                    except _RadarBudget as error:
-                        self._radar_checkpoint(ctx)
-                        if layers is None or not drawn:
-                            raise
-                        # A multi-site crop remains valid with any complete layer.
-                        # Keep the nearest layers already acquired and spend no
-                        # further requests; incomplete/budget-skipped sites are
-                        # never negatively cached. Backfill yields on its gate.
-                        ctx['site_budget_limited'] = True
-                        for pending_site, _, _ in work:
-                            if pending_site not in {s for s,_,_ in drawn}:
-                                ctx.setdefault('site_reasons', {}).setdefault(pending_site, 'deferred')
-                        Logger.warning(f'almanac_emit: radar site {site} frame {ts} budget yield: {error}')
-                        break
-                    except Exception as error:
-                        self._radar_checkpoint(ctx)
-                        entry = self._radar_newest.get((source, site))
-                        if entry and entry[1]['newest'] == stamp:
-                            self._radar_forget(source, site)
-                        if ctx.get('reuse_newest'):
-                            raise _RadarRevalidate('remembered newest tiles failed') from error
-                        if site is None:
-                            raise
-                        ctx.setdefault('site_reasons', {})[site] = 'scan unavailable'
-                        negatives[site_key(site, stamp)] = time.monotonic() + RADAR_NEGATIVE_CACHE_SEC
-                        Logger.warning(f'almanac_emit: radar site {site} frame {ts} degraded: {type(error).__name__}: {error}')
-                        continue
-                    drawn.append((site, stamp, layer))
-                    unmatched.update(layer_unknown); opaque.update(layer_opaque)
-                    unknown_pixels += layer_pixels
-                    opaque_pixels += layer_opaque_pixels
-                    ambiguous_pixels += layer_ambiguous_pixels
-                self._radar_checkpoint(ctx)
-                # Fetch nearest first, but stack farthest first. Holding at most
-                # four site layers bounds working RGBA buffers to about 9 MiB.
-                if layers is not None:
-                    drawn.reverse()
-                for _, _, layer in drawn:
-                    composite.alpha_composite(layer)
-                if layers is not None:
-                    if not drawn:
-                        self._radar_negative.update(negatives)
-                        return frame
-                    frame = _radar_frame(source, ts, ctx, [(s, t) for s, t, _ in drawn])
-                    target = os.path.join(RADAR_DIR, frame['id'] + '.png')
-                os.makedirs(os.path.dirname(target), exist_ok=True)
-                tmp = f'{target}.tmp.{os.getpid()}'
-                try:
-                    from PIL.PngImagePlugin import PngInfo
-                    metadata = dict(revision=REMAP_REVISION, remapped=unknown_pixels <= .02*opaque_pixels and not ambiguous_pixels,
-                                    opaquePixels=opaque_pixels, ambiguousPixels=ambiguous_pixels, unmatchedColors=len(unmatched),
-                                    opaqueColors=len(opaque), unmatchedPixels=unknown_pixels)
-                    info = PngInfo(); info.add_text('radarRemap', json.dumps(metadata))
-                    composite.save(tmp, format='PNG', pnginfo=info)
+        work = list(reversed(layers)) if layers is not None else [(None,ts,tile_url)]
+        if archive_url:
+            try: self._radar_archive_probe(source,archive_url,deadline,ctx.get('request_reserve',0))
+            except (_RadarBudget,_RadarSuperseded): raise
+            except Exception as error:
+                if is_transport_error(error): raise
+                ctx['last_error']=str(error)
+                return frame
+        if on_validated is not None: on_validated()
+        drawn = []; present = set()
+        for site,stamp,url in work:
+            try:
+                for tile, raw in self._radar_tile_batch(source,stamp,ctx,deadline,url,site):
+                    present.add((site,stamp))
                     self._radar_checkpoint(ctx)
-                    os.replace(tmp, target)
-                finally:
-                    if os.path.exists(tmp):
-                        os.unlink(tmp)
-            self._radar_checkpoint(ctx)
-            self._radar_negative.update(negatives)
-            frame.update(complete=True, url='radar/' + frame['id'] + '.png',
-                         legend=dict(remapped=metadata['remapped']), **metadata)
-        except (_RadarBudget, _RadarSuperseded, _RadarRevalidate):
-            raise
-        except Exception as error:
-            self._radar_checkpoint(ctx)
-            entry = self._radar_newest.get((source, None))
-            if entry and entry[1]['newest'] == ts:
-                self._radar_forget(source)
-            if ctx.get('reuse_newest'):
-                raise _RadarRevalidate('remembered newest tiles failed') from error
-            if is_transport_error(error):
-                raise  # dropped sockets do not mean this frame is unavailable
-            ctx['last_error'] = f'{type(error).__name__}: {error}'
-            self._radar_negative[frame['id']] = time.monotonic() + RADAR_NEGATIVE_CACHE_SEC
+                    # Publish partial newest inventory as each independent tile lands.
+                    snap = self._radar_result
+                    if (snap.ts_frame is None or ts >= snap.ts_frame) and not ctx.get('prefetch'):
+                        settings = _RADAR_SOURCES[source]
+                        # A tile is an independently validated measurement; publish
+                        # its stamp before the remaining viewport tiles finish.
+                        partial = _RADAR_NONE._replace(available=True,reason=None,frames=(dict(frame),),
+                            ts_frame=ts,center=dict(lat=ctx['station'][0],lon=ctx['station'][1]),
+                            zoom=ctx['zoom'],mpp=ctx['mpp'],bounds=ctx['bounds'],scalebar=ctx['bar'],
+                            rings=ctx['rings'],nexrad=ctx['nexrad'],ts_fetch=time.time(),source_id=source,
+                            **settings,zoom_desired=ctx['desired'],zoom_auto_level=ctx['auto_zoom'],
+                            geo=ctx.get('geo'),units=ctx['unit'],source_pref=ctx['source_pref'],
+                            source_fallback=ctx['source_fallback'],sources=tuple(ctx['sources']),
+                            source_mode='site' if source=='iem-nexrad-n0b' else 'mosaic',
+                            site_id=ctx.get('site_id'),sites=tuple(ctx.get('sites',())),
+                            sites_considered=ctx.get('sites_considered',0),
+                            tiles=_radar_tile_manifest(source,[frame],ctx))
+                        # Keep existing history during a same-stamp viewport warm-up.
+                        if snap.source_id==source and snap.ts_frame==ts and snap.frames:
+                            partial=partial._replace(frames=snap.frames,
+                                tiles=_radar_tile_manifest(source,snap.frames,ctx),ts_fetch=snap.ts_fetch)
+                        self._radar_result=partial
+                        self._radar_emit_now()
+                drawn.append((site,stamp))
+            except (_RadarSuperseded, _RadarBudget):
+                raise
+            except Exception as error:
+                if is_transport_error(error): raise
+                self._radar_forget(source,site)
+                if ctx.get('reuse_newest'): raise _RadarRevalidate('remembered newest unavailable') from error
+                ctx['last_error'] = str(error)
+                if site: ctx.setdefault('site_reasons',{})[site] = 'scan unavailable'
+            # Executor drain may finish paid-for tiles after the first failure.
+            if any(_radar_tile_path(source,site,stamp,ctx['zoom'],x,y).is_file()
+                   for x,y,_,_ in _radar_site_tiles(ctx,site)):
+                present.add((site,stamp))
+        if layers is not None:
+            frame['siteScans'] = [dict(id=s,ts=t) for s,t in pairs]
+        # Admission needs a real measurement; manifest coverage separately
+        # determines whether the entire tile set is ready for playback.
+        frame['acquiredSites'] = [dict(id=s,ts=t) for s,t in (pairs or ()) if (s,t) in present]
+        frame['publishable'] = bool(present)
+        frame['complete'] = bool(present) and all(all(_radar_tile_path(source,site,stamp,ctx['zoom'],x,y).is_file()
+            for x,y,_,_ in _radar_site_tiles(ctx,site)) for site,stamp in (pairs or [(None,ts)]))
         return frame
 
     def _radar_known(self, source, ctx, site=None):
@@ -1523,7 +1564,7 @@ class AlmanacEmitter:
             def validated():
                 # Superseding intents can reuse discovery even mid-tile-batch.
                 self._radar_newest[(source, None)] = (time.monotonic(), dict(newest=stamp))
-            return self._radar_composite(source, stamp, ctx, limit,
+            return self._radar_fill_frame(source, stamp, ctx, limit,
                 lambda x, y: RADAR_IEM_TILE_TEMPLATE.format(stamp=utc.strftime('%Y%m%d%H%M'),
                     z=ctx['zoom'], x=x, y=y),
                 None if known is not None else utc.strftime(RADAR_IEM_ARCHIVE_TEMPLATE),
@@ -1533,11 +1574,11 @@ class AlmanacEmitter:
             ctx['reuse_newest'] = known is not None
             latest = build(candidate, deadline)
             ctx['reuse_newest'] = False
-            if not latest['complete']:
+            if not latest.get('publishable',latest['complete']):
                 self._radar_forget(source)
                 if known is not None:
                     raise _RadarRevalidate('remembered newest unavailable')
-            if latest['complete']:
+            if latest.get('publishable',latest['complete']):
                 if time.time() - candidate > RADAR_IEM_STALE_SEC:
                     break
                 return self._radar_history(source, candidate, newest, ctx, build, latest)
@@ -1629,7 +1670,7 @@ class AlmanacEmitter:
                     return RADAR_SITE_TILE_TEMPLATE.format(site=site[1:], stamp=stamp,
                         z=ctx['zoom'], x=x, y=y)
                 layers.append((site, scan, url))
-            return self._radar_composite(source, ts, ctx, limit, None, layers=layers)
+            return self._radar_fill_frame(source, ts, ctx, limit, None, layers=layers)
         for ts in reversed(stamps):
             if now - ts >= RADAR_SITE_MAX_AGE_SEC:
                 break
@@ -1637,11 +1678,11 @@ class AlmanacEmitter:
             slots = [t for t in stamps if ts - RADAR_HISTORY_SEC <= t <= ts][-(8 if len(_radar_site_pairs(ctx, ts)) >= 2 else 31):]
             self._radar_publish_refresh(ctx, frameTotal=len(slots) if ctx['viewed'] else 1)
             latest = build(ts, deadline)
-            if ctx.get('reuse_newest') and not latest['complete']:
+            if ctx.get('reuse_newest') and not latest.get('publishable',latest['complete']):
                 raise _RadarRevalidate('remembered site scan unavailable')
             ctx['reuse_newest'] = False
-            if latest['complete']:
-                cap = 8 if len(latest.get('siteScans', ())) >= 2 else 31
+            if latest.get('publishable',latest['complete']):
+                cap = 8 if len(latest.get('acquiredSites',latest.get('siteScans', ()))) >= 2 else 31
                 slots = [t for t in stamps if ts - RADAR_HISTORY_SEC <= t <= ts][-cap:]
                 self._radar_publish_refresh(ctx, frameTotal=len(slots) if ctx['viewed'] else 1)
                 ctx['scanning_slowly'] = len(slots) >= 3 and all(
@@ -1676,14 +1717,14 @@ class AlmanacEmitter:
                 raise ValueError('invalid RainViewer path')
             if known is None and ts == newest:
                 self._radar_newest[(source, None)] = (time.monotonic(), dict(newest=newest, host=host, past=past))
-            return self._radar_composite(source, ts, ctx, limit,
+            return self._radar_fill_frame(source, ts, ctx, limit,
                 lambda x, y: f'{host}{path}/256/{ctx["zoom"]}/{x}/{y}/{RADAR_RAINVIEWER_COLOR}/{RADAR_RAINVIEWER_TILE_OPTS}.png')
         ctx['reuse_newest'] = known is not None
         latest = build(newest, ctx['deadline'])
         ctx['reuse_newest'] = False
-        if known is not None and not latest['complete']:
+        if known is not None and not latest.get('publishable',latest['complete']):
             raise _RadarRevalidate('remembered RainViewer scan unavailable')
-        if not latest['complete']:
+        if not latest.get('publishable',latest['complete']):
             raise ValueError('no complete RainViewer latest')
         ctx['rainviewer_prefix'] = host + past[newest]
         return self._radar_history(source, newest, newest, ctx, build, latest, sorted(past))
@@ -1696,7 +1737,7 @@ class AlmanacEmitter:
         frames = {t: _radar_frame(source, t, ctx, _radar_site_pairs(ctx, t)
                   if source == 'iem-nexrad-n0b' else None) for t in slots}
         frames[newest] = latest
-        previous = self._radar_result
+        previous = ctx.get('previous_result',self._radar_result)
         newest_reasons = dict(ctx.get('site_reasons', {}))
         fetched = time.time()
         if (newest < advertised and previous.available and previous.source_id == source
@@ -1716,15 +1757,15 @@ class AlmanacEmitter:
             if source == 'iem-mrms-lcref' and time.time() - newest > settings['stale_sec']:
                 return False
             if (previous.available and previous.source_id == source and previous.center == ctx['center']
-                    and previous.zoom == ctx['zoom'] and previous.site_id == (ctx.get('site_id') if source == 'iem-nexrad-n0b' else None) and previous.ts_frame > newest):
+                    and previous.zoom == ctx['zoom'] and previous.site_id == (ctx.get('site_id') if source == 'iem-nexrad-n0b' else None) and previous.ts_frame is not None and previous.ts_frame > newest):
                 raise ValueError('source timestamp regressed')
             self._radar_result = _RadarResult(True, None, tuple(frames[t] for t in sorted(frames)),
-                latest['id'], newest, ctx['center'], ctx['zoom'], ctx['mpp'], ctx['bounds'],
+                newest, dict(lat=ctx['station'][0],lon=ctx['station'][1]), ctx['zoom'], ctx['mpp'], ctx['bounds'],
                 ctx['bar'], ctx['rings'], ctx['nexrad'], fetched, source, **settings,
                 zoom_desired=ctx['desired'], zoom_auto_level=ctx['auto_zoom'],
-                marker=ctx['marker'], centered=ctx['centered'], source_pref=ctx['source_pref'],
-                source_fallback=ctx['source_fallback'], intent=ctx['intent'],
-                basemap=ctx.get('basemap'), source_mode='site' if source == 'iem-nexrad-n0b' else 'mosaic',
+                source_pref=ctx['source_pref'],
+                source_fallback=ctx['source_fallback'],
+                geo=ctx.get('geo'), tiles=_radar_tile_manifest(source,[frames[t] for t in sorted(frames)],ctx), units=ctx['unit'], source_mode='site' if source == 'iem-nexrad-n0b' else 'mosaic',
                 site_id=ctx.get('site_id') if source == 'iem-nexrad-n0b' else None,
                 sites=tuple(dict(s, contributing=any(p['id']==s['id'] for p in latest.get('siteScans', ())),
                     reason=None if any(p['id']==s['id'] for p in latest.get('siteScans', ())) else
@@ -1735,17 +1776,20 @@ class AlmanacEmitter:
                     ctx['bounds'][k] > _RADAR_IEM_DOMAIN[k] for k in ('w', 'e', 's', 'n')))
             self._radar_result_stamp = ctx.get('preference_stamp')
             self._radar_transport_failures.pop(source, None)
-            ctx.pop('geometry_result', None)
             self._radar_publish_refresh(ctx, frameIndex=sum(f['complete'] for f in frames.values()))
             return True
-        # Include warm cached history in the initial publication, without HTTP.
-        if ctx['viewed']:
-            for t in slots:
-                if os.path.isfile(os.path.join(RADAR_DIR, frames[t]['id'] + '.png')):
-                    frames[t] = _radar_cached_frame(frames[t], os.path.join(RADAR_DIR, frames[t]['id'] + '.png'))
+        # Disk tiles survive tab closure, camera moves and emitter restarts.
+        for t in slots:
+            f = frames[t]
+            pairs = [(p['id'],p['ts']) for p in f['siteScans']] or [(None,t)]
+            f['complete'] = all(all(_radar_tile_path(source,site,scan,ctx['zoom'],x,y).is_file()
+                for x,y,_,_ in _radar_site_tiles(ctx,site)) for site,scan in pairs)
         if not publish():
             raise ValueError('IEM frame aged out during acquisition')
         if ctx['viewed']:
+            self._radar_publish_refresh(ctx,state='idle')
+            self._radar_prefetch(source,ctx)
+            ctx['tiles'] = _radar_grid(ctx)
             ordered = list(reversed(slots))
             needed = 0
             view_delay = 0
@@ -1760,7 +1804,6 @@ class AlmanacEmitter:
                                    (True, ordered[RADAR_LOOP_FRAMES:])):
                     if deep:
                         self._radar_publish_refresh(ctx, state='idle')
-                        self._radar_prefetch(source, ctx)
                         if deferred:
                             break
                     reserve = max(RADAR_HISTORY_RESERVE, len(ctx['tiles'])+2)
@@ -1860,7 +1903,13 @@ class AlmanacEmitter:
                     admitted_source = target
                 tiles, _, bounds, _ = _radar_viewport(ctx['center']['lat'], ctx['center']['lon'],
                     zoom, RADAR_VIEWPORT_W, RADAR_VIEWPORT_H)
+                if target == source:
+                    cx,cy = world_point(ctx['center']['lat'],ctx['center']['lon'],zoom)
+                    tiles = [(x,y,0,0) for y in (int(cy//256)-1,int(cy//256))
+                             for x in (int(cx//256)-1,int(cx//256)) if 0<=x<2**zoom and 0<=y<2**zoom]
                 warm.update(zoom=zoom, tiles=tiles, bounds=bounds)
+                if target != source and zoom == ctx['zoom']:
+                    warm['tiles'] = _radar_grid(warm,margin=1)
                 self._radar_session.on_retry = lambda end: self._radar_transport_retry(
                     target, end, RADAR_HISTORY_RESERVE)
                 try:
@@ -1911,7 +1960,7 @@ class AlmanacEmitter:
                 except (_RadarBudget, _RadarSuperseded):
                     raise
                 except Exception:
-                    # Optional warming cannot invalidate the foreground crop.
+                    # Optional warming cannot invalidate the foreground scan.
                     continue
         except _RadarSuperseded:
             raise
@@ -1920,59 +1969,53 @@ class AlmanacEmitter:
         finally:
             self._radar_session.on_retry = retry
 
-    def _radar_prune(self, previous):
-        """Prune only owned namespaces; give abandoned generations decode grace."""
-        keep = {f['id'] for f in self._radar_result.frames if f['complete']}
-        # Crops accumulate for an hour even when only newest is published.
-        # Include the palette revision; site scan-set hashes are below this root.
-        latest = self._radar_result.latest
-        prefix = '/'.join(latest.split('/')[:4]) + '/' if latest else None
-        newest = self._radar_result.ts_frame
-        if prefix and newest is not None:
-            for directory, _, names in os.walk(os.path.join(RADAR_DIR, prefix)):
-                for name in names:
-                    if re.fullmatch(r'[0-9]+\.png', name) and newest-RADAR_HISTORY_SEC <= int(name[:-4]) <= newest:
-                        keep.add(os.path.relpath(os.path.join(directory, name), RADAR_DIR)[:-4])
-        # Touch the whole retained generation at retirement, not at build
-        # time. An off-tab payload marked its historical crops incomplete.
-        retired = {f['id'] for f in previous.frames if f['complete']} - keep
-        old_prefix = '/'.join(previous.latest.split('/')[:4]) + '/' if previous.latest else None
-        if old_prefix and old_prefix != prefix:
-            for directory, _, names in os.walk(os.path.join(RADAR_DIR, old_prefix)):
-                for name in names:
-                    if re.fullmatch(r'[0-9]+\.png', name) and previous.ts_frame-RADAR_HISTORY_SEC <= int(name[:-4]) <= previous.ts_frame:
-                        retired.add(os.path.relpath(os.path.join(directory, name), RADAR_DIR)[:-4])
-        for ident in retired:
-            path = os.path.join(RADAR_DIR, ident + '.png')
-            if os.path.isfile(path):
-                os.utime(path, (time.time(), time.time()))
-        current_map = self._radar_result.basemap
-        old_map = previous.basemap
-        map_root = os.path.join(RADAR_DIR, 'basemap')
-        map_keep = current_map['hash'] if current_map else None
-        if old_map and old_map['hash'] != map_keep:
-            retired = os.path.join(map_root, old_map['hash'] + '.svg')
-            if os.path.isfile(retired):
-                os.utime(retired, (time.time(), time.time()))
-        if os.path.isdir(map_root):
-            for name in os.listdir(map_root):
-                if not re.fullmatch(r'[0-9a-f]{20}\.svg', name):
-                    continue
-                path = os.path.join(map_root, name)
-                if name[:-4] != map_keep and time.time() - os.path.getmtime(path) >= RADAR_CACHE_GRACE_SEC:
-                    os.unlink(path)
-        for source in _RADAR_SOURCES.values():
-            root = os.path.join(RADAR_DIR, source['legend']['id'])
-            for directory, _, names in os.walk(root):
-                for name in names:
-                    if not re.fullmatch(r'[0-9]+\.png', name):
-                        continue
-                    path = os.path.join(directory, name)
-                    ident = os.path.relpath(path, RADAR_DIR)[:-4]
-                    if ident not in keep and time.time() - os.path.getmtime(path) >= RADAR_CACHE_GRACE_SEC:
-                        os.unlink(path)
+    def _radar_prune(self, previous=None, incoming_size=0, incoming_files=0):
+        """Own namespaces only. Current-level hour is protected; otherwise served LRU."""
+        newest = self._radar_result.ts_frame or 0
+        current = self._radar_result.zoom
+        records = []
+        for path in (Path(RADAR_DIR)/'t').glob('*/*/*/*/*/*/*.png'):
+            try:
+                stat = path.stat(); stamp = int(datetime.strptime(path.parts[-4],'%Y%m%d%H%M').replace(tzinfo=timezone.utc).timestamp())
+                z = int(path.parts[-3]); recent = 0 <= newest-stamp <= RADAR_HISTORY_SEC
+                protected = recent and (z == current or time.time()-stat.st_atime < 900)
+                records.append((protected,stat.st_atime,stat.st_size,path))
+            except (OSError,ValueError): continue
+        count, size = len(records), sum(r[2] for r in records)
+        for protected, _, length, path in sorted(records):
+            if count+incoming_files <= 8000 and size+incoming_size <= 64_000_000: break
+            if protected: continue
+            path.unlink(missing_ok=True); count -= 1; size -= length
+            from lib.radar_basemap import remove_empty_parents
+            remove_empty_parents(path,Path(RADAR_DIR)/'t')
+        self._radar_disk_files=count;self._radar_disk_bytes=size
+        if count > 8000 or size > 64_000_000:
+            Logger.warning('almanac_emit: protected radar hour exceeds disk cap; acquisition must yield')
 
-    def _do_radar(self, geometry_only=False, intent_triggered=None, view_started=False):
+    def _radar_migrate_cache(self):
+        import shutil
+        from lib.radar_basemap import version,remove_empty_parents
+        root=Path(RADAR_DIR);root.mkdir(parents=True,exist_ok=True)
+        site_revision=_radar_sites_revision();site_path=root/('sites-'+site_revision+'.json')
+        marker=root/'.sites-revision'
+        if not marker.exists() or marker.read_text()!=site_revision or not site_path.is_file():
+            sites=[dict(id=i,lat=a,lon=b,name=n) for i,(a,b,n) in _NEXRAD_SITES.items()]
+            temp=site_path.with_suffix('.tmp');temp.write_text(json.dumps(sites,separators=(',',':')));os.replace(temp,site_path)
+            marker.write_text(site_revision)
+            for obsolete in root.glob('sites-*.json'):
+                if obsolete!=site_path:obsolete.unlink()
+            (root/'sites.json').unlink(missing_ok=True)
+        revision=root/'.tile-revision'
+        if revision.exists() and revision.read_text()==_radar_render_revision():return
+        for name in ('basemap','t',*{s['legend']['id'] for s in _RADAR_SOURCES.values()}):
+            path=root/name
+            if path.is_dir() and not path.is_symlink():shutil.rmtree(path)
+        for obsolete in (root/'geo').glob('*/*/*/*/*.bin'):
+            obsolete.unlink(missing_ok=True);remove_empty_parents(obsolete,root/'geo')
+        revision.write_text(_radar_render_revision())
+        (root/'.geo-revision').write_text(version())
+
+    def _do_radar(self, intent_triggered=None, view_started=False):
         """Primary-first orchestration; radar failures never alter engine health."""
         stamp_names = self._radar_stamp_names()
         stamp = self._radar_preference_stamp(stamp_names)
@@ -1980,24 +2023,17 @@ class AlmanacEmitter:
             # Direct callers follow changed markers; scheduled/retry callbacks
             # explicitly force validation even if an intent arrived meanwhile.
             intent_triggered = stamp != self._radar_zoom_stamp or self._radar_restart
-        if (view_started and not geometry_only and stamp == self._radar_result_stamp
-                and self._radar_geometry_result is None):
-            # Publish the same cached history used by the adapter's initial
-            # publication before discovery/prefetch. A warm tab needs no HTTP,
-            # even if provider knowledge expired while it was closed.
+        self._radar_restart = False
+        self._radar_zoom_stamp = stamp
+        self._radar_migrate_cache()
+        self._radar_prune()
+        if view_started and stamp == self._radar_result_stamp:
             previous = self._radar_result
-            if previous.available and 0 <= time.time()-previous.ts_frame < previous.stale_sec:
-                frames = tuple(_radar_cached_frame(dict(f, complete=False), os.path.join(RADAR_DIR, f['id']+'.png'))
-                               for f in previous.frames)
-                if (sum(f['complete'] for f in frames) >= RADAR_LOOP_FRAMES
-                        and any(f['id'] == previous.latest and f['complete'] for f in frames)
-                        and stamp == self._radar_preference_stamp()):
-                    self._radar_result = previous._replace(frames=frames)
-                    self._radar_retained_refresh('idle')
-                    return
-        if not geometry_only:
-            self._radar_restart = False
-            self._radar_zoom_stamp = stamp
+            if (previous.available and previous.ts_frame and 0 <= time.time()-previous.ts_frame < previous.stale_sec
+                    and len(previous.frames)>=8 and all(f['complete'] for f in previous.frames[-8:])
+                    and self._radar_inventory_valid(previous)):
+                self._radar_retained_refresh('idle')
+                return
         try:
             config = getattr(self.app, 'config', {}) or {}
             lat = _num(_cfg(config, 'Station', 'Latitude'))
@@ -2009,10 +2045,9 @@ class AlmanacEmitter:
             previous = self._radar_result
             station_lat, station_lon = lat, lon
             station = (lat, lon)
-            if not geometry_only and getattr(self, '_radar_station', station) != station:
-                self._radar_result = _RADAR_NONE  # a changed station must never inherit old pixels
-            if not geometry_only:
-                self._radar_station = station
+            if getattr(self, '_radar_station', station) != station:
+                self._radar_result = previous = _RADAR_NONE  # a changed station must never inherit old pixels
+            self._radar_station = station
             try:
                 with open(os.path.join(os.path.dirname(self.output_path), 'radar_center')) as preference:
                     raw = preference.read(1024)
@@ -2020,7 +2055,7 @@ class AlmanacEmitter:
                 if override is not None:
                     lat, lon = override
             except (OSError, ValueError, UnicodeError):
-                pass  # absent/station/invalid: station crop
+                pass  # absent/station/invalid: station viewport
             intent_record = self._radar_read_intent()
             if intent_record is not None:
                 selected = intent_record['center']
@@ -2051,11 +2086,10 @@ class AlmanacEmitter:
             unit = _radar_distance_unit(config)
             # One budget spans both attempts; geometry is source-specific, intent is not.
             ctx = dict(center=center, nexrad=_radar_nexrad(station_lat, station_lon, unit), viewed=viewed,
-                desired=desired, auto_zoom=auto_zoom, builds=0, station=station,
+                desired=desired, auto_zoom=auto_zoom, builds=0, station=station, unit=unit, previous_result=previous,
                 preference_stamp=stamp, stamp_names=stamp_names, intent_triggered=intent_triggered,
                 deadline=time.monotonic() + RADAR_BUILD_DEADLINE_SEC)
-            if not geometry_only:
-                self._radar_negative = {k: v for k, v in self._radar_negative.items() if v > time.monotonic()}
+            self._radar_negative = {k: v for k, v in self._radar_negative.items() if v > time.monotonic()}
             adapters = [('rainviewer', self._radar_rainviewer_frames)]
             if _radar_iem_eligible(station_lat, station_lon):
                 adapters.insert(0, ('iem-mrms-lcref', self._radar_iem_frames))
@@ -2090,46 +2124,28 @@ class AlmanacEmitter:
                 zoom = max(RADAR_SITE_MIN_ZOOM if source == 'iem-nexrad-n0b' else RADAR_MIN_ZOOM, min(desired if desired is not None else auto_zoom,
                                                _RADAR_SOURCES[source]['max_zoom']))
                 tiles, mpp, bounds, _ = _radar_viewport(lat, lon, zoom, RADAR_VIEWPORT_W, RADAR_VIEWPORT_H)
-                cx, cy = world_point(lat, lon, zoom)
-                mx, my = plate_point(station_lat, station_lon, zoom,
-                                     cx - RADAR_VIEWPORT_W / 2, cy - RADAR_VIEWPORT_H / 2)
-                # Preserve the exact common-case glyph; off-station uses tile paste registration.
-                ctx.update(marker=dict(x=.5, y=.5) if centered else
-                           dict(x=mx / RADAR_VIEWPORT_W, y=my / RADAR_VIEWPORT_H), centered=centered)
                 bar, rings = _radar_scale(mpp, RADAR_VIEWPORT_PX, unit, max_fraction=.25)
-                identity = hashlib.sha256(repr((lat, lon, zoom, RADAR_VIEWPORT_W, RADAR_VIEWPORT_H, tiles,
-                    ctx['nexrad']['id'] if source == 'iem-nexrad-n0b' else None)).encode()).hexdigest()[:20]
+                identity = (lat, lon, zoom, source)
                 with self._radar_lock:
                     geometry = (identity, stamp)
                     if self._radar_view_geometry != geometry:
                         self._radar_view_geometry = geometry
                         self._radar_geometry_since = time.monotonic()
                 ctx.update(zoom=zoom, tiles=tiles, mpp=mpp, bounds=bounds, bar=bar, rings=rings,
-                           identity=identity, candidates=[], viewport=(RADAR_VIEWPORT_W, RADAR_VIEWPORT_H))
-                try:
-                    from lib.radar_basemap import ensure
-                    ctx['basemap'] = ensure(ctx, RADAR_DIR)
-                except Exception as error:
-                    ctx['basemap'] = None
-                    Logger.warning(f'almanac_emit: basemap unavailable - {error}')
-                self._radar_checkpoint(ctx)
-                # Empty frames explicitly mean geometry only. Last complete crops
-                # remain in _radar_result for retention and on the page's canvas.
-                sites, considered = _radar_sites(station, bounds) if source == 'iem-nexrad-n0b' else ([], 0)
-                ctx['geometry_result'] = _RADAR_NONE._replace(
-                    available=True, reason=None, center=center, zoom=zoom, mpp=mpp,
-                    bounds=bounds, scalebar=bar, rings=rings, nexrad=ctx['nexrad'],
-                    source_id=source, **_RADAR_SOURCES[source],
-                    zoom_desired=desired, zoom_auto_level=auto_zoom, basemap=ctx['basemap'],
-                    marker=ctx['marker'], centered=centered, source_pref=ctx['source_pref'],
-                    source_fallback=ctx['source_fallback'], intent=ctx['intent'],
-                    source_mode='site' if source == 'iem-nexrad-n0b' else 'mosaic',
-                    site_id=site['id'] if source == 'iem-nexrad-n0b' else None,
-                    sources=tuple(ctx['sources']), sites=tuple(dict(s, contributing=False,
-                        newestTs=None, reason=None) for s in sites), sites_considered=considered)
-                self._radar_publish_refresh(ctx, state='newest', frameIndex=0, frameTotal=1)
-                if geometry_only:
-                    return
+                           identity=identity, candidates=[])
+                ctx['tiles'] = sorted(_radar_grid(ctx,margin=1),key=lambda t: math.hypot(t[0]+.5-world_point(lat,lon,zoom)[0]/256,t[1]+.5-world_point(lat,lon,zoom)[1]/256))
+                from lib.radar_basemap import version
+                ctx['geo'] = dict(version=version(),base='radar/geo/',sites='radar/sites-'+_radar_sites_revision()+'.json')
+                self._radar_geo_context=(station,center,zoom,auto_zoom)
+                # Source/station knowledge can exist before the first tile. No camera acknowledgement.
+                if not self._radar_result.available:
+                    self._radar_result = _RADAR_NONE._replace(available=True,reason=None,
+                        center=dict(lat=station_lat,lon=station_lon), zoom=zoom, nexrad=ctx['nexrad'],
+                        source_id=source, **_RADAR_SOURCES[source], zoom_desired=desired,
+                        zoom_auto_level=auto_zoom, geo=ctx['geo'], units=unit, rings=rings,
+                        sources=tuple(ctx['sources']),source_pref=ctx['source_pref'],
+                        source_fallback=ctx['source_fallback'])
+                self._radar_publish_refresh(ctx,state='newest',frameIndex=0,frameTotal=1)
                 provider = _RADAR_SOURCES[source]['provider']
                 if self._radar_session is None or self._radar_provider != provider:
                     if self._radar_session is not None:
@@ -2171,8 +2187,9 @@ class AlmanacEmitter:
                     raise
                 except _RadarBudget:
                     self._radar_forget(source)
-                    fresh = previous.available and 0 <= time.time()-previous.ts_frame < previous.stale_sec
-                    self._radar_result = previous
+                    fresh = previous.available and previous.ts_frame is not None and 0 <= time.time()-previous.ts_frame < previous.stale_sec
+                    if self._radar_result.ts_frame is None:
+                        self._radar_result = previous
                     self._radar_retained_refresh('idle' if fresh else 'failed')
                     self._radar_budget_retry(source, needed)
                     return
@@ -2189,7 +2206,7 @@ class AlmanacEmitter:
                         failures = self._radar_transport_failures.get(source, 0) + 1
                         self._radar_transport_failures[source] = failures
                         if source == 'iem-mrms-lcref' and failures < 3:
-                            # Keep the last completed crop even at a new geometry.
+                            # Keep the last completed scan even at a new viewport.
                             # Only repeated failed passes establish a transport outage.
                             if self._radar_result.available:
                                 self._radar_retained_refresh('failed')
@@ -2210,11 +2227,6 @@ class AlmanacEmitter:
                         return
             raise ValueError('; '.join(errors))
         except _RadarSuperseded:
-            if geometry_only:
-                return
-            if 'ctx' in locals():
-                self._radar_publish_refresh(ctx, state='superseded')
-                self._radar_superseded.append(dict(ctx['refresh'], intent=ctx['intent']))
             self._radar_restart = True
             # The worker's single-flight guard releases before its immediate wakeup.
             # The 100 ms watcher also sees the unserved preference stamp.
@@ -2225,6 +2237,8 @@ class AlmanacEmitter:
                     if retry in self._events:
                         self._events.remove(retry)
         except Exception as error:
+            if self._radar_result.ts_frame is None:
+                self._radar_result=self._radar_result._replace(available=self._radar_result.center is not None,reason='no radar tiles')
             if 'ctx' in locals():
                 if self._radar_result.available:
                     self._radar_retained_refresh('failed')
@@ -2241,47 +2255,36 @@ class AlmanacEmitter:
     @staticmethod
     def _radar_payload(snap, now, tz, refresh=None):
         def local(ts):
-            return datetime.fromtimestamp(ts, tz).strftime('%H:%M') if ts is not None else None
+            return datetime.fromtimestamp(ts,tz).strftime('%H:%M') if ts is not None else None
         complete = [f['ts'] for f in snap.frames if f['complete']]
-        gaps = [b - a for a, b in zip(complete, complete[1:]) if b > a]
-        legend = snap.legend
-        age = int(now - snap.ts_frame) if snap.ts_frame is not None else None
-        return dict(**({'basemap': snap.basemap} if snap.basemap else {}),
-            geometryOnly=snap.available and not snap.frames and snap.ts_frame is None,
-            available=snap.available, reason=snap.reason,
-            sourceMode=snap.source_mode, siteId=snap.site_id, sources=list(snap.sources),
-            sites=[dict(s, ageSec=int(now-s['newestTs']) if s['newestTs'] is not None else None) for s in snap.sites],
-            sitesConsidered=snap.sites_considered, sitesDrawn=len(snap.sites),
-            intent=(refresh or {}).get('intent', snap.intent),
-            refresh={k:v for k,v in (refresh or dict(state='idle', frameIndex=0, frameTotal=0, forSeq=0)).items() if k!='intent'},
-            sourcePref=snap.source_pref, sourceFallback=snap.source_fallback,
-            sitePreferred=snap.source_pref=='site', siteResumeZoom=RADAR_SITE_MIN_ZOOM,
-            scanningSlowly=snap.scanning_slowly, latestOnly=False,
-            sourceId=snap.source_id, attribution=snap.attribution, attributionUrl=snap.attribution_url,
-            provider=snap.provider, cadenceSec=snap.cadence, frameSpacingSec=median(gaps) if gaps else None,
-            historyGaps=any(g != snap.cadence for g in gaps),
-            historySpanSec=complete[-1] - complete[0] if complete else 0,
-            completeFrameCount=len(complete), partialCoverage=snap.partial_coverage, center=snap.center,
-            zoom=snap.zoom or RADAR_MAX_ZOOM,
-            zoomAuto=snap.zoom_desired is None, zoomAutoLevel=snap.zoom_auto_level,
-            zoomMin=RADAR_MIN_ZOOM, zoomMax=snap.max_zoom,
-            zoomSource='MRMS' if snap.source_id == 'iem-mrms-lcref' else 'NEXRAD' if snap.source_mode == 'site' else 'RainViewer',
-            zoomCapped=(snap.zoom_desired if snap.zoom_desired is not None else snap.zoom_auto_level) != snap.zoom,
-            zoomDesired=snap.zoom_desired,
-            viewport=dict(w=RADAR_VIEWPORT_W, h=RADAR_VIEWPORT_H),
-            bounds=snap.bounds, marker=snap.marker or dict(x=.5, y=.5), centered=snap.centered, metersPerPixel=snap.mpp,
-            scaleBar=snap.scalebar, rings=list(snap.rings or ()),
-            frames=[dict(f, at=local(f['ts'])) for f in snap.frames],
-            latest=snap.latest, frameCount=len(snap.frames), observedAt=local(snap.ts_frame),
-            observedTs=snap.ts_frame, ageSec=age, staleSec=snap.stale_sec,
-            # Stale means the feed stopped updating, not that the source runs late.
-            # A per-source threshold (already tuned above each provider's inherent
-            # freshest age: MRMS is skipped until ~5 min old because IEM 503s newer
-            # minutes, so 3*cadence=6 min would flag every healthy frame) — never a
-            # bare cadence multiple.
-            stale=age is not None and age >= snap.stale_sec,
-            fetchedAt=snap.ts_fetch, updatedAt=local(snap.ts_fetch), nexrad=snap.nexrad,
-            legend=dict(legend, remapped=next((f.get('legend', {}).get('remapped', False) for f in snap.frames if f['id']==snap.latest), False)))
+        gaps = [b-a for a,b in zip(complete,complete[1:]) if b>a]
+        age = int(now-snap.ts_frame) if snap.ts_frame is not None else None
+        factor = 1609.344 if snap.units == 'mi' else 1000
+        choices = [dict(meters=d*factor,label=f'{d} {snap.units}') for d in (5,10,20,25,50,100,150,200,250)]
+        tiles = dict(snap.tiles or {})
+        tiles['frames'] = [{k:v for k,v in dict(f,at=local(f['ts'])).items() if k not in ('complete','publishable','acquiredSites')}
+                           for f in tiles.get('frames',())]
+        return dict(available=snap.available,reason=snap.reason,geo=snap.geo,tiles=tiles,
+            sourceMode=snap.source_mode,siteId=snap.site_id,sources=list(snap.sources),
+            sites=[dict(s,ageSec=int(now-s['newestTs']) if s['newestTs'] is not None else None) for s in snap.sites],
+            sitesConsidered=snap.sites_considered,sitesDrawn=len(snap.sites),
+            refresh=refresh or dict(state='idle',frameIndex=0,frameTotal=0),
+            sourcePref=snap.source_pref,sourceFallback=snap.source_fallback,
+            sitePreferred=snap.source_pref=='site',siteResumeZoom=RADAR_SITE_MIN_ZOOM,
+            scanningSlowly=snap.scanning_slowly,latestOnly=False,
+            sourceId=snap.source_id,attribution=snap.attribution,attributionUrl=snap.attribution_url,
+            provider=snap.provider,cadenceSec=snap.cadence,frameSpacingSec=median(gaps) if gaps else None,
+            historyGaps=any(g!=snap.cadence for g in gaps),historySpanSec=complete[-1]-complete[0] if complete else 0,
+            completeFrameCount=len(complete),partialCoverage=snap.partial_coverage,center=snap.center,
+            zoomAuto=snap.zoom_desired is None,zoomAutoLevel=snap.zoom_auto_level,
+            zoomMin=RADAR_MIN_ZOOM,zoomMax=snap.max_zoom,
+            zoomSource='MRMS' if snap.source_id=='iem-mrms-lcref' else 'NEXRAD' if snap.source_mode=='site' else 'RainViewer',
+            zoomCapped=(snap.zoom_desired if snap.zoom_desired is not None else snap.zoom_auto_level)!=snap.zoom,
+            zoomDesired=snap.zoom_desired,units=snap.units,scaleChoices=choices,
+            rings=[dict(meters=float(r['label'].split()[0])*factor,label=r['label']) for r in snap.rings or ()],
+            frameCount=len(snap.frames),observedAt=local(snap.ts_frame),observedTs=snap.ts_frame,
+            ageSec=age,staleSec=snap.stale_sec,stale=age is not None and age>=snap.stale_sec,
+            fetchedAt=snap.ts_fetch,updatedAt=local(snap.ts_fetch),nexrad=snap.nexrad,legend=dict(snap.legend))
 
     def _check_version(self, _dt=None):
         """ Kick off a non-blocking GitHub version check on a daemon thread so a
@@ -3115,14 +3118,8 @@ class AlmanacEmitter:
         fc_snap     = self._fc_result
         alerts_snap = self._alerts_result
         with self._radar_lock:
-            radar_snap = self._radar_geometry_result or self._radar_result
+            radar_snap = self._radar_result
             radar_refresh = self._radar_refresh
-            try:
-                superseded = self._radar_superseded.popleft()
-                if superseded['forSeq'] >= radar_refresh['forSeq']:
-                    radar_refresh = superseded
-            except IndexError:
-                pass
         ver_snap    = self._ver_result
         fc_rows   = self._unify_today(
                         self._fc_daily_current(now_local.strftime('%Y-%m-%d'), fc_snap.daily),

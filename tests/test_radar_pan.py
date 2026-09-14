@@ -8,7 +8,7 @@ import pytest
 from PIL import Image
 
 from lib import almanac_emit as ae
-from lib.radar_geometry import MAX_LAT, plate_point, world_point, world_inverse
+from lib.radar_geometry import MAX_LAT, world_point, world_inverse
 from tests.test_radar_hybrid import hybrid  # noqa: F401
 from tests.test_freshness_health import _load_serve, _payload, _get, serve_at  # noqa: F401
 
@@ -89,44 +89,22 @@ def test_invalid_or_absent_center_is_station(make_emitter, hybrid, tmp_path, raw
         (tmp_path / 'radar_center').write_bytes(raw if isinstance(raw, bytes) else raw.encode())
     emitter = make_emitter(); emitter._do_radar()
     r = emitter._build_payload()['radar']
-    assert r['available'] and r['centered'] is True
-    assert r['center'] == dict(lat=47.61, lon=-122.33) and r['marker'] == dict(x=.5, y=.5)
+    assert r['available'] and 'centered' not in r
+    assert r['center'] == dict(lat=47.61, lon=-122.33) and 'marker' not in r
 
 
 @pytest.mark.parametrize('center', [(47.61, -122.6), (48.1, -122.33), (47.61, -122.33)])
-def test_override_crop_identity_marker_and_reset(make_emitter, hybrid, tmp_path, center):
-    import io
-    from PIL import ImageDraw
-    # Asymmetric tile landmarks make a wrong crop origin observable in the PNG,
-    # even when the station and override happen to use the same XYZ tile set.
-    tile = Image.new('RGBA', (256, 256), (0, 204, 0, 255))
-    draw = ImageDraw.Draw(tile)
-    draw.rectangle((37, 0, 42, 255), fill=(51, 102, 204, 255))
-    draw.rectangle((0, 89, 255, 96), fill=(255, 204, 0, 255))
-    stream = io.BytesIO(); tile.save(stream, 'PNG'); hybrid.tile = stream.getvalue()
-    emitter = make_emitter(); emitter._do_radar(); before = emitter._radar_result
-    hybrid.mono += 60; hybrid.calls.clear()
-    (tmp_path / 'radar_center').write_text(','.join(map(str, center)))
-    emitter._do_radar(); after = emitter._radar_result; r = emitter._build_payload()['radar']
-    centered = center == (47.61, -122.33)
-    tiles, mpp, bounds, _ = ae._radar_viewport(*center, before.zoom, 956, 490)
-    assert r['center'] == dict(zip(('lat', 'lon'), center))
-    assert r['zoom'] == before.zoom and r['centered'] is centered
-    assert (before.latest == after.latest) is centered
-    assert after.bounds == bounds and after.mpp == mpp
-    assert after.nexrad == before.nexrad  # selection stays tied to station
-    cx, cy = world_point(*center, r['zoom'])
-    mx, my = plate_point(47.61, -122.33, r['zoom'], cx - 478, cy - 245)
-    assert r['marker'] == (dict(x=.5, y=.5) if centered else dict(x=mx/956, y=my/490))
-    if not centered:
-        expected = Image.new('RGBA', (956, 490))
-        for _, _, dx, dy in tiles: expected.paste(ae.remap(tile, 'iem-mrms-lcref', ae._RADAR_LUT), (dx, dy))
-        with Image.open(Path(ae.RADAR_DIR) / (after.latest + '.png')) as actual:
-            assert actual.tobytes() == expected.tobytes()
-    hybrid.mono += 60
-    (tmp_path / 'radar_center').write_text('station'); emitter._do_radar()
-    assert emitter._radar_result.latest == before.latest
-    assert emitter._build_payload()['radar']['centered']
+def test_report_changes_tile_grid_without_changing_station_or_tile_bytes(make_emitter, hybrid, tmp_path, center):
+    emitter=make_emitter();emitter._do_radar();before=emitter._radar_result
+    old={p:p.read_bytes() for p in Path(ae.RADAR_DIR).glob('t/*/*/*/8/*/*.png')}
+    hybrid.mono+=60;(tmp_path/'radar_center').write_text(','.join(map(str,center)))
+    emitter._do_radar();after=emitter._radar_result;r=emitter._build_payload()['radar']
+    assert r['center']==dict(lat=47.61,lon=-122.33) and 'marker' not in r
+    _,mpp,bounds,_=ae._radar_viewport(*center,before.zoom,956,490)
+    assert after.bounds==bounds and after.mpp==mpp and after.nexrad==before.nexrad
+    assert all(p.read_bytes()==raw for p,raw in old.items())
+    (tmp_path/'radar_center').write_text('station');emitter._do_radar()
+    assert emitter._radar_result.center==before.center
 
 
 def test_pan_failure_keeps_entire_previous_snapshot(make_emitter, hybrid, tmp_path):
@@ -134,7 +112,8 @@ def test_pan_failure_keeps_entire_previous_snapshot(make_emitter, hybrid, tmp_pa
     (tmp_path / 'radar_center').write_text('48,-122')
     hybrid.failure = lambda *_: (_ for _ in ()).throw(urllib.error.URLError('offline'))
     emitter._do_radar()
-    assert emitter._radar_result is previous
+    assert emitter._radar_result.ts_frame==previous.ts_frame
+    assert emitter._radar_result.ts_fetch==previous.ts_fetch
 
 
 def test_center_wakes_same_single_flight_worker(make_emitter, tmp_path, monkeypatch):
@@ -160,7 +139,8 @@ def test_small_decimal_center_survives_writer_and_emitter(make_emitter, hybrid, 
     module._write_radar_center(['0.0000000001,-0.000000001'])
     assert (tmp_path / 'radar_center').read_text() == '0.0000000001,-0.000000001\n'
     emitter = make_emitter(); emitter._do_radar()
-    assert emitter._radar_result.center == dict(lat=1e-10, lon=-1e-9)
+    assert emitter._radar_result.center == dict(lat=47.61,lon=-122.33)
+    assert emitter._radar_result.bounds==ae._radar_viewport(1e-10,-1e-9,8,956,490)[2]
 
 
 def test_site_pan_beyond_all_range_circles_falls_back(make_emitter, hybrid, tmp_path, monkeypatch):
@@ -177,7 +157,7 @@ def test_site_pan_beyond_all_range_circles_falls_back(make_emitter, hybrid, tmp_
     assert r['available'] and r['sourceMode'] == 'mosaic'
     assert r['sitesConsidered'] == r['sitesDrawn'] == 0 and r['sites'] == []
     assert r['sources'][1]['reason'] == 'out of view'
-    assert r['center'] == dict(lat=47.61, lon=-130) and not r['centered']
+    assert r['center'] == dict(lat=47.61, lon=-122.33) and 'centered' not in r
 
 
 @pytest.mark.parametrize('failure', ['open', 'replace'])

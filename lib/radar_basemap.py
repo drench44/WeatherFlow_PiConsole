@@ -1,4 +1,4 @@
-"""Offline Natural Earth → class-only SVG. Standard library only at runtime."""
+"""Immutable opaque Natural Earth raster tiles; Pillow is used only in the worker."""
 from functools import lru_cache
 import json
 import math
@@ -7,8 +7,13 @@ from pathlib import Path
 import struct
 import tempfile
 import zlib
+import time
+from collections import deque
 
-from lib.radar_geometry import plate_point, world_point
+RENDER_TIMES = deque(maxlen=512)
+
+from lib.radar_geometry import world_point, world_inverse
+import hashlib
 
 DATA_PATH = Path(__file__).with_name('data') / 'radar-natural-earth.bin'
 CLASSES = ('bm-ocean', 'bm-lake', 'bm-coast', 'bm-admin0', 'bm-admin1', 'bm-road', 'bm-road')
@@ -130,73 +135,221 @@ def _cell(path, x, y):
     return entries
 
 
-def render(lat, lon, zoom, bounds, size=480, data_path=None):
-    """Select only intersecting 1° cells, unwrap them, project, clip and simplify."""
-    path = str(data_path or DATA_PATH)
-    quant, _, _ = _index(path)
-    cx,cy = world_point(lat,lon,zoom)
-    width, height = (size, size) if isinstance(size, (int, float)) else size
-    left,top = cx-width/2,cy-height/2
-    # Derive unwrapped longitudes from the crop itself, including -180 windows.
-    world = 256*2**zoom
-    west,east = left/world*360-180,(left+width)/world*360-180
-    layers = [[] for _ in CLASSES]
+def stitch(lines):
+    """Join degree-cell fragments at shared endpoints, without joining branches.
 
-    def projected(points, x, y):
-        return [plate_point(y+dy/quant,x+dx/quant,zoom,left,top) for dx,dy in points]
-
-    def path_data(points, closed=False):
-        points = [(round(x),round(y)) for x,y in points]
-        points = [p for i,p in enumerate(points) if not i or p != points[i-1]]
-        if closed and points and points[0] != points[-1]: points.append(points[0])
-        points = simplify(points)
-        if len(set(points)) < (3 if closed else 2):
-            return ''
-        if closed and not sum(a[0]*b[1]-b[0]*a[1] for a,b in zip(points,points[1:])):
-            return ''
-        return 'M'+'L'.join(f'{x},{y}' for x,y in points)+('Z' if closed else '')
-
-    for y in range(max(-86,math.floor(bounds['s'])),min(86,math.ceil(bounds['n']))):
-        for x in range(math.floor(west),math.ceil(east)):
-            for layer, geometry in _cell(path,(x+180)%360-180,y):
-                if layer < 2:
-                    rings = [path_data(clip_polygon(projected(r,x,y),size),True) for r in geometry]
-                    if rings and rings[0]:
-                        layers[layer].append(''.join(rings))
-                else:
-                    for line in clip_line(projected(geometry,x,y),size):
-                        d = path_data(line)
-                        if d: layers[layer].append(d)
-    # A single compound path per water class prevents alpha seams between cells.
-    # Even-odd fill is supplied by the semantic CSS rule (island/lake holes).
-    paths = []
-    for cls, pieces in zip(CLASSES,layers):
-        if pieces:
-            paths.append(f'<path class="{cls}" d="{"".join(pieces)}"/>')
-    svg = f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {width} {height}">' + ''.join(paths) + '</svg>\n'
-    return svg, dict(coast=bool(layers[0] or layers[1]),
-        roads='dense' if layers[6] else 'sparse' if layers[5] else 'none')
+    Quantized geographic endpoints (not rounded projected pixels) avoid joining
+    unrelated lines merely because they land on the same display pixel.
+    """
+    fragments = {i: list(line) for i, line in enumerate(lines) if len(line) >= 2}
+    ends = {}
+    key = lambda p: (round(p[0], 7), round(p[1], 7))
+    for i, line in fragments.items():
+        for p in (line[0], line[-1]):
+            ends.setdefault(key(p), set()).add(i)
+    output = []
+    while fragments:
+        ident, line = fragments.popitem()
+        for reverse in (False, True):
+            if reverse: line.reverse()
+            while True:
+                ids = ends.get(key(line[-1]), set())
+                candidates = ids.intersection(fragments)
+                if len(candidates) != 1 or len(ids) != 2: break
+                other = fragments.pop(candidates.pop())
+                if key(other[-1]) == key(line[-1]): other.reverse()
+                line.extend(other[1:])
+        output.append(line)
+    return output
 
 
-def ensure(ctx, radar_dir):
-    """Reuse an existing viewport even off-tab; create only on a viewed cycle."""
-    identity = ctx['identity']
-    target = Path(radar_dir) / 'basemap' / (identity+'.svg')
-    if target.is_file():
-        # Metadata is embedded as a JSON comment so the SVG is the only cache file.
-        with target.open() as stream:
-            metadata = json.loads(stream.readline()[4:-4])
-    elif ctx['viewed']:
-        svg, metadata = render(ctx['center']['lat'],ctx['center']['lon'],ctx['zoom'],ctx['bounds'],ctx.get('viewport', 480))
-        target.parent.mkdir(parents=True,exist_ok=True)
-        temp = None
-        try:
-            with tempfile.NamedTemporaryFile(mode='w',dir=target.parent,prefix=identity+'.tmp.',delete=False) as stream:
-                temp = stream.name
-                stream.write('<!--'+json.dumps(metadata,separators=(',',':'))+'-->\n'+svg)
-            os.replace(temp,target)
-        finally:
-            if temp and os.path.exists(temp): os.unlink(temp)
-    else:
-        return None
-    return dict(hash=identity,url='radar/basemap/'+identity+'.svg',**metadata)
+def ocean_runs(cells):
+    """Maximal horizontal runs of full-ocean degree cells."""
+    rows = {}
+    for x, y in cells: rows.setdefault(y, []).append(x)
+    for y, xs in sorted(rows.items()):
+        xs = sorted(set(xs)); start = end = xs[0]
+        for x in xs[1:] + [None]:
+            if x == end + 1:
+                end = x; continue
+            yield [(start,y), (end+1,y), (end+1,y+1), (start,y+1), (start,y)]
+            start = end = x
+
+
+# Both tables are normative resolved composites: land, water, then each stroke
+# over land/water. Coverage overwrites previous strokes, never blends with them.
+STYLE_REVISION = b'plate-paper-inset-night:1'
+RENDER_REVISION = b'png8-evenodd-dp05-box4-overwrite:1'
+STYLES = {
+    'paper': ('EBE6DB','DFDCD4', [('9BA9AE','95A3AA'),('9F9B90','99968C'),
+                ('CFCBC0','C5C2BA'),('BAB6AB','B2AFA6'),('BAB6AB','B2AFA6')]),
+    'night': ('0B0D11','151B21', [('3F525F','445A68'),('686766','6D6E6E'),
+                ('575756','5E6061'),('464747','4D5052'),('464747','4D5052')]),
+}
+
+@lru_cache(maxsize=1)
+def version(data_path=None):
+    return hashlib.sha256(Path(data_path or DATA_PATH).read_bytes()+STYLE_REVISION+RENDER_REVISION+
+                          repr(STYLES).encode()).hexdigest()[:12]
+
+@lru_cache(maxsize=2)
+def palette(theme):
+    ground, water, strokes = STYLES[theme]
+    rgb = lambda h: tuple(bytes.fromhex(h))
+    backdrops = [rgb(ground),rgb(water)]
+    colors = list(backdrops)
+    for pair in strokes:
+        for backdrop, full in zip(backdrops,map(rgb,pair)):
+            for coverage in range(1,17):
+                colors.append(tuple((b*(16-coverage)+f*coverage+8)//16 for b,f in zip(backdrop,full)))
+    return colors
+
+
+def tile_layers(z,x,y,data_path=None):
+    path=str(data_path or DATA_PATH);quant,index,_=_index(path)
+    # A one-pixel gutter gives strokes continuous coverage across tile edges.
+    north,west=world_inverse(x*256-1,y*256-1,z)
+    south,east=world_inverse((x+1)*256+1,(y+1)*256+1,z)
+    layers=[[] for _ in CLASSES];ocean=[]
+    for sy in range(max(-86,math.floor(south)),min(86,math.ceil(north))):
+        for sx in range(math.floor(west),math.ceil(east)):
+            wrapped=(sx+180)%360-180
+            offset,length=struct.unpack_from('<II',index,((sy+90)*360+wrapped+180)*8)
+            if not length and offset==1:
+                ocean.append((sx,sy));continue
+            for layer,geometry in _cell(path,wrapped,sy):
+                if layer==4 and z<5 or layer==5 and z<6 or layer==6 and z<8:continue
+                for ring in geometry if layer<2 else [geometry]:
+                    layers[layer].append([(sx+dx/quant,sy+dy/quant) for dx,dy in ring])
+    layers[0].extend(ocean_runs(ocean))
+    for layer in range(2,7):layers[layer]=stitch(layers[layer])
+    for layer,rings in enumerate(layers):
+        output=[]
+        for ring in rings:
+            points=[(px-x*256+1,py-y*256+1) for lon,lat in ring for px,py in [world_point(lat,lon,z)]]
+            pieces=[clip_polygon(points,258)] if layer<2 else clip_line(points,258)
+            for piece in pieces:
+                simplified=simplify(piece,.5)
+                if len(simplified)>=(3 if layer<2 else 2):output.append([(px-1,py-1) for px,py in simplified])
+        layers[layer]=output
+    return layers
+
+
+def evenodd_mask(rings):
+    """One scanline pass for all compound rings; pixel centres, half-open edges."""
+    from PIL import Image
+    rows=[[] for _ in range(256)]
+    for ring in rings:
+        for a,b in zip(ring,ring[1:]+ring[:1]):
+            if a[1]==b[1]:continue
+            if a[1]>b[1]:a,b=b,a
+            for y in range(max(0,math.ceil(a[1]-.5)),min(256,math.ceil(b[1]-.5))):
+                rows[y].append(math.ceil(a[0]+(y+.5-a[1])*(b[0]-a[0])/(b[1]-a[1])-.5))
+    raw=bytearray(65536)
+    for y,crossings in enumerate(rows):
+        crossings.sort()
+        for left,right in zip(crossings[::2],crossings[1::2]):
+            left,right=max(0,left),min(256,right)
+            if right>left:raw[y*256+left:y*256+right]=bytes([1])*(right-left)
+    return Image.frombytes('L',(256,256),bytes(raw))
+
+
+def tile(theme,z,x,y,data_path=None):
+    """256px opaque PNG-8; fixed 162-entry palette, no dither or alpha."""
+    from PIL import Image,ImageDraw
+    import io
+    if theme not in STYLES or type(z) is not int or not 4<=z<=10 or any(type(n) is not int or not 0<=n<2**z for n in (x,y)):
+        raise ValueError('invalid basemap tile')
+    started=time.perf_counter()
+    layers=tile_layers(z,x,y,data_path)
+    fill=evenodd_mask(layers[0]+layers[1]);backdrop=fill.tobytes();pixels=bytearray(backdrop)
+    coverage=Image.new('L',(1024,1024));draw=ImageDraw.Draw(coverage)
+    for layer in range(2,7):
+        draw.rectangle((0,0,1024,1024),fill=0)
+        for line in layers[layer]:
+            if layer!=4:draw.line([(round(px*4),round(py*4)) for px,py in line],fill=255,width=4)
+            else:
+                phase=0.
+                for a,b in zip(line,line[1:]):
+                    length=math.hypot(b[0]-a[0],b[1]-a[1]);pos=0.
+                    while pos<length:
+                        step=min(length-pos,(4 if phase<4 else 7)-phase)
+                        if phase<4 and length:
+                            points=[(round((a[0]+(b[0]-a[0])*t/length)*4),round((a[1]+(b[1]-a[1])*t/length)*4)) for t in (pos,pos+step)]
+                            draw.line(points,fill=255,width=4)
+                        pos+=step;phase=(phase+step)%7
+        reduced=coverage.reduce(4)
+        for i,value in enumerate(reduced.tobytes()):
+            if value: pixels[i]=2+(layer-2)*32+backdrop[i]*16+min(16,(value+8)//16)-1
+        reduced.close()
+    image=Image.frombytes('P',(256,256),bytes(pixels));image.putpalette([v for color in palette(theme) for v in color])
+    out=io.BytesIO();image.save(out,'PNG',optimize=False,compress_level=9)
+    image.close();fill.close();coverage.close()
+    raw=out.getvalue()
+    RENDER_TIMES.append(dict(theme=theme,z=z,x=x,y=y,ms=(time.perf_counter()-started)*1000,bytes=len(raw)))
+    return raw
+
+
+def tile_path(radar_dir,theme,z,x,y):
+    return Path(radar_dir)/'geo'/version()/theme/str(z)/str(x%2**z)/f'{y}.png'
+
+
+def remove_empty_parents(path,root):
+    parent=path.parent
+    while parent!=root and root in parent.parents:
+        try:parent.rmdir()
+        except OSError:break
+        parent=parent.parent
+
+
+def home_requests(station,home_zoom=8,theme='paper'):
+    home_zoom=max(4,min(10,home_zoom))
+    levels=list(dict.fromkeys([home_zoom,home_zoom-1,home_zoom+1,4]+sorted(range(4,11),key=lambda z:abs(z-home_zoom))))
+    for theme in (theme,'night' if theme=='paper' else 'paper'):
+        for z in levels:
+            if not 4<=z<=10:continue
+            px,py=world_point(*station,z);cx,cy=int(px//256),int(py//256)
+            offsets=sorted(((dx,dy) for dy in range(-2,3) for dx in range(-3,4)),key=lambda d:(abs(d[0])>2 or abs(d[1])>1,math.hypot(*d)))
+            for dx,dy in offsets:
+                if 0<=cy+dy<2**z:yield theme,z,(cx+dx)%2**z,cy+dy
+
+
+def prune(radar_dir,pinned=(),incoming_size=0,incoming_files=0):
+    root=Path(radar_dir)/'geo';pinned=set(pinned);records=[]
+    for p in root.glob('*/*/*/*/*.png'):
+        st=p.stat();records.append((p in pinned,st.st_atime,st.st_size,p))
+    count,size=len(records),sum(r[2] for r in records)
+    for pin,_,length,p in sorted(records):
+        if count+incoming_files<=6000 and size+incoming_size<=32_000_000:break
+        if pin:continue
+        p.unlink(missing_ok=True);remove_empty_parents(p,root);count-=1;size-=length
+    return count+incoming_files<=6000 and size+incoming_size<=32_000_000
+
+
+def cache_tile(radar_dir,theme,z,x,y,pinned=()):
+    target=tile_path(radar_dir,theme,z,x,y)
+    if target.is_file():return target
+    raw=tile(theme,z,x,y)
+    if not prune(radar_dir,pinned,len(raw),1):return None
+    target.parent.mkdir(parents=True,exist_ok=True);temp=None
+    try:
+        with tempfile.NamedTemporaryFile(dir=target.parent,prefix='.tile-',delete=False) as out:
+            temp=out.name;out.write(raw)
+        os.replace(temp,target)
+    finally:
+        if temp and os.path.exists(temp):os.unlink(temp)
+    return target
+
+
+def warm(radar_dir,station,center,zoom,home_zoom=8,theme='paper',limit=1):
+    """One worker quantum, home order first, then the settled viewport."""
+    requests=list(home_requests(station,home_zoom,theme))
+    pinned={tile_path(radar_dir,*r) for r in requests}
+    px,py=world_point(center['lat'],center['lon'],zoom)
+    requests.extend((theme,zoom,x%2**zoom,y) for y in range(max(0,int(py//256)-2),min(2**zoom,int(py//256)+3)) for x in range(int(px//256)-3,int(px//256)+4))
+    made=0
+    for r in dict.fromkeys(requests):
+        if not tile_path(radar_dir,*r).is_file():
+            cache_tile(radar_dir,*r,pinned=pinned);made+=1
+            if made>=limit:break
+    return made

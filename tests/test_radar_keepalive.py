@@ -267,63 +267,8 @@ def test_repeated_transport_outage_falls_back_and_recovers(make_emitter, hybrid)
     assert emitter._radar_result.source_id == 'iem-mrms-lcref'
 
 
-@pytest.mark.parametrize('busy', [False, True])
-def test_geometry_after_failed_pass_does_not_wait_for_retry_or_worker(make_emitter, hybrid, tmp_path, monkeypatch, busy):
-    emitter = make_emitter(); emitter._do_radar()
-    clock = FakeClock(); monkeypatch.setattr(ae, 'Clock', clock); emitter._running = True
-    hybrid.failure = lambda *args: (_ for _ in ()).throw(ConnectionResetError())
-    emitter._do_radar()
-    assert emitter._retries['radar'].timeout == 2
-    emitter._radar_cooldowns['iem-mrms-lcref'] = 60
-    if busy: emitter._inflight.add('radar')
-    else:
-        # Execute the worker deterministically before advancing the fake UI clock.
-        monkeypatch.setattr(emitter, '_spawn', lambda key, worker: worker())
-    intent = dict(seq=2, zoom=6, source='mosaic', center='station')
-    (tmp_path/'radar_intent').write_text(json.dumps(intent))
-    hybrid.calls.clear()
-    start = time.perf_counter()
-    emitter._check_radar_zoom()
-    clock.advance(0)  # inspect the actual wx.json publication
-    result = json.loads((tmp_path/'wx.json').read_text())['radar']
-    elapsed = (time.perf_counter()-start)*1000
-    print(f'geometry after failure: {elapsed:.1f} ms; busy={busy}')
-    assert clock.now == 0  # neither the two-second retry nor a worker wait was needed
-    assert result['intent'] == intent and result['geometryOnly'] and result['zoom'] == 6
-    assert not hybrid.calls
-    emitter._inflight.clear(); emitter.stop()
 
 
-def test_new_map_survives_old_worker_drain(make_emitter, hybrid, tmp_path, monkeypatch):
-    emitter = make_emitter(); emitter._do_radar()
-    clock = FakeClock(); monkeypatch.setattr(ae, 'Clock', clock); emitter._running = True
-    hybrid.failure = lambda *args: (_ for _ in ()).throw(ConnectionResetError())
-    emitter._do_radar()
-    entered, release = threading.Event(), threading.Event()
-    def stalled(*args):
-        entered.set()
-        assert release.wait(5)
-        raise ConnectionResetError('old pass')
-    hybrid.failure = stalled
-    emitter._check_radar()
-    try:
-        assert entered.wait(5)
-        intent = dict(seq=3, zoom=7, source='mosaic', center='station')
-        (tmp_path/'radar_intent').write_text(json.dumps(intent))
-        start = time.perf_counter()
-        emitter._check_radar_zoom(); clock.advance(0)
-        r = json.loads((tmp_path/'wx.json').read_text())['radar']
-        elapsed = (time.perf_counter()-start)*1000
-        print(f'geometry while real failed worker drains: {elapsed:.1f} ms')
-        assert elapsed < 100
-        assert r['geometryOnly'] and r['intent'] == intent
-        assert 'radar' in emitter._inflight
-    finally:
-        release.set()
-        until(lambda: 'radar' not in emitter._inflight)
-    assert emitter._radar_superseded[-1]['state'] == 'superseded'
-    assert emitter._build_payload()['radar']['intent'] == intent
-    emitter.stop()
 
 
 def test_retry_obeys_shared_request_gate(make_emitter, origin):

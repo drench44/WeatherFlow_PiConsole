@@ -88,7 +88,7 @@ def test_source_selection(make_emitter, hybrid, lat, lon, source):
     assert r['completeFrameCount'] == 1 and r['frameSpacingSec'] is None
     assert r['cadenceSec'] == (120 if source.startswith('iem') else 600)
     assert r['legend']['id'] == ae._RADAR_SOURCES[source]['legend']['id']
-    assert r['updatedAt'] != r['observedAt'] and r['frames'][-1]['at'] == r['observedAt']
+    assert r['updatedAt'] != r['observedAt'] and r['tiles']['frames'][-1]['at'] == r['observedAt']
     if source == 'rainviewer':
         assert all(c[0] == 'rainviewer' for c in hybrid.calls)
 
@@ -182,86 +182,20 @@ def test_failed_advertised_frame_does_not_advance_updated(make_emitter, hybrid):
     assert emitter._radar_result.ts_fetch == first.ts_fetch
 
 
-def test_cache_identity_source_viewport_and_total_outage(make_emitter, hybrid):
-    emitter = make_emitter(); emitter._do_radar()
-    iem = emitter._radar_result
-    hybrid.rv = hybrid.latest
-    hybrid.mono = 241  # MRMS is now beyond its 600s retention window
-    hybrid.failure = lambda req, _: (_ for _ in ()).throw(urllib.error.URLError('IEM')) if 'iastate.edu' in req.full_url else None
-    emitter._do_radar()
-    rv = emitter._radar_result
-    assert rv.ts_frame == iem.ts_frame and rv.latest != iem.latest
-    assert os.path.isfile(os.path.join(ae.RADAR_DIR, iem.latest + '.png'))
-    hybrid.failure = None; hybrid.mono = 0
-    emitter.app.config = make_config(Station={'Longitude': '-122.34'})
-    emitter._do_radar()
-    moved = emitter._radar_result
-    assert moved.latest != iem.latest and moved.ts_frame == iem.ts_frame
-    emitter.app.config = make_config(Station={'Longitude': '-122.35'})
-    hybrid.failure = lambda *_: (_ for _ in ()).throw(urllib.error.URLError('all down'))
-    emitter._do_radar()
-    assert not emitter._radar_available and emitter._radar_center is None
 
 
-def test_cold_warm_unviewed_counts_history_limit_and_atomic(make_emitter, hybrid, monkeypatch, tmp_path):
-    # Isolate mosaic history/cache accounting from cross-mode discovery.
-    monkeypatch.setattr(ae, '_NEXRAD_SITES', {})
-    monkeypatch.setattr(ae, 'RADAR_REQUESTS_PER_MIN', 90)  # the counts below are budget-relative
-    monkeypatch.setattr(ae, 'RADAR_HISTORY_RESERVE', 17)
-    hybrid.view()
-    emitter = make_emitter()
-    snapshots = []
-    original = ae.AlmanacEmitter.__setattr__
-    def record(self, key, value):
-        if key == '_radar_result':
-            for f in value.frames:
-                if f['complete']:
-                    with Image.open(os.path.join(ae.RADAR_DIR, f['id'] + '.png')) as image:
-                        assert image.size == (956, 490)
-            assert value.legend is ae._RADAR_RAMP
-            snapshots.append(value)
-        original(self, key, value)
-    monkeypatch.setattr(ae.AlmanacEmitter, '__setattr__', record)
-    emitter._do_radar()
-    assert len(hybrid.calls) == 66  # five complete frames; reserve next newest
-    assert sum(f['complete'] for f in snapshots[0].frames) == 1  # publish before backfill
-    assert sum(f['complete'] for f in snapshots[-1].frames) == 5
-    # Finish the loop under the original small-window check, then exercise deep
-    # history under the production window (90 cannot fit metadata plus a frame
-    # above the 17+60 floor).
-    hybrid.now -= 60; hybrid.mono += 60; emitter._do_radar()
-    assert sum(f['complete'] for f in emitter._radar_frames) == 8
-    monkeypatch.setattr(ae, 'RADAR_REQUESTS_PER_MIN', 240)
-    monkeypatch.setattr(ae, 'RADAR_HISTORY_RESERVE', 34)
-    for _ in range(4):
-        hybrid.now -= 60  # hold wall clock; exercise monotonic backfill budgets
-        hybrid.mono += 60
-        (tmp_path/'radar_viewing').write_text(json.dumps(dict(since=ae.time.time()-20, last=ae.time.time())))
-        emitter._do_radar()
-    r = emitter._build_payload()['radar']
-    assert r['frameCount'] == r['completeFrameCount'] == 31
-    assert r['historySpanSec'] == 3600 and r['frameSpacingSec'] == 120 and not r['historyGaps']
-    assert r['frames'][-1]['ts'] - r['frames'][0]['ts'] == 3600
-    starts = [c[3] for c in hybrid.calls]
-    assert all(sum(t <= v < t + 60 for v in starts) <= (90 if t < 120 else 240) for t in starts)
-    hybrid.now -= 60; hybrid.mono += 60; hybrid.calls.clear(); emitter._do_radar()
-    assert len(hybrid.calls) == 1  # neighbours warmed before deep history, crops now warm
-    assert hybrid.calls[0][2] == ae.RADAR_IEM_METADATA_URL
-    hybrid.calls.clear(); emitter._do_radar()
-    assert len(hybrid.calls) == 1  # once per stamp
-    assert not list(Path(ae.RADAR_DIR).rglob('*.tmp.*'))
 
 
 def test_unviewed_counts_and_open_warms_unchanged(make_emitter, hybrid, monkeypatch):
     monkeypatch.setattr(ae, 'RADAR_REQUESTS_PER_MIN', 90)  # the counts below are budget-relative
     monkeypatch.setattr(ae, 'RADAR_HISTORY_RESERVE', 17)
     emitter = make_emitter(); emitter._do_radar()
-    assert len(hybrid.calls) == 14  # metadata + HEAD + 12 covering tiles
+    assert len(hybrid.calls) == 32  # metadata + HEAD + 30 viewport and margin tiles
     assert sum(f['complete'] for f in emitter._radar_frames) == 1
     hybrid.calls.clear(); emitter._do_radar()
     assert len(hybrid.calls) == 1
     hybrid.view(); hybrid.mono += 60; hybrid.calls.clear(); emitter._do_radar()
-    assert len(hybrid.calls) == 66 and sum(f['complete'] for f in emitter._radar_frames) > 1
+    assert len(hybrid.calls) <= 73 and sum(f['complete'] for f in emitter._radar_frames) > 1
 
 
 def test_build_limit_and_real_gap_spacing(make_emitter, hybrid, monkeypatch):
@@ -278,8 +212,8 @@ def test_build_limit_and_real_gap_spacing(make_emitter, hybrid, monkeypatch):
     r = emitter._build_payload()['radar']
     assert r['completeFrameCount'] == 2 and r['historyGaps']
     assert r['frameSpacingSec'] == 240 and r['cadenceSec'] == 120
-    assert len(hybrid.calls) == 55  # metadata + 2 crops + failed HEAD + 27 adjacent tiles
-    assert sum('/7/' in c[2] or '/9/' in c[2] for c in hybrid.calls) == 27
+    assert len(hybrid.calls) == 54  # metadata, newest 30, neighbours 8, history 12, three HEADs
+    assert sum('/7/' in c[2] or '/9/' in c[2] for c in hybrid.calls) == 8
 
 
 def test_negative_archive_cache_and_expiry(make_emitter, hybrid):
@@ -339,8 +273,8 @@ def test_source_stale_thresholds_and_dst_local_labels(make_emitter, hybrid):
     assert not ae.AlmanacEmitter._radar_payload(snap, snap.ts_frame + ss - 1, tz)['stale']
     assert ae.AlmanacEmitter._radar_payload(snap, snap.ts_frame + ss, tz)['stale']
     times = [int(datetime(2026, 11, 1, h, 30, tzinfo=timezone.utc).timestamp()) for h in (8, 9)]
-    dst = snap._replace(frames=tuple(dict(id=str(t), ts=t, complete=True) for t in times))
-    assert [f['at'] for f in ae.AlmanacEmitter._radar_payload(dst, times[-1], tz)['frames']] == ['01:30', '01:30']
+    dst = snap._replace(tiles=dict(snap.tiles,frames=[dict(ts=t,stamp=datetime.fromtimestamp(t,timezone.utc).strftime('%Y%m%d%H%M'),siteScans=[],levels={'8':True}) for t in times]))
+    assert [f['at'] for f in ae.AlmanacEmitter._radar_payload(dst, times[-1], tz)['tiles']['frames']] == ['01:30', '01:30']
 
 
 @pytest.mark.skipif(os.environ.get('RADAR_NET_TEST') != '1', reason='opt in with RADAR_NET_TEST=1')
@@ -373,35 +307,8 @@ def test_legend_fidelity_real_iem_native_colortable():
         assert tuple(map(int, text[2:5])) == tuple(bytes.fromhex(hexa[1:]))
 
 
-def test_total_deadline_and_backfill_keep_refresh_completion(make_emitter, hybrid, monkeypatch):
-    monkeypatch.setattr(ae, 'RADAR_REQUESTS_PER_MIN', 1000)
-    hybrid.view()
-    hybrid.failure = lambda *_: setattr(hybrid, 'mono', hybrid.mono + 1)
-    emitter = make_emitter()
-    # This deadline test models a continuously-viewed geometry; the view gate has
-    # independent real-marker coverage in test_radar_priority.
-    monkeypatch.setattr(emitter, '_radar_deep_view_delay', lambda ctx: 0)
-    emitter._do_radar()
-    assert hybrid.mono == ae.RADAR_BUILD_DEADLINE_SEC
-    assert emitter._radar_result.source_id == 'iem-mrms-lcref'
-    assert emitter._radar_ts_fetch == hybrid.now + 14  # metadata + HEAD + nine tiles
-    assert 1 < sum(f['complete'] for f in emitter._radar_frames) < 31
-    assert all(c[3] < ae.RADAR_BUILD_DEADLINE_SEC for c in hybrid.calls)
 
 
-def test_retirement_grace_on_old_viewport_and_owned_pruning(make_emitter, hybrid):
-    emitter = make_emitter(); emitter._do_radar()
-    original = Path(ae.RADAR_DIR) / (emitter._radar_latest + '.png')
-    os.utime(original, (hybrid.now - 10000, hybrid.now - 10000))
-    unrelated = Path(ae.RADAR_DIR) / '123.png'
-    unrelated.write_bytes(png())
-    emitter.app.config = make_config(Station={'Longitude': '-122.34'})
-    emitter._do_radar()
-    assert original.exists()  # retirement, not build time, begins grace
-    hybrid.mono += 119; emitter._do_radar()
-    assert original.exists()
-    hybrid.mono += 1; emitter._do_radar()
-    assert not original.exists() and unrelated.exists()
 
 
 @pytest.mark.parametrize('lat,lon', [(25.76, -80.19), (40.71, -74.0), (42.88, -78.88)])

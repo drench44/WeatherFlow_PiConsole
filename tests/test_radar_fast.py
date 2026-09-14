@@ -17,30 +17,6 @@ from tests.test_emitter_lifecycle import FakeClock
 from tests.fixtures.config import make_config
 
 
-def test_geometry_precedes_every_request(make_emitter, hybrid, tmp_path):
-    hybrid.view()
-    emitter = make_emitter()
-    emitter._do_radar()
-    previous = emitter._radar_result
-    emitter._radar_tiles.clear()  # neighbours now warm before deep history; exercise a cold request
-    intent = dict(seq=42, zoom=7, source='mosaic', center=dict(lat=47.7, lon=-122.2))
-    (tmp_path/'radar_intent').write_text(json.dumps(intent))
-    seen = []
-    def inspect(req, timeout):
-        if not seen:
-            r = emitter._build_payload()['radar']
-            assert r['geometryOnly'] and r['frames'] == [] and r['latest'] is None
-            assert r['intent'] == intent and r['refresh'] == dict(state='newest', frameIndex=0, frameTotal=31, forSeq=42)
-            assert r['zoom'] == 7 and r['center'] == intent['center']
-            assert r['bounds'] == ae._radar_viewport(47.7, -122.2, 7, 956, 490)[2]
-            assert r['marker'] != dict(x=.5,y=.5) and r['rings'] and r['scaleBar']
-            assert (Path(ae.RADAR_DIR)/'basemap'/(r['basemap']['hash']+'.svg')).is_file()
-            assert emitter._radar_result is previous
-            seen.append(r)
-    hybrid.failure = inspect
-    emitter._do_radar()
-    assert seen and emitter._radar_result.zoom == 7
-    assert not emitter._build_payload()['radar']['geometryOnly']
 
 
 def test_immediate_emit_coalesces_and_stays_on_clock_thread(make_emitter, monkeypatch):
@@ -72,16 +48,16 @@ def test_immediate_emit_coalesces_and_stays_on_clock_thread(make_emitter, monkey
 
 def test_pan_reuses_native_tiles_without_requests(make_emitter, hybrid, tmp_path, monkeypatch):
     emitter = make_emitter(); emitter._do_radar()
-    first = emitter._radar_latest
+    first = emitter._radar_result.tiles
     cached = set(emitter._radar_tiles)
-    assert len(cached) == 12
+    assert len(cached) == 30
     hybrid.calls.clear()
     (tmp_path/'radar_center').write_text('47.611,-122.331')
     emitter._do_radar()
-    assert emitter._radar_latest != first
+    assert emitter._radar_result.tiles == first
     assert set(emitter._radar_tiles) == cached
     assert not any('mrms::' in call[2] for call in hybrid.calls)
-    # Palette revisions change cropped PNGs, never immutable native tile bytes.
+    # Palette revisions change remapped tiles, never immutable native tile bytes.
     monkeypatch.setattr(ae, 'REMAP_REVISION', 'test-next-palette')
     hybrid.calls.clear(); emitter._do_radar()
     assert not any('mrms::' in call[2] for call in hybrid.calls)
@@ -193,37 +169,3 @@ def test_transport_six_leases_reuse_idle_expiry_and_error(monkeypatch):
     with session.open(req,10): pass
     assert len(conns)==7 and lookup.call_count==1
     session.close()
-
-
-@pytest.mark.skipif(os.environ.get('RADAR_NET_TEST')!='1',reason='opt in with RADAR_NET_TEST=1')
-def test_live_seattle_zoom_sequence(make_emitter, tmp_path, monkeypatch):
-    """Real provider, map/newest/history phases; change intent while history begins."""
-    monkeypatch.setattr(ae,'RADAR_DIR',str(tmp_path/'radar'))
-    monkeypatch.setattr(ae.Logger,'warning',print)
-    (tmp_path/'radar_viewed').write_text(str(time.time()))
-    emitter=make_emitter(config=make_config(Station={'Latitude':'47.61','Longitude':'-122.33'}))
-    original=emitter._radar_publish_refresh
-    reports=[]
-    for seq,z in enumerate((8,7,6),1):
-        (tmp_path/'radar_intent').write_text(json.dumps(dict(seq=seq,zoom=z,source='mosaic',center='station')))
-        start=time.perf_counter(); phases={}; requests=len(emitter._radar_request_times)
-        def publish(ctx, **changes):
-            original(ctx,**changes)
-            elapsed=round((time.perf_counter()-start)*1000,1)
-            if ctx.get('geometry_result') is not None: phases.setdefault('map_ms',elapsed)
-            elif emitter._radar_result.zoom==z and emitter._radar_result.available:
-                count=sum(f['complete'] for f in emitter._radar_result.frames)
-                phases.setdefault('newest_ms',elapsed)
-                if count>=2:
-                    phases.setdefault('history_ms',elapsed)
-                if z>6:
-                    (tmp_path/'radar_intent').write_text(json.dumps(dict(seq=seq+1,zoom=z-1,source='mosaic',center='station')))
-        monkeypatch.setattr(emitter,'_radar_publish_refresh',publish)
-        emitter._do_radar()
-        phases.update(zoom=z,elapsed_ms=round((time.perf_counter()-start)*1000,1),
-                      requests=len(emitter._radar_request_times)-requests,tiles_cached=len(emitter._radar_tiles),
-                      source=emitter._radar_result.source_id,refresh=emitter._radar_refresh['state'])
-        print('Seattle v3.1',json.dumps(phases),flush=True);reports.append(phases)
-        assert 'newest_ms' in phases and phases['map_ms']<phases['newest_ms']
-        assert emitter._radar_result.source_id=='iem-mrms-lcref'
-    assert 'history_ms' in reports[-1]

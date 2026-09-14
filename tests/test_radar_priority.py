@@ -46,12 +46,11 @@ def test_request_order_loop_neighbours_deep_and_resume(make_emitter, hybrid, tmp
     emitter._schedule_retry = lambda key, callback, delay: retries.append(delay)
     emitter._do_radar()
     newest = hybrid.latest
-    expected = [(stamp(newest-120*i), 8) for i in range(8) for _ in range(12)]
-    expected += [(stamp(newest), 7)]*15 + [(stamp(newest), 9)]*12
-    expected += [(stamp(newest-120*8), 8)]*12
+    expected = [(stamp(newest),8)]*30 + [(stamp(newest),7)]*4 + [(stamp(newest),9)]*4
+    expected += [(stamp(newest-120*i),8) for i in range(1,9) for _ in range(12)]
     assert tiles(hybrid.calls) == expected
     assert sum(f['complete'] for f in emitter._radar_frames) == 9
-    assert len(emitter._radar_request_times) == 145
+    assert len(emitter._radar_request_times) == 144
     assert ae.RADAR_REQUESTS_PER_MIN-len(emitter._radar_request_times) >= 34+60
     assert retries[-1] == 60
     assert emitter._radar_refresh['state'] == 'idle'
@@ -59,7 +58,7 @@ def test_request_order_loop_neighbours_deep_and_resume(make_emitter, hybrid, tmp
     # A retry with no capacity cannot consume any deep-history headroom.
     hybrid.calls.clear(); emitter._do_radar(intent_triggered=False)
     assert not tiles(hybrid.calls)
-    assert len(emitter._radar_request_times) == 146  # scheduled metadata only
+    assert len(emitter._radar_request_times) == 145  # scheduled metadata only
     # Natural expiry resumes the pending older slots, without re-warming this stamp.
     hybrid.mono += 60; viewing(hybrid, tmp_path); hybrid.calls.clear()
     emitter._do_radar(intent_triggered=False)
@@ -76,10 +75,10 @@ def test_scheduled_new_stamp_repeats_tiers_before_deep(make_emitter, hybrid, tmp
     viewing(hybrid, tmp_path); hybrid.calls.clear()
     emitter._do_radar(intent_triggered=False)
     calls = tiles(hybrid.calls)
-    # Seven loop crops are already warm: only the new newest precedes neighbours.
-    assert calls[:12] == [(stamp(hybrid.latest), 8)]*12
-    assert calls[12:39] == [(stamp(hybrid.latest), 7)]*15 + [(stamp(hybrid.latest), 9)]*12
-    assert calls[39:] and all(z == 8 and t < stamp(hybrid.latest-7*120) for t,z in calls[39:])
+    # History grids are warm; a new newest fills its margin before neighbours.
+    assert calls[:30] == [(stamp(hybrid.latest),8)]*30
+    assert calls[30:38] == [(stamp(hybrid.latest),7)]*4 + [(stamp(hybrid.latest),9)]*4
+    assert calls[38:] and all(z==8 and t<stamp(hybrid.latest-7*120) for t,z in calls[38:])
     assert hybrid.calls[0][2] == ae.RADAR_IEM_METADATA_URL
 
 
@@ -96,9 +95,9 @@ def test_press_during_deep_is_native_tile_cached(make_emitter, hybrid, tmp_path,
             (tmp_path/'radar_zoom').write_text('7')
     hybrid.failure = press
     emitter._do_radar()
-    assert changed and emitter._radar_refresh['state'] == 'superseded'
+    assert changed and emitter._radar_restart and emitter._radar_refresh['state'] != 'superseded'
     assert 1 <= tiles(hybrid.calls).count((stamp(hybrid.latest-8*120), 8)) <= 4
-    assert len([k for k in emitter._radar_tiles if k[3] == hybrid.latest and k[4] == 7]) == 15
+    assert len([k for k in emitter._radar_tiles if k[3] == hybrid.latest and k[4] == 7]) == 4
     hybrid.failure = advance; hybrid.calls.clear()
     original = emitter._radar_publish_refresh
     published = []
@@ -110,8 +109,9 @@ def test_press_during_deep_is_native_tile_cached(make_emitter, hybrid, tmp_path,
     start = hybrid.mono
     emitter._do_radar()
     assert emitter._radar_result.zoom == 7
-    assert published and published[0] == (start, [])  # no GET, HEAD, metadata or budget wait
-    assert (stamp(hybrid.latest), 7) not in tiles(hybrid.calls)
+    assert published and published[0][0] == start  # only cold tiles, no metadata or budget wait
+    assert all(c[1]!='HEAD' and c[2]!=ae.RADAR_IEM_METADATA_URL for c in published[0][1])
+    assert 0 < tiles(hybrid.calls).count((stamp(hybrid.latest), 7)) <= 31
 
 
 @pytest.mark.parametrize('reset', ['off_tab', 'gap', 'geometry', 'intent', 'bad_marker'])
@@ -130,7 +130,7 @@ def test_continuous_view_and_geometry_gate(make_emitter, hybrid, tmp_path, reset
         hybrid.mono += ae.RADAR_VIEW_POLL_GAP_SEC
     elif reset in ('geometry', 'intent'):
         (tmp_path/('radar_zoom' if reset == 'geometry' else 'radar_intent')).write_text('7' if reset == 'geometry' else '2')
-        emitter._do_radar(geometry_only=True)
+        emitter._do_radar()
     else:
         (tmp_path/'radar_viewing').write_text('{')
     assert emitter._radar_deep_view_delay(ctx) is None
@@ -184,7 +184,7 @@ def test_deep_does_not_evict_newest_neighbours(make_emitter, hybrid, tmp_path, m
     emitter._do_radar()
     assert sum(f['complete'] for f in emitter._radar_frames) == 31
     assert len(emitter._radar_tiles) == 400
-    for zoom, count in ((7,15), (8,12), (9,12)):
+    for zoom, count in ((7,4), (8,30), (9,4)):
         assert len([k for k in emitter._radar_tiles if k[3] == hybrid.latest and k[4] == zoom]) == count
 
 
@@ -207,7 +207,7 @@ def test_each_settled_geometry_warms_next_neighbours_once(make_emitter, hybrid, 
     hybrid.mono = 60; viewing(hybrid, tmp_path)
     (tmp_path/'radar_zoom').write_text('7'); hybrid.calls.clear()
     emitter._do_radar()
-    assert (stamp(hybrid.latest), 7) not in tiles(hybrid.calls)
+    assert 0 < tiles(hybrid.calls).count((stamp(hybrid.latest), 7)) <= 31
     assert (stamp(hybrid.latest), 6) in tiles(hybrid.calls)
     hybrid.calls.clear(); emitter._do_radar(intent_triggered=True)
     assert not tiles(hybrid.calls)

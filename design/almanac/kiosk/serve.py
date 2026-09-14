@@ -15,7 +15,7 @@
 # Bind stays on 127.0.0.1 by default (chromium is local; no data leaves the box).
 # Set WFP_BIND=0.0.0.0 to expose /health (and the page) to the LAN for remote
 # monitoring — note that also makes wx.json LAN-readable.
-import http.server, socketserver, json, math, os, time, threading, re
+import http.server, socketserver, json, math, os, time, threading, re, io, zlib
 from urllib.parse import parse_qs
 from decimal import Decimal
 
@@ -196,10 +196,12 @@ def _write_radar_intent(params):
 
 
 class Handler(http.server.SimpleHTTPRequestHandler):
+    protocol_version = "HTTP/1.1"
     def __init__(self, *a, **k):
         super().__init__(*a, directory=WEB, **k)
 
     def do_GET(self):
+        self._immutable_radar = False
         path, _, query = self.path.partition("?")
         if path == "/health":
             return self._health()
@@ -214,6 +216,12 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 if self.client_address[0] in LOOPBACK:
                     _write_radar_viewing(viewed_radar)
                     params = parse_qs(query, keep_blank_values=True)
+                    if viewed_radar and params.get('radarTheme',[''])[0] in ('paper','night'):
+                        marker=os.path.join(os.path.dirname(DATA),'radar_activity');tmp=marker+'.tmp'
+                        try:
+                            with open(tmp,'w') as f:json.dump(dict(at=time.time(),theme=params['radarTheme'][0],moving=params.get('radarMoving')==['1']),f)
+                            os.replace(tmp,marker)
+                        except OSError:pass
                     if 'radarSeq' in params:
                         _write_radar_intent(params)
                     elif set(_read_radar_intent()) == {'seq'}:
@@ -238,15 +246,46 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                             pass
         return super().do_GET()
 
+    def handle(self):
+        try:
+            super().handle()
+        except (BrokenPipeError,ConnectionResetError):
+            pass  # ordinary tab closure/cancel, not an unbounded server traceback
+
+    def send_head(self):
+        path = self.path.split('?')[0]
+        local = self.translate_path(path)
+        tile=re.fullmatch(r'/radar/t/([a-f0-9]{12})/(iem-mrms-lcref|iem-nexrad-n0b|rainviewer)/(-|[A-Z0-9]{4})/[0-9]{12}/([0-9]{1,2})/([0-9]{1,4})/([0-9]{1,4})\.png',path,re.ASCII)
+        geo=re.fullmatch(r'/radar/geo/([a-f0-9]{12})/(paper|night)/([0-9]{1,2})/([0-9]{1,4})/([0-9]{1,4})\.png',path,re.ASCII)
+        sites=re.fullmatch(r'/radar/sites-([a-f0-9]{12})\.json',path,re.ASCII)
+        def revision(kind,value):
+            try:
+                with open(os.path.join(WEB,'radar','.'+kind+'-revision')) as f:return f.read()==value
+            except OSError:return False
+        immutable=bool(tile and revision('tile',tile[1]) and 4<=int(tile[4])<=10 and int(tile[5])<2**int(tile[4]) and int(tile[6])<2**int(tile[4]) or
+                       geo and revision('geo',geo[1]) and 4<=int(geo[3])<=10 and int(geo[4])<2**int(geo[3]) and int(geo[5])<2**int(geo[3]) or
+                       sites and revision('sites',sites[1]))
+        self._immutable_radar=immutable and os.path.isfile(local)
+        if path.startswith(('/radar/t/','/radar/geo/','/radar/sites')) and not self._immutable_radar:
+            self.send_error(404,'File not found');return None
+        if self._immutable_radar:
+            stat=os.stat(local);os.utime(local,ns=(time.time_ns(),stat.st_mtime_ns))
+        return super().send_head()
+
     def end_headers(self):
-        if self.path.split('?')[0] == '/wx.json' and self.client_address[0] in LOOPBACK:
-            self.send_header('X-Radar-Intent-Seq', str(_read_radar_intent()['seq']))
+        if getattr(self, '_immutable_radar', False):
+            self.send_header('Cache-Control', 'public, max-age=31536000, immutable')
         super().end_headers()
+
+    def log_error(self,format,*args):
+        if self.path.startswith(('/radar/t/','/radar/geo/')):return
+        super().log_error(format,*args)
 
     def log_request(self, code="-", size="-"):
         # drop the ~2s wx.json/index poll churn (it grew the log unbounded on
         # tmpfs). Keep errors and any other path so real problems still surface.
         p = self.path.split("?")[0]
+        if p.startswith(("/radar/t/", "/radar/geo/")): return
         if str(code) in ("200", "304") and p in ("/wx.json", "/index.html", "/health", "/"):
             return
         super().log_request(code, size)

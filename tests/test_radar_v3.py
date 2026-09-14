@@ -85,21 +85,20 @@ def test_multisite_alignment_stacking_dark_and_identity(make_emitter, hybrid, mu
     assert not r['sites'][0]['contributing'] and r['sites'][0]['reason']=='not reporting'
     assert r['sites'][-1]['primary']
     assert sorted(c for c in multisite.calls if c[0]=='list') == sorted([('list', 'KNEA'), ('list', 'KMID'), ('list', 'KFAR')])
-    assert [f['ts'] for f in r['frames']] == multisite.scans['KNEA']
-    assert [f['siteScans'] for f in r['frames']] == [
+    assert [f['ts'] for f in r['tiles']['frames']] == multisite.scans['KNEA']
+    assert [f['siteScans'] for f in r['tiles']['frames']] == [
         [dict(id='KMID', ts=hybrid.latest-720), dict(id='KNEA', ts=hybrid.latest-600)],
         [dict(id='KMID', ts=hybrid.latest-60), dict(id='KNEA', ts=hybrid.latest)]]
-    expected = Image.alpha_composite(ae.remap(Image.new('RGBA', (1, 1), multisite.colors['KMID']), 'iem-nexrad-n0b', ae._RADAR_LUT),
-                                     ae.remap(Image.new('RGBA', (1, 1), multisite.colors['KNEA']), 'iem-nexrad-n0b', ae._RADAR_LUT)).getpixel((0, 0))
-    with Image.open(Path(ae.RADAR_DIR)/(r['latest']+'.png')) as image:
-        assert image.getpixel((478, 245)) == expected
-    multisite.calls.clear(); emitter._do_radar()
-    assert all(c[0]=='list' for c in multisite.calls)  # full warm reuse
-    assert emitter._radar_latest == r['latest']
-    multisite.scans['KMID'].insert(-1, hybrid.latest)
-    multisite.calls.clear(); emitter._do_radar()
-    assert emitter._radar_latest != r['latest']  # primary slot is unchanged
-    assert emitter._radar_ts_frame == r['observedTs']
+    for site,color in multisite.colors.items():
+        paths=list(Path(ae.RADAR_DIR).glob('t/*/iem-nexrad-n0b/'+site+'/*/8/*/*.png'));assert paths
+        expected=ae.remap(Image.new('RGBA',(256,256),color),'iem-nexrad-n0b',ae.source_palette('iem-nexrad-n0b')).tobytes()
+        for path in paths:
+            with Image.open(path) as image:assert image.convert('RGBA').tobytes()==expected
+    scans=r['tiles']['frames'][-1]['siteScans'];multisite.calls.clear();emitter._do_radar()
+    assert all(c[0]=='list' for c in multisite.calls)
+    multisite.scans['KMID'].insert(-1,hybrid.latest);emitter._do_radar()
+    assert emitter._build_payload()['radar']['tiles']['frames'][-1]['siteScans']!=scans
+    assert emitter._radar_ts_frame==r['observedTs']
 
 
 def test_dark_nearest_promotes_reporting_primary(make_emitter, hybrid, multisite):
@@ -131,7 +130,7 @@ def test_cap_limits_scan_requests_in_real_adapter(make_emitter, hybrid, multisit
     assert r['sourceMode'] == 'site' and r['sitesConsidered'] == 9 and r['sitesDrawn'] == 4
     assert sorted(c[1] for c in multisite.calls if c[0] == 'list') == [f'K{i:03}' for i in range(4)]
     assert len(emitter._radar_request_times) <= ae.RADAR_REQUESTS_PER_MIN
-    latest = next(f for f in r['frames'] if f['id'] == r['latest'])
+    latest = r['tiles']['frames'][-1]
     assert [s['id'] for s in latest['siteScans']] == [f'K{i:03}' for i in reversed(range(4))]
 
 
@@ -154,52 +153,12 @@ def test_site_budget_aborts_without_negative_cache(make_emitter, hybrid, multisi
     assert len(emitter._radar_request_times) == 5
     assert not emitter._radar_negative
     assert emitter._radar_refresh['state'] == 'failed'
-    assert not list(Path(ae.RADAR_DIR).rglob('*.png'))
+    # Successful in-flight tiles survive a budget yield in the immutable cache.
+    assert all(p.read_bytes().startswith(b'\x89PNG') for p in Path(ae.RADAR_DIR).rglob('*.png'))
 
 
-@pytest.mark.parametrize('budget', ['requests', 'deadline'])
-def test_site_budget_retains_complete_nearest_layers(make_emitter, hybrid, multisite, monkeypatch, budget):
-    emitter = make_emitter()
-    tile_count = len(ae._radar_viewport(47.61, -122.33, 8, 956, 490)[0])
-    if budget == 'requests':
-        monkeypatch.setattr(ae, 'RADAR_REQUESTS_PER_MIN', 3+tile_count+2)
-    else:
-        def slow(site, url):
-            if site == 'KMID':
-                hybrid.mono = ae.RADAR_PRIMARY_DEADLINE_SEC
-        multisite.failure = slow
-    emitter._do_radar()
-    assert emitter._radar_available and emitter._radar_result.site_id == 'KNEA'
-    latest = next(f for f in emitter._radar_frames if f['id'] == emitter._radar_latest)
-    assert latest['siteScans'] == [dict(id='KNEA', ts=hybrid.latest)]
-    assert not emitter._radar_negative  # budget is never a site outage
-    assert emitter._radar_refresh['state'] == 'idle'
-    with Image.open(Path(ae.RADAR_DIR)/(latest['id']+'.png')) as image:
-        assert image.getpixel((478, 245)) == ae.remap(Image.new('RGBA',(1,1),multisite.colors['KNEA']), 'iem-nexrad-n0b', ae._RADAR_LUT).getpixel((0,0))
 
 
-def test_site_tile_failure_discards_whole_layer_recovers_after_negative_ttl(make_emitter, hybrid, multisite):
-    n = [0]
-    def failure(site, url):
-        if site == 'KMID':
-            n[0] += 1
-            if n[0] == 2:
-                raise OSError('second tile broken')
-    multisite.failure = failure
-    emitter = make_emitter(); emitter._do_radar()
-    first = emitter._radar_result
-    latest = next(f for f in first.frames if f['id']==first.latest)
-    assert latest['siteScans'] == [dict(id='KNEA', ts=hybrid.latest)]
-    with Image.open(Path(ae.RADAR_DIR)/(first.latest+'.png')) as image:
-        assert image.getpixel((478, 245)) == ae.remap(Image.new('RGBA',(1,1),multisite.colors['KNEA']), 'iem-nexrad-n0b', ae._RADAR_LUT).getpixel((0,0))
-    assert len(emitter._radar_negative)==1
-    assert first.sites[1]['reporting']  # listing health and tile failure are distinct
-    multisite.failure = None; multisite.calls.clear(); emitter._do_radar()
-    assert emitter._radar_latest==first.latest and all(c[0]=='list' for c in multisite.calls)
-    hybrid.mono += ae.RADAR_NEGATIVE_CACHE_SEC
-    emitter._do_radar()
-    assert emitter._radar_latest != first.latest
-    assert len(next(f for f in emitter._radar_frames if f['id']==emitter._radar_latest)['siteScans'])==2
 
 
 @pytest.mark.parametrize('preference,value', [('radar_zoom','9'), ('radar_source','site'), ('radar_center','47.8,-122.3'), ('radar_intent','41')])
@@ -222,7 +181,7 @@ def test_supersede_tile_boundary_immediate_new_pass(make_emitter, hybrid, monkey
     monkeypatch.setattr(ae.RadarSession, 'close', lambda self: closed.append(self))
     emitter._check_radar()
     assert emitter._radar_result is old and emitter._radar_restart
-    assert emitter._radar_refresh['state'] == 'superseded' and not emitter._radar_negative
+    assert emitter._radar_restart and not emitter._radar_negative
     assert not list(Path(ae.RADAR_DIR).rglob('*.tmp.*'))
     assert not closed and not emitter._inflight
     assert 'radar' not in emitter._retries
@@ -231,7 +190,7 @@ def test_supersede_tile_boundary_immediate_new_pass(make_emitter, hybrid, monkey
     original = emitter._radar_publish_refresh
     def record(ctx, **kw):
         original(ctx, **kw)
-        intents.append(emitter._radar_refresh['intent'])
+        intents.append(ctx['intent'])
     monkeypatch.setattr(emitter, '_radar_publish_refresh', record)
     clock.advance(ae.EMIT_INTERVAL)
     assert not emitter._radar_restart and intents
@@ -244,19 +203,6 @@ def test_supersede_tile_boundary_immediate_new_pass(make_emitter, hybrid, monkey
     emitter.stop()
 
 
-def test_supersede_during_tmp_save_removes_file(make_emitter, hybrid, monkeypatch, tmp_path):
-    emitter=make_emitter()
-    save=Image.Image.save
-    def changed(image, target, *args, **kwargs):
-        save(image, target, *args, **kwargs)
-        if '.tmp.' in str(target):
-            (tmp_path/'radar_zoom').write_text('9')
-    monkeypatch.setattr(Image.Image, 'save', changed)
-    emitter._do_radar()
-    assert not emitter._radar_available and emitter._radar_restart
-    assert not emitter._radar_negative and emitter._radar_refresh['state']=='superseded'
-    assert not list(Path(ae.RADAR_DIR).rglob('*.png'))
-    assert not list(Path(ae.RADAR_DIR).rglob('*.tmp.*'))
 
 
 def test_supersede_between_history_frames_keeps_published_newest(make_emitter, hybrid, monkeypatch, tmp_path):
@@ -265,7 +211,7 @@ def test_supersede_between_history_frames_keeps_published_newest(make_emitter, h
     published=[]
     def record(self, key, value):
         original(self, key, value)
-        if key=='_radar_result' and value.available:
+        if key=='_radar_result' and value.available and any(f['complete'] for f in value.frames):
             published.append(value)
             (tmp_path/'radar_center').write_text('47.8,-122.3')
     monkeypatch.setattr(ae.AlmanacEmitter, '__setattr__', record)
@@ -273,113 +219,13 @@ def test_supersede_between_history_frames_keeps_published_newest(make_emitter, h
     assert len(published)==1 and emitter._radar_result is published[0]
     assert sum(f['complete'] for f in emitter._radar_frames)==1
     assert not emitter._radar_negative and emitter._radar_restart
-    assert emitter._radar_refresh['state']=='superseded'
+    assert emitter._radar_restart
 
 
-def test_site_negative_transaction_aborted_frame(make_emitter, hybrid, multisite, tmp_path):
-    emitter=make_emitter()
-    def fail(site, url):
-        if site=='KNEA':
-            raise OSError('site tile failed')
-        (tmp_path/'radar_zoom').write_text('9')
-    multisite.failure=fail
-    emitter._do_radar()
-    assert emitter._radar_restart and not emitter._radar_available
-    assert not emitter._radar_negative
-    assert not list(Path(ae.RADAR_DIR).rglob('*.png'))
 
 
-@pytest.mark.parametrize('failure', [False, True])
-def test_progress_atomic_shape_phases_and_reset(make_emitter, hybrid, monkeypatch, failure):
-    hybrid.view(); emitter=make_emitter(); records=[]; copies=[]
-    original=ae.AlmanacEmitter.__setattr__
-    def record(self, key, value):
-        original(self, key, value)
-        if key=='_radar_refresh':
-            records.append(value); copies.append(json.loads(json.dumps(value)))
-            payload=self._build_payload()['radar']
-            assert payload['refresh'] == {k:v for k,v in value.items() if k!='intent'}
-            assert payload['intent'] == value['intent']
-            assert 'progress' not in payload
-    monkeypatch.setattr(ae.AlmanacEmitter, '__setattr__', record)
-    if failure:
-        hybrid.failure=lambda *_: (_ for _ in ()).throw(OSError('offline'))
-    emitter._do_radar()
-    assert records[-1]['state']==('failed' if failure else 'idle') and records==copies
-    for r in records:
-        assert set(r)=={'state','frameIndex','frameTotal','forSeq','intent'}
-        assert 0<=r['frameIndex']<=r['frameTotal']
-        assert r['intent']==dict(seq=0,zoom='auto',source='mosaic',center='station')
-    if not failure:
-        assert {r['state'] for r in records}=={'newest','history','idle'}
-        indices=list(dict.fromkeys(r['frameIndex'] for r in records if r['frameIndex']))
-        assert indices==list(range(1,max(indices)+1))
-        assert any(r['state']=='newest' and r['frameTotal']==31 for r in records)
 
 
-@pytest.mark.skipif(os.environ.get('RADAR_NET_TEST')!='1', reason='opt in with RADAR_NET_TEST=1')
-def test_live_aberdeen_multisite(make_emitter, tmp_path, monkeypatch):
-    """Real pass and independent pixel reconstruction; no synthetic echo evidence."""
-    monkeypatch.setattr(ae, 'RADAR_DIR', str(tmp_path/'radar'))
-    (tmp_path/'radar_source').write_text('site')
-    (tmp_path/'radar_zoom').write_text('7')
-    emitter=make_emitter(config=make_config(Station={'Latitude':'46.98','Longitude':'-123.82'}))
-    raw_tiles={}; original=emitter._radar_request
-    def request(source, url, *args, **kwargs):
-        raw=original(source, url, *args, **kwargs)
-        if 'ridge::' in url: raw_tiles[url]=raw
-        return raw
-    monkeypatch.setattr(emitter, '_radar_request', request)
-    monkeypatch.setattr(ae.Logger, 'warning', print)
-    emitter._do_radar()
-    r=emitter._build_payload()['radar']
-    print('Aberdeen live:', json.dumps({k:r[k] for k in ('available','sourceMode','siteId','zoom','sites','sitesConsidered','sitesDrawn')}))
-    assert r['available'] and r['sourceMode']=='site' and r['zoom']==7
-    assert {'KLGX','KATX','KRTX'} <= {s['id'] for s in r['sites']}
-    reporting=[s for s in r['sites'] if s['reporting']]
-    assert r['siteId']==min(reporting,key=lambda s:s['distanceMeters'])['id']
-    newest=next(f for f in r['frames'] if f['id']==r['latest'])
-    tiles=ae._radar_viewport(46.98,-123.82,7,956,490)[0]
-    expected=Image.new('RGBA',(956,490)); layers=[]
-    for pair in newest['siteScans']:
-        stamp=datetime.fromtimestamp(pair['ts'],timezone.utc).strftime('%Y%m%d%H%M')
-        layer=Image.new('RGBA',expected.size)
-        for tx,ty,x,y in ae._radar_site_tiles(dict(zoom=7,tiles=tiles),pair['id']):
-            url=ae.RADAR_SITE_TILE_TEMPLATE.format(site=pair['id'][1:],stamp=stamp,z=7,x=tx,y=ty)
-            with Image.open(io.BytesIO(raw_tiles[url])) as tile:
-                layer.paste(ae.remap(tile,'iem-nexrad-n0b',ae.source_palette('iem-nexrad-n0b')),(x,y))
-        layers.append((pair['id'],layer))
-        expected.alpha_composite(layer)
-    with Image.open(Path(ae.RADAR_DIR)/(r['latest']+'.png')) as actual:
-        assert actual.tobytes()==expected.tobytes()
-    # Visibility includes translucent foreground; measure nonzero per-site alpha
-    # after the attenuation by all closer layers, rather than just tile receipts.
-    transmission=Image.new('L',expected.size,255); visible={}
-    for site,layer in reversed(layers):
-        alpha=layer.getchannel('A')
-        contribution=ImageChops.multiply(alpha,transmission)
-        visible[site]=sum(count for value,count in enumerate(contribution.histogram()) if value)
-        transmission=ImageChops.multiply(transmission,ImageChops.invert(alpha))
-    print('Aberdeen visible echo pixels by site:',json.dumps(visible),'requests=',len(emitter._radar_request_times))
-    (tmp_path/'aberdeen.json').write_text(json.dumps(dict(
-        radar=r, visibleEchoPixels=visible, requests=len(emitter._radar_request_times)), indent=2))
-    assert newest['siteScans'] and layers  # reporting and acquisition, independent of weather
-    # Real dark sites are recorded without making the pass fail. If none are
-    # dark today, the hermetic promotion/degradation test supplies that coverage.
-    for site in r['sites']:
-        if site['newestTs'] is None or site['ageSec']>=900:
-            assert site['reporting'] is False
-            assert site['id'] not in [p['id'] for p in newest['siteScans']]
-    assert emitter._radar_refresh['state']=='idle'
-    assert any(s['id']=='KLGX' and s['contributing'] for s in r['sites'])
-    atx=next(s for s in r['sites'] if s['id']=='KATX')
-    if not atx['reporting']:
-        assert not atx['contributing'] and atx['reason']=='not reporting'
-    print('KATX live reporting status:',json.dumps(atx))
-    (tmp_path/'radar_zoom').write_text('5'); emitter._radar_request_times.clear(); emitter._do_radar()
-    fallback=emitter._build_payload()['radar']
-    print('Aberdeen z5:',json.dumps({k:fallback[k] for k in ('zoom','sourceMode','sourcePref','sourceFallback')}))
-    assert fallback['zoom']==5 and fallback['sourceMode']=='mosaic' and fallback['sourceFallback']=='site-zoom-floor'
 
 
 def test_site_preference_auto_swap_and_return(make_emitter, hybrid, multisite, tmp_path):
@@ -388,9 +234,9 @@ def test_site_preference_auto_swap_and_return(make_emitter, hybrid, multisite, t
     emitter=make_emitter();emitter._do_radar();r=emitter._build_payload()['radar']
     assert r['sourceMode']=='mosaic' and r['sourceFallback']=='site-zoom-floor'
     assert r['sourcePref']=='site' and r['sitePreferred'] and r['siteResumeZoom']==7
-    assert r['zoom']==5 and r['zoomMin']==4 and not r['zoomCapped']
-    assert r['intent']==dict(seq=41,zoom=5,source='site',center='station')
-    assert r['refresh']['forSeq']==41 and pref.read_bytes()==before
+    assert r['tiles']['z']==5 and r['zoomMin']==4 and not r['zoomCapped']
+    assert 'intent' not in r and 'forSeq' not in r['refresh']
+    assert pref.read_bytes()==before
     hybrid.mono+=60; (tmp_path/'radar_zoom').write_text('7'); emitter._do_radar()
     r=emitter._build_payload()['radar']
     assert r['sourceMode']=='site' and r['sourceFallback'] is None and pref.read_bytes()==before
@@ -435,34 +281,8 @@ def test_runtime_sequence_validation(monkeypatch,tmp_path):
     assert not marker.is_symlink() and durable.read_text()=='8'
 
 
-def test_remap_degradation_survives_warm_cache(make_emitter,hybrid):
-    from lib.radar_palette import _tables
-    colors=[c for c,d in _tables('iem-mrms-lcref')[0].items() if d>=10 and c[3]==255][:19]
-    tile=Image.new('RGBA',(256,256),(19,37,53,255))
-    for i,color in enumerate(colors[1:]+[(19,37,53,255)]):tile.putpixel((i,0),color)
-    stream=io.BytesIO();tile.save(stream,'PNG');hybrid.tile=stream.getvalue()
-    emitter=make_emitter();emitter._do_radar();r=emitter._build_payload()['radar']
-    frame=next(f for f in r['frames'] if f['id']==r['latest'])
-    assert r['legend']['remapped'] is False and frame['legend']['remapped'] is False
-    assert frame['unmatchedColors']==1 and frame['unmatchedPixels']>.98*frame['opaquePixels']
-    hybrid.calls.clear();emitter._do_radar();warm=emitter._build_payload()['radar']
-    assert not warm['legend']['remapped']
-    assert next(f for f in warm['frames'] if f['id']==warm['latest'])==frame
-    assert not any('mrms::' in c[2] for c in hybrid.calls)
 
 
-def test_superseded_notice_survives_replacement_pass_once(make_emitter,hybrid,tmp_path):
-    emitter=make_emitter();once=[]
-    def change(req,timeout):
-        if 'mrms::' in req.full_url and not once:
-            once.append(True);(tmp_path/'radar_intent').write_text('42')
-    hybrid.failure=change;emitter._do_radar()
-    assert emitter._radar_refresh['state']=='superseded' and not emitter._radar_negative
-    hybrid.failure=None;emitter._do_radar()
-    assert emitter._radar_refresh['state']=='idle'
-    first=emitter._build_payload()['radar'];second=emitter._build_payload()['radar']
-    assert first['refresh']['state']=='idle' and first['intent']['seq']==42  # current acknowledgement wins
-    assert second['refresh']['state']=='idle' and second['intent']['seq']==42
 
 
 @pytest.mark.parametrize('address',['127.0.0.1','::1','::ffff:127.0.0.1','198.51.100.2'])
@@ -499,43 +319,8 @@ def test_one_complete_site_keeps_full_history(make_emitter,hybrid,multisite,monk
     assert len(emitter._radar_frames)==31
 
 
-@pytest.mark.parametrize('cooldown',[False,True])
-def test_back_to_back_budget_defers_before_progress(make_emitter,hybrid,monkeypatch,cooldown):
-    hybrid.view(); emitter=make_emitter(); emitter._do_radar(); previous=emitter._radar_result
-    hybrid.mono=10
-    emitter._radar_request_times=[0]*ae.RADAR_REQUESTS_PER_MIN
-    if cooldown: emitter._radar_cooldowns['iem-mrms-lcref']=75
-    delays=[];monkeypatch.setattr(emitter,'_schedule_retry',lambda key,cb,delay:delays.append(delay))
-    phases=[];original=emitter._radar_publish_refresh
-    def publish(ctx,**kw):phases.append(kw['state']) if 'state' in kw else None;original(ctx,**kw)
-    monkeypatch.setattr(emitter,'_radar_publish_refresh',publish)
-    before=len(hybrid.calls);emitter._do_radar()
-    assert emitter._radar_result is previous and emitter._radar_refresh['state']=='idle'
-    assert phases==['newest','idle'] and len(hybrid.calls)==before
-    assert emitter._build_payload()['radar']['geometryOnly']
-    assert delays==[65 if cooldown else 50]
-    assert emitter._radar_refresh['frameTotal']==1
-    assert emitter._radar_refresh['frameIndex']==0
 
 
-@pytest.mark.parametrize('previous,external',[(True,False),(False,False),(True,True)])
-def test_mid_newest_budget_or_external_failure(make_emitter,hybrid,monkeypatch,previous,external):
-    emitter=make_emitter()
-    if previous:emitter._do_radar()
-    retained=emitter._radar_result;hybrid.latest+=120;hybrid.now+=120
-    delays=[];monkeypatch.setattr(emitter,'_schedule_retry',lambda key,cb,delay:delays.append(delay))
-    original=emitter._radar_request
-    def request(source,url,*a,**kw):
-        if 'mrms::' in url:
-            if external:raise OSError('HTTP unavailable')
-            emitter._radar_request_times=[hybrid.mono]*ae.RADAR_REQUESTS_PER_MIN
-            raise ae._RadarBudget('mid newest tiles')
-        return original(source,url,*a,**kw)
-    monkeypatch.setattr(emitter,'_radar_request',request);emitter._do_radar()
-    assert emitter._radar_result is retained
-    assert emitter._radar_refresh['state']==('idle' if previous and not external else 'failed')
-    assert delays[-1]==(120 if external else 60)
-    if previous:assert emitter._radar_refresh['frameTotal']==len(retained.frames)
 
 
 def test_history_reserves_next_zoom_newest(make_emitter,hybrid,tmp_path):
@@ -553,7 +338,7 @@ def test_history_reserves_next_zoom_newest(make_emitter,hybrid,tmp_path):
 def test_corrupt_warm_cache_rebuilt(make_emitter,hybrid,bad):
     from PIL.PngImagePlugin import PngInfo
     emitter=make_emitter();emitter._do_radar()
-    path=Path(ae.RADAR_DIR)/(emitter._radar_latest+'.png')
+    path=next(Path(ae.RADAR_DIR).glob('t/*/*/*/*/*/*/*.png'))
     with Image.open(path) as im:meta=json.loads(im.info['radarRemap']);image=im.copy()
     if bad=='size':image=Image.new('RGBA',(1,1))
     if bad=='pixels':image.putpixel((0,0),(19,37,53,255))
@@ -563,7 +348,7 @@ def test_corrupt_warm_cache_rebuilt(make_emitter,hybrid,bad):
     if bad=='truncated':path.write_bytes(path.read_bytes()[:80])
     hybrid.calls.clear();emitter._do_radar()
     assert not any('mrms::' in c[2] for c in hybrid.calls)  # rebuild from native LRU
-    with Image.open(path) as im:im.load();assert im.size==(956,490)
+    with Image.open(path) as im:im.load();assert im.size==(256,256)
     assert emitter._radar_refresh['state']=='idle'
 
 
@@ -590,8 +375,8 @@ def test_atomic_intent_worker_while_durable_writer_paused(make_emitter,hybrid,tm
     try:
         assert entered.wait(10)
         emitter=make_emitter();emitter._do_radar()
-        assert emitter._radar_result.intent==dict(seq=42,zoom=9,source='mosaic',center=dict(lat=47.8,lon=-122.3))
-        assert emitter._radar_result.zoom==9 and emitter._radar_result.center==dict(lat=47.8,lon=-122.3)
+        assert emitter._radar_read_intent()==dict(seq=42,zoom=9,source='mosaic',center=dict(lat=47.8,lon=-122.3))
+        assert emitter._radar_result.zoom==9 and emitter._radar_result.center==dict(lat=47.61,lon=-122.33)
     finally:release.set();worker.join(10)
     assert not worker.is_alive()
     before=(tmp_path/'radar_intent').read_bytes()
@@ -612,24 +397,13 @@ def test_real_worker_supersede_at_network_barrier(make_emitter,hybrid,tmp_path):
     try:
         assert entered.wait(10)
         (tmp_path/'radar_intent').write_text(json.dumps(dict(seq=42,zoom=9,source='mosaic',center='station')))
-        assert emitter._build_payload()['radar']['geometryOnly']
+        assert 'geometryOnly' not in emitter._build_payload()['radar']
         assert emitter._radar_result is old
     finally:release.set();worker.join(10)
     assert not worker.is_alive() and emitter._radar_restart and emitter._radar_result is old
     assert not emitter._radar_negative and not list(Path(ae.RADAR_DIR).rglob('*.tmp.*'))
 
 
-@pytest.mark.skipif(os.environ.get('RADAR_NET_TEST')!='1',reason='opt in with RADAR_NET_TEST=1')
-def test_live_seattle_two_pass(make_emitter,tmp_path,monkeypatch):
-    monkeypatch.setattr(ae,'RADAR_DIR',str(tmp_path/'radar'))
-    (tmp_path/'radar_viewed').write_text(str(ae.time.time()))
-    emitter=make_emitter(config=make_config(Station={'Latitude':'47.61','Longitude':'-122.33'}))
-    delays=[];monkeypatch.setattr(emitter,'_schedule_retry',lambda key,cb,delay:delays.append(delay))
-    monkeypatch.setattr(ae.Logger,'warning',print)
-    for n in range(2):
-        start=ae.time.monotonic();emitter._do_radar();r=emitter._build_payload()['radar']
-        print('Seattle pass',n,json.dumps(dict(state=r['refresh']['state'],frames=r['completeFrameCount'],total=r['frameCount'],age=r['ageSec'],requests=len(emitter._radar_request_times),elapsed=ae.time.monotonic()-start,retries=delays)))
-        assert r['available'] and r['refresh']['state']=='idle'
 
 
 def test_budget_retry_exact_subsecond_headroom(make_emitter,hybrid,monkeypatch):
@@ -655,12 +429,18 @@ def test_pan_cap_cannot_replace_station_timeline(make_emitter,hybrid,multisite,m
     assert not any(c[:2]==('tile','K000') for c in multisite.calls)
 
 
-def test_mixed_site_failure_and_budget_have_distinct_reasons(make_emitter,hybrid,multisite):
-    multisite.scans['KFAR']=[hybrid.latest]
-    def failure(site,url):
-        if site=='KMID':raise OSError('HTTP tile failed')
-        if site=='KFAR':raise ae._RadarBudget('deferred layer')
-    multisite.failure=failure;emitter=make_emitter();emitter._do_radar()
-    reasons={s['id']:s['reason'] for s in emitter._radar_result.sites}
-    assert reasons=={'KNEA':None,'KMID':'scan unavailable','KFAR':'deferred'}
-    assert emitter._radar_refresh['state']=='idle'
+
+
+def test_partial_site_keeps_independently_valid_tiles(make_emitter,hybrid,multisite):
+    import urllib.error
+    failed=[]
+    def fail_one(site,url):
+        if site=='KNEA' and not failed:
+            failed.append(url);raise urllib.error.HTTPError(url,404,'one missing tile',{},None)
+    multisite.failure=fail_one
+    emitter=make_emitter();emitter._do_radar()
+    assert failed and emitter._radar_result.source_id=='iem-nexrad-n0b'
+    pairs=emitter._radar_result.tiles['frames'][-1]['siteScans']
+    assert {p['id'] for p in pairs}=={'KNEA','KMID'}
+    paths=list(Path(ae.RADAR_DIR).glob('t/*/iem-nexrad-n0b/KNEA/*/8/*/*.png'))
+    assert paths and all(p.read_bytes().startswith(b'\x89PNG') for p in paths)

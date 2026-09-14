@@ -28,7 +28,7 @@ def test_override_validation_and_restart(make_emitter, hybrid, tmp_path, value, 
         emitter = make_emitter(); emitter._do_radar()
         r = emitter._build_payload()['radar']
         assert r['available']
-        assert r['zoom'] == (desired if desired is not None else ae._radar_zoom_for(47.61))
+        assert r['tiles']['z'] == (desired if desired is not None else ae._radar_zoom_for(47.61))
         assert r['zoomDesired'] == desired and r['zoomAuto'] is (desired is None)
         assert r['zoomAutoLevel'] == 8 and r['zoomMin'] == 4 and r['zoomMax'] == 9
         assert not r['zoomCapped'] and r['zoomSource'] == 'MRMS'
@@ -50,7 +50,7 @@ def test_source_clamp_restore_sticky_and_reset(make_emitter, hybrid, tmp_path):
     hybrid.failure = lambda req, _: (_ for _ in ()).throw(urllib.error.URLError('primary down')) if 'iastate.edu' in req.full_url else None
     hybrid.mono=241; hybrid.calls.clear(); emitter._do_radar()
     fallback = emitter._build_payload()['radar']
-    assert fallback['zoom'] == fallback['zoomMax'] == 7
+    assert fallback['tiles']['z'] == fallback['zoomMax'] == 7
     assert fallback['zoomSource'] == 'RainViewer' and fallback['zoomCapped']
     assert fallback['zoomDesired'] == 8 and not fallback['zoomAuto']
     assert all('/256/7/' in c[2] for c in hybrid.calls if '/256/' in c[2])
@@ -58,11 +58,11 @@ def test_source_clamp_restore_sticky_and_reset(make_emitter, hybrid, tmp_path):
     emitter._do_radar(); assert emitter._build_payload()['radar']['zoomCapped']
     hybrid.failure = None; hybrid.mono=0; hybrid.calls.clear(); emitter._do_radar()
     restored = emitter._build_payload()['radar']
-    assert restored['zoom'] == 8 and restored['zoomMax'] == 9 and not restored['zoomCapped']
-    assert restored['latest'] == original.latest and len(hybrid.calls) == 1  # warm z8 restored
+    assert restored['tiles']['z'] == 8 and restored['zoomMax'] == 9 and not restored['zoomCapped']
+    assert restored['observedTs'] == original.ts_frame and len(hybrid.calls) == 1  # warm z8 restored
     pref.write_text('auto\n'); emitter._do_radar()
     reset = emitter._build_payload()['radar']
-    assert reset['zoom'] == reset['zoomAutoLevel'] == 8 and reset['zoomAuto']
+    assert reset['tiles']['z'] == reset['zoomAutoLevel'] == 8 and reset['zoomAuto']
     assert reset['zoomDesired'] is None and pref.read_text() == 'auto\n'
 
 
@@ -71,60 +71,15 @@ def test_zoom_cache_identity_rebuild_and_retirement(make_emitter, hybrid, tmp_pa
     # Isolate mosaic history/cache accounting from cross-mode discovery.
     monkeypatch.setattr(ae, '_NEXRAD_SITES', {})
     if viewed: hybrid.view()
-    emitter = make_emitter(); emitter._do_radar()
-    old = emitter._radar_result
-    old_files = [Path(ae.RADAR_DIR) / (f['id'] + '.png') for f in old.frames if f['complete']]
-    hybrid.mono += 60
-    (tmp_path / 'radar_zoom').write_text('9')
-    emitter._do_radar(); new = emitter._radar_result
-    assert old.latest.split('/')[2] != new.latest.split('/')[2]
-    assert new.ts_frame == old.ts_frame and new.mpp == pytest.approx(old.mpp / 2)
-    assert new.bounds != old.bounds and new.scalebar != old.scalebar and new.rings != old.rings
-    assert all(p.exists() for p in old_files)  # decode grace starts at retirement
-    new_latest = Path(ae.RADAR_DIR) / (new.latest + '.png')
-    before = new_latest.stat().st_mtime_ns
-    if viewed:
-        # Complete the viewed history before testing a fully warm pass.
-        for _ in range(6):
-            hybrid.now -= 60
-            hybrid.mono += 60
-            (tmp_path/'radar_viewing').write_text(json.dumps(dict(since=ae.time.time()-20, last=ae.time.time())))
-            emitter._do_radar()
-        assert all(f['complete'] for f in emitter._radar_frames)
-    else:
-        assert sum(f['complete'] for f in new.frames) == 1
-        hybrid.mono += ae.RADAR_CACHE_GRACE_SEC
-    if viewed:
-        hybrid.mono += 120  # retirement grace uses wall time
-    hybrid.calls.clear(); emitter._do_radar()
-    assert len(hybrid.calls) == 1 and hybrid.calls[0][2] == ae.RADAR_IEM_METADATA_URL
-    assert new_latest.stat().st_mtime_ns == before
-    assert all(not p.exists() for p in old_files)
-    assert not list(Path(ae.RADAR_DIR).rglob('*.tmp.*'))
+    emitter=make_emitter();emitter._do_radar();old=set(Path(ae.RADAR_DIR).glob('t/*/*/*/*/8/*/*.png'))
+    assert old
+    hybrid.mono+=60;(tmp_path/'radar_zoom').write_text('9');emitter._do_radar()
+    assert emitter._radar_result.zoom==9 and all(p.exists() for p in old)
+    assert list(Path(ae.RADAR_DIR).glob('t/*/*/*/*/9/*/*.png'))
+    hybrid.calls.clear();(tmp_path/'radar_zoom').write_text('8');emitter._do_radar()
+    assert not any('mrms::' in c[2] and '/8/' in c[2] for c in hybrid.calls)
 
 
-def test_unused_history_retained_and_zoom_only_builds_latest(make_emitter, radar_net, radar_dir, tmp_path, monkeypatch):
-    # RainViewer remains fresh beyond the view TTL; exercise its actual expiry boundary.
-    now = [radar_net['times'][-1] + 1]
-    monkeypatch.setattr(ae.time, 'time', lambda: now[0])
-    monkeypatch.setattr(ae.time, 'monotonic', lambda: now[0])
-    (tmp_path / 'radar_viewed').write_text(str(now[0]))
-    emitter = make_emitter(); emitter._do_radar()
-    assert sum(f['complete'] for f in emitter._radar_frames) == 2
-    retired = radar_dir / (emitter._radar_frames[0]['id'] + '.png')
-    now[0] += ae.RADAR_VIEW_TTL
-    radar_net['calls'].clear(); emitter._do_radar()
-    assert sum(f['complete'] for f in emitter._radar_frames) == 1 and not tile_calls(radar_net)
-    now[0] += ae.RADAR_CACHE_GRACE_SEC; emitter._do_radar()
-    assert retired.exists()  # current geometry retains the scan hour off-tab
-    (tmp_path / 'radar_zoom').write_text('6')
-    radar_net['calls'].clear(); emitter._do_radar()
-    r = emitter._build_payload()['radar']
-    assert r['zoom'] == 6 and r['completeFrameCount'] == 1
-    assert not tile_calls(radar_net)  # newest warmed at zoom 6 while previously viewed
-    assert all('/256/6/' in c for c in tile_calls(radar_net))
-    radar_net['calls'].clear(); emitter._do_radar()
-    assert not tile_calls(radar_net)
 
 
 @pytest.mark.parametrize('retry', ['180', 'Sun, 13 Sep 2026 00:11:00 GMT'])
@@ -138,7 +93,7 @@ def test_zoom_during_429_obeys_source_cooldown(make_emitter, hybrid, tmp_path, r
     hybrid.failure = None; hybrid.calls.clear(); emitter._do_radar()
     assert all(c[0] == 'rainviewer' for c in hybrid.calls)
     r = emitter._build_payload()['radar']
-    assert r['geometryOnly'] and r['zoom']==8 and r['refresh']['state']=='idle'
+    assert 'geometryOnly' not in r and not r['tiles']['frames'] and r['refresh']['state']=='idle'
     assert not hybrid.calls  # map geometry needs no capacity or provider request
     hybrid.mono = 179; hybrid.calls.clear(); emitter._do_radar()
     assert all(c[0] == 'rainviewer' for c in hybrid.calls)
@@ -176,23 +131,6 @@ def test_zoom_primary_fallback_share_build_budget(make_emitter, hybrid, tmp_path
     assert not any('/256/' in c[2] for c in hybrid.calls)
 
 
-def test_zoom_total_deadline_and_failure_keeps_geometry(make_emitter, hybrid, tmp_path, monkeypatch):
-    emitter = make_emitter(); emitter._do_radar(); before = emitter._radar_result
-    (tmp_path / 'radar_zoom').write_text('9')
-    monkeypatch.setattr(ae, 'RADAR_REQUESTS_PER_MIN', 1000)
-    monkeypatch.setattr(ae, 'RADAR_MAX_FRAME_BUILDS_PER_PASS', 100)
-    hybrid.view(); start = hybrid.mono
-    # Isolate the total deadline with a continuously-viewed geometry.
-    monkeypatch.setattr(emitter, '_radar_deep_view_delay', lambda ctx: 0)
-    hybrid.failure = lambda *_: setattr(hybrid, 'mono', hybrid.mono + 1)
-    emitter._do_radar()
-    assert hybrid.mono - start == ae.RADAR_BUILD_DEADLINE_SEC
-    assert emitter._radar_zoom == 9 and emitter._radar_mpp == pytest.approx(before.mpp / 2)
-    previous = emitter._radar_result
-    (tmp_path / 'radar_zoom').write_text('4')
-    hybrid.failure = lambda *_: (_ for _ in ()).throw(urllib.error.URLError('outage'))
-    emitter._do_radar()
-    assert emitter._radar_result is previous  # never relabel the retained crop z4
 
 
 @pytest.mark.parametrize('lat,lon', [(47.61,-122.33), (52.52,13.40), (-33.87,151.21), (0,-140), (0,179.5)])

@@ -158,7 +158,7 @@ def test_idle_prefetch_reused_by_adjacent_pass_without_tile_requests(make_emitte
     assert len(snap.frames) == 2 and sum(f['complete'] for f in snap.frames) == 2
     assert emitter._radar_refresh['state'] == 'idle'
     keys = [k for k in emitter._radar_tiles if k[3] == snap.ts_frame and k[4] == zoom]
-    assert len(keys) == len(ae._radar_viewport(47.61, -122.33, zoom, 956, 490)[0])
+    assert len(keys) == 4  # v4 warms only the centre 2×2 at each adjacent level
     before = len(hybrid.calls)
     prefetch(*contexts[-1])
     assert len(hybrid.calls) == before and emitter._radar_result is snap
@@ -167,7 +167,7 @@ def test_idle_prefetch_reused_by_adjacent_pass_without_tile_requests(make_emitte
     hybrid.calls.clear()
     emitter._do_radar()
     assert emitter._radar_result.zoom == zoom
-    assert not any('mrms::' in c[2] for c in hybrid.calls)
+    assert all(not any('/%s/%s/%s.png' % (k[4],k[5],k[6]) in c[2] for k in keys) for c in hybrid.calls)
 
 
 @pytest.mark.parametrize('blocked', ['unviewed', 'expired', 'busy', 'budget', 'cooldown', 'deadline'])
@@ -268,7 +268,7 @@ def test_adapters_select_six_newest_then_four_history(make_emitter, hybrid, monk
         yield from original(source, stamp, ctx, *args)
     monkeypatch.setattr(emitter, '_radar_tile_batch', record)
     emitter._do_radar()
-    assert batches == [(False, 6), (False, 4), (True, 4), (True, 4)]
+    assert batches == [(False, 6), (True, 4), (True, 4), (False, 4)]
 
 
 def test_prefetch_error_does_not_change_published_frame_or_retry(make_emitter, hybrid, monkeypatch):
@@ -279,6 +279,7 @@ def test_prefetch_error_does_not_change_published_frame_or_retry(make_emitter, h
         hybrid.failure = lambda *args: (_ for _ in ()).throw(ConnectionResetError('optional tile'))
         prefetch(source, ctx)
         assert (emitter._radar_result, emitter._radar_refresh, emitter._retries) == before
+        hybrid.failure = None
     monkeypatch.setattr(emitter, '_radar_prefetch', fail_prefetch)
     emitter._do_radar()
     assert emitter._radar_result.source_id == 'iem-mrms-lcref'

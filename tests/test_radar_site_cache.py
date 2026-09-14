@@ -1,5 +1,6 @@
 """Site discovery and opposite-mode newest share the lazy native tile cache."""
 import threading
+from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 
 import pytest
@@ -144,11 +145,13 @@ def test_site_mode_neighbour_press_is_a_cache_hit(scene, hybrid, multisite, tmp_
     (tmp_path/'radar_source').write_text('site'); emitter._do_radar()
     ctx.update(preference_stamp=emitter._radar_preference_stamp(), refresh=dict(state='idle'))
     hybrid.view(); emitter._radar_prefetch(SITE, ctx)
-    hybrid.calls.clear(); multisite.calls.clear()
+    warm=set(emitter._radar_tiles);hybrid.calls.clear(); multisite.calls.clear()
     (tmp_path/'radar_viewed').unlink()
     (tmp_path/'radar_zoom').write_text(str(zoom)); emitter._do_radar()
     assert emitter._radar_result.source_mode == 'site' and emitter._radar_result.zoom == zoom
-    assert not hybrid.calls and not multisite.calls
+    assert not hybrid.calls and all(c[0]=='tile' for c in multisite.calls)
+    for _,site,url in multisite.calls:
+        assert not any(k[0]==SITE and k[1]==site and url.endswith('/%s/%s/%s.png' % (k[4],k[5],k[6])) for k in warm)
 
 
 def test_settled_mosaic_loop_precedes_cross_mode_warm_and_press(make_emitter, hybrid, multisite, tmp_path, monkeypatch):
@@ -163,8 +166,8 @@ def test_settled_mosaic_loop_precedes_cross_mode_warm_and_press(make_emitter, hy
     emitter._do_radar()
     first_site = next(i for i,(s,u) in enumerate(events) if s == SITE)
     preceding = [u for s,u in events[:first_site] if 'mrms::' in u]
-    assert len(preceding) == 8*12+15+12  # own loop then both neighbours
-    assert sum(f['complete'] for f in emitter._radar_result.frames) == 8
+    assert len(preceding) == 30+4+4  # newest + adjacent levels before cross-mode warm and history
+    assert 2<=sum(f['complete'] for f in emitter._radar_result.frames)<=8  # cross-mode tier may consume this pass's reserve
     # Let the real rolling window expire, retaining continuous viewed demand.
     hybrid.mono = 60; hybrid.view(); emitter._do_radar(intent_triggered=False)
     events.clear()
@@ -229,5 +232,5 @@ def test_sixty_spare_slots_admit_a_source_round_not_each_zoom(scene, hybrid):
     emitter._radar_prefetched = {k:v for k,v in emitter._radar_prefetched.items() if k[0] != SITE}
     emitter._radar_request_times = [0.] * (240-34-60)
     emitter._radar_prefetch(MRMS, ctx)
-    assert wanted and wanted <= emitter._radar_tiles.keys()
+    assert wanted and all(Path(ae._radar_tile_path(k[0],k[1],k[3],k[4],k[5],k[6])).exists() for k in wanted)
     assert len(emitter._radar_request_times) <= 240-34

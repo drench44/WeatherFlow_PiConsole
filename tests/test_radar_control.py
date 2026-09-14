@@ -210,7 +210,7 @@ def test_first_intent_validates_then_supersede_during_tiles_reuses(make_emitter,
     hybrid.failure = supersede
     emitter._do_radar(intent_triggered=True)
     assert kinds(hybrid.calls)[0] == 'META' and changed
-    assert emitter._radar_restart and not emitter._radar_result.available
+    assert emitter._radar_restart and emitter._radar_result.ts_frame is None
     validated = emitter._radar_newest[(source, None)][0]
     hybrid.failure = None; hybrid.calls.clear(); hybrid.mono = 30
     emitter._do_radar()

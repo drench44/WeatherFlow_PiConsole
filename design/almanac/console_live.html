@@ -591,13 +591,6 @@
   .rad-attrib { position: absolute; right: 12px; bottom: 9px; z-index: 2;
     font: 11.5px var(--sans); color: var(--ink-soft); }
   /* Basemap: Natural Earth (public domain). All pigment comes from theme tokens. */
-  .rad-base .bm-ocean,
-  .rad-base .bm-lake   { fill: var(--water-tint); fill-rule: evenodd; stroke: none; }
-  .rad-base .bm-coast  { fill: none; stroke: var(--water); stroke-opacity:.45; stroke-width:1; }
-  .rad-base .bm-admin0 { fill: none; stroke: var(--ink-soft); stroke-opacity:.5; stroke-width:1; }
-  .rad-base .bm-admin1 { fill: none; stroke: var(--rule-faint); stroke-width:1; stroke-dasharray:4 3; }
-  .rad-base .bm-road   { fill: none; stroke: var(--ink-soft); stroke-opacity:.32; stroke-width:1; }
-  .rad-base line { stroke: var(--rule-faint); stroke-width: 1; }
   .rad-over text { fill: var(--ink-soft); font: 11.5px var(--sans); }
   .rad-over .rad-cross { stroke: var(--rule); stroke-width: 1; }
   .rad-over .rad-station { fill: var(--paper); stroke: var(--ink); stroke-width: 3; }
@@ -1164,7 +1157,7 @@
     <div class="sc-body">
       <figure class="rad-plate" id="rad-plate" data-state="loading">
         <div class="rad-stack" id="rad-stack">
-        <svg class="rad-base" id="rad-base" viewBox="0 0 956 490" preserveAspectRatio="none" aria-hidden="true"></svg>
+        <canvas class="rad-base" id="rad-base" width="956" height="490" aria-hidden="true"></canvas>
         <canvas class="rad-echo" id="rad-echo" width="956" height="490" aria-label="Radar reflectivity" hidden></canvas>
         <svg class="rad-over" id="rad-over" viewBox="0 0 956 490" preserveAspectRatio="none" aria-label="Station, range rings and distance scale"></svg>
         </div>
@@ -1268,13 +1261,11 @@
     if (typeof radarLoopSync === "function" && radarView) {
       var enteringRadar = id === "s-radar" && !radarView.active;
       radarView.active = (id === "s-radar");
-      if (!radarView.active) { radarHistoryUntil=0; radarGestureCancel(); radarRelease(); }
-      else if (radarView.data) radarPreload(radarView.data);
-      radarBasemapSync();
+      if (!radarView.active) { radarGestureCancel(); radarRelease(); }
+      else if (radarView.data) radarActivate();
       radarIdleSync(false);
       radarLoopSync();
       if (enteringRadar) {
-        radarHistoryUntil=Date.now()+20000;
         poll(true);
       }
     }
@@ -2694,62 +2685,404 @@
     catEl.style.display = (rising || falling) ? "none" : "";
   }
 
-  /* Atomically stage source pixels, legend, geometry and scan time. */
-  var radarView = { geometry: null, legendKey: null, good: null, pending: null,
-                    generation: 0, wantedKey: null, current: null,
-                    failed: false, clear: false, retryAt: 0, data: null, refresh: {state:'idle'},
-                    loaded: [], loadKey: null, idx: 0, timer: null, paused: false, active: false };
-
-  // Only unconfirmed input is local. Committed zoom and source range come from
-  // the decoded payload; never persist browser state or resize the echo in CSS.
-  var radarSource = {desired:null, sent:false};
-  var radarIntent = {localSeq:0, pending:null, targetSeq:0, timer:null, ready:false, postedAt:0, restartUntil:0, restartKey:null};
-  function radarPostIntent() {
-    clearTimeout(radarIntent.timer); radarIntent.ready=false;
-    radarIntent.timer=setTimeout(function() {
-      radarIntent.timer=null; radarIntent.ready=true; poll();
-    },120);
+  /* V4: a local camera, opaque raster basemaps and stamp-addressed tiles. */
+  var RAD_W=956, RAD_H=490, RAD_FRAME_MS=110, RAD_HOLD_MS=1100;
+  var RAD_MAX_LAT=85.05112878, RAD_CONTROLS='.rad-src,.rad-src-cap,.rad-legend,.rad-loop,.rad-zoom,.rad-recenter';
+  var radarView={data:null,active:false,loaded:[],readyFrames:[],current:null,good:null,paused:false,
+    singleSweep:false,clear:false,refresh:{state:'idle'},legendKey:null,nextAt:0};
+  var radarCamera=null, radarSource={desired:null}, radarZoom={auto:true,requested:null};
+  var radarIntent={localSeq:0,ready:false,timer:null,postedAt:0};
+  var radarGesture={state:'idle',pointers:new Map(),samples:[],idleTimer:null,animation:null,inertia:null};
+  var radarBaseStyle={}, radarGeoTiles=new Map(), radarGeoQueue=[], radarGeoBusy=0, radarReserved=0, radarGeoPending=new Set(), radarGeoAbsent=new Map();
+  var radarTiles=new Map(), radarTilePending=new Set(), radarTileAbsent=new Map(), radarTileQueue=[], radarTileBusy=0;
+  var radarScratch=new OffscreenCanvas(956,490), radarTileScratch=new OffscreenCanvas(256,256);
+  var radarBaseDirty=true, radarCameraDirty=true, radarEchoDirty=true, radarRaf=null, radarLastPaint=-Infinity;
+  var radarCompositeJob=null, radarCameraRevision=0, radarEchoEpoch=0, radarIdlePrefetchAt=0;
+  var radarTileDamage=[],radarGeoDamage=[];
+  var radarMissingSince=new Map(), radarHatch=null, radarSiteTable=[], radarSitePaths=new Map(), radarOverlay=null;
+  var radarMetrics={basePaints:0,drawMs:[],firstPaintMs:null,activationAt:0,lastPoints:0,settlePoints:0,hatchRects:0,drawnTiles:[],memoryBytes:0};
+  function radarWorldPoint(lat,lon,z) { lat=clamp(lat,-RAD_MAX_LAT,RAD_MAX_LAT); var w=256*2**z;
+    return [(lon+180)/360*w,(1-Math.asinh(Math.tan(lat*Math.PI/180))/Math.PI)/2*w]; }
+  function radarWorldInverse(x,y,z) { var w=256*2**z; return {lat:Math.atan(Math.sinh(Math.PI*(1-2*y/w)))*180/Math.PI,lon:x/w*360-180}; }
+  function radarReduced() { return window.matchMedia('(prefers-reduced-motion: reduce)').matches; }
+  var RAD_TILE_BYTES=262144, RAD_PLATE_BYTES=1873760, RAD_MEMORY_CAP=41943040;
+  function radarMemory() {
+    radarMetrics.memoryBytes=RAD_PLATE_BYTES*3+RAD_TILE_BYTES+256+
+      (radarTiles.size+radarGeoTiles.size)*RAD_TILE_BYTES+radarView.loaded.filter(f=>f.bitmap).length*RAD_PLATE_BYTES+radarReserved;
+    radarMetrics.peakMemoryBytes=Math.max(radarMetrics.peakMemoryBytes||0,radarMetrics.memoryBytes);
+    return radarMetrics.memoryBytes;
   }
-  function radarNoteRender() {
-    var r=radarView.data, f=radarView.refresh || {state:'idle'}, note=$('rad-note'), copy='';
-    clearTimeout(radarIntent.noteTimer);
-    if (!r) { note.dataset.shown='false'; return; }
-    var elapsed=Date.now()-radarIntent.postedAt;
-    if (elapsed<600) {
-      radarIntent.noteTimer=setTimeout(radarNoteRender,601-elapsed);
-      note.dataset.shown='false'; return;
+  function radarAdmit(bytes) {
+    while(radarMemory()+bytes>RAD_MEMORY_CAP){
+      // Visible tiles are touched on paint, so idle margin/history components leave first.
+      var pool=radarTiles.size?radarTiles:radarGeoTiles;
+      if(!pool.size)return false;
+      var key=pool.keys().next().value;pool.get(key).bitmap.close();pool.delete(key);
     }
-    if (Date.now()<radarIntent.restartUntil) {
-      copy='Refreshing · restarted';
-      radarIntent.noteTimer=setTimeout(radarNoteRender,radarIntent.restartUntil-Date.now()+1);
-    } else if (f.forSeq<radarIntent.localSeq && ['newest','history','superseded'].includes(f.state)) copy='Refreshing · restarted';
-    else if (radarView.refreshFailure) copy="Couldn't refresh · showing "+radarFrameLabel(radarView.current || radarView.good || {});
-    else if (f.state==='newest') copy='Refreshing · newest frame';
-    else if (f.state==='history') copy='Refreshing · frame '+f.frameIndex+' of '+f.frameTotal;
-    else if (f.state==='failed') copy="Couldn't refresh · showing "+radarFrameLabel(radarView.current || radarView.good || {});
-    if (!copy) copy=radarView.zoomNote || '';
-    if (!copy && r.sourceFallback==='site-zoom-floor' && radarSource.desired!=='mosaic') {
-      var site=(r.sources || []).find(s => s.mode==='site');
-      if (site && site.siteId) copy=site.siteId+' resumes at zoom '+r.siteResumeZoom;
+    radarReserved+=bytes;radarMemory();return true;
+  }
+  function radarUnreserve(bytes){radarReserved-=bytes;radarMemory();}
+  function radarGeoClear(){radarGeoTiles.forEach(t=>t.bitmap.close());radarGeoTiles.clear();radarGeoQueue=[];radarGeoDamage=[];radarGeoAbsent.clear();radarBaseDirty=true;}
+  function radarWake() { if (radarView.active&&!document.hidden&&!radarRaf) radarRaf=requestAnimationFrame(radarFrame); }
+  function radarResolveStyle() {
+    var probe=document.createElement('i');$('rad-plate').append(probe);
+    ['--water-tint','--water','--ink-soft','--rule-faint','--paper','--ink','--rule'].forEach(k=>{probe.style.color='var('+k+')';radarBaseStyle[k]=getComputedStyle(probe).color;});probe.remove();
+    var explicit=document.documentElement.dataset.theme;var theme=explicit==='night'||explicit!=='paper'&&window.matchMedia('(prefers-color-scheme: dark)').matches?'night':'paper';
+    if(radarBaseStyle.theme!==theme){radarBaseStyle.theme=theme;radarGeoClear();radarGeoRequest();}
+    radarBaseStyle.ground=theme==='night'?'#0B0D11':'#EBE6DB';
+    radarBaseDirty=true; radarHatch=null;if(radarMetrics.hatchRects)radarEchoDirty=true;radarWake();
+  }
+  new MutationObserver(radarResolveStyle).observe(document.documentElement,{attributes:true,attributeFilter:['data-theme']});
+  window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change',radarResolveStyle);
+  function radarWrap(x,z){return ((x%2**z)+2**z)%2**z;}
+  function radarGeoKey(z,x,y,version=radarView.data?.geo?.version,theme=radarBaseStyle.theme){return version+'/'+theme+'/'+z+'/'+radarWrap(x,z)+'/'+y;}
+  function radarGeoRequest(idle=false) {
+    if(!radarView.active||!radarCamera||!radarView.data?.geo)return;
+    var z=radarLevel(),seen=new Set(),wanted=[];radarGeoQueue=[];
+    function want(t){var key=radarGeoKey(t.z,t.x,t.y);if(!seen.has(key)&&wanted.length<36){seen.add(key);wanted.push({...t,key,version:radarView.data.geo.version,theme:radarBaseStyle.theme});}}
+    var visible=radarTileSet(radarCamera,z);visible.forEach(want);
+    if(idle){for(var t of visible)if(!radarGeoTiles.has(radarGeoKey(z,t.x,t.y)))for(var d of [1,2])if(z-d>=4)want({z:z-d,x:Math.floor(t.x/2**d),y:Math.floor(t.y/2**d)});
+      radarTileSet(radarCamera,z,1).forEach(want);}
+    for(var t of wanted)if(!radarGeoTiles.has(t.key)&&!radarGeoPending.has(t.key)&&performance.now()>=(radarGeoAbsent.get(t.key)||0))radarGeoQueue.push(t);
+    radarPumpTiles();
+  }
+  async function radarReadPNG(response){
+    if(Number(response.headers.get('Content-Length'))>131072)throw Error('tile size');
+    var bytes=new Uint8Array(131072),used=0,reader=response.body.getReader();
+    try{while(true){var part=await reader.read();if(part.done)break;if(used+part.value.byteLength>bytes.length)throw Error('tile size');bytes.set(part.value,used);used+=part.value.byteLength;}}
+    catch(error){await reader.cancel();throw error;}finally{reader.releaseLock();}
+    var view=new DataView(bytes.buffer);if(used<24||view.getUint32(0)!==0x89504e47||view.getUint32(16)!==256||view.getUint32(20)!==256)throw Error('tile dimensions');
+    return bytes.subarray(0,used);
+  }
+  async function radarFetchGeo(job){
+    var bitmap=null;
+    try{var res=await fetch('radar/geo/'+job.key+'.png');if(!res.ok)throw Error('tile absent');
+      var buf=await radarReadPNG(res);
+      bitmap=await createImageBitmap(new Blob([buf],{type:'image/png'}));if(bitmap.width!==256||bitmap.height!==256)throw Error('tile size');
+      if(job.version!==radarView.data?.geo?.version||job.theme!==radarBaseStyle.theme)return;
+      while(radarGeoTiles.size>=36){var k=radarGeoTiles.keys().next().value;radarGeoTiles.get(k).bitmap.close();radarGeoTiles.delete(k);}
+      // Transfer the reserved decode slot to retained ownership, without an unaccounted interval.
+      radarUnreserve(786432);job.released=true;
+      if(!radarAdmit(RAD_TILE_BYTES))return;
+      radarGeoTiles.set(job.key,{bitmap});bitmap=null;radarUnreserve(RAD_TILE_BYTES);if(job.z===radarLevel())radarGeoDamage.push(job);else radarBaseDirty=true;radarWake();
+    }catch(e){radarGeoAbsent.set(job.key,performance.now()+2000);}
+    finally{if(bitmap)bitmap.close();if(!job.released)radarUnreserve(786432);radarGeoBusy--;radarGeoPending.delete(job.key);radarPumpTiles();}
+  }
+  function radarBasePaint(damageOnly=false){
+    var ctx=$('rad-base').getContext('2d',{alpha:false}),c=radarCamera,p=radarWorldPoint(c.lat,c.lon,c.zoom),z=radarLevel();
+    if(!damageOnly){ctx.fillStyle=radarBaseStyle.ground;ctx.fillRect(0,0,956,490);
+    var perDegree=256*2**c.zoom/360/Math.cos(c.lat*Math.PI/180);
+    var step=[5,2,1,.5,.25,.125].find(n=>n*perDegree<=220)||.125;
+    // Above 65 degrees z10 requires subdivisions of the smallest specified step.
+    while(step*perDegree>220)step/=2;
+    // The finite step table alone exceeds 25 segments at polar/equatorial edges.
+    while(490/(step*perDegree)>6)step*=2;
+    var lonStep=step,lonDegree=256*2**c.zoom/360;while(956/(lonStep*lonDegree)>17)lonStep*=2;
+    var lo=radarWorldInverse(p[0]-478,p[1]+245,c.zoom),hi=radarWorldInverse(p[0]+478,p[1]-245,c.zoom);
+    ctx.strokeStyle=radarBaseStyle['--rule-faint'];ctx.lineWidth=1;ctx.beginPath();
+    for(var lon=Math.ceil(lo.lon/lonStep)*lonStep;lon<=hi.lon;lon+=lonStep){var px=radarWorldPoint(0,lon,c.zoom)[0]-p[0]+478;ctx.moveTo(px,0);ctx.lineTo(px,490);}
+    for(var lat=Math.ceil(lo.lat/step)*step;lat<=hi.lat;lat+=step){var py=radarWorldPoint(lat,0,c.zoom)[1]-p[1]+245;ctx.moveTo(0,py);ctx.lineTo(956,py);}
+    ctx.stroke();}var exact=radarTileSet(c,z),allExact=exact.every(t=>radarGeoTiles.has(radarGeoKey(z,t.x,t.y)));
+    for(var level of damageOnly||allExact?[z]:[z-2,z-1,z]){if(level<4)continue;
+      var scale=2**(c.zoom-level),cp=radarWorldPoint(c.lat,c.lon,level);
+      for(var t of level===z?exact:radarTileSet(c,level)){
+        var key=radarGeoKey(level,t.x,t.y);if(damageOnly&&!radarGeoDamage.some(d=>d.key===key))continue;var tile=radarGeoTiles.get(key);if(!tile)continue;
+        radarGeoTiles.delete(key);radarGeoTiles.set(key,tile);
+        var x=Math.round(478+(t.x*256-cp[0])*scale),y=Math.round(245+(t.y*256-cp[1])*scale);
+        var right=Math.round(478+((t.x+1)*256-cp[0])*scale),bottom=Math.round(245+((t.y+1)*256-cp[1])*scale);
+        ctx.imageSmoothingEnabled=scale!==1;ctx.imageSmoothingQuality='low';ctx.drawImage(tile.bitmap,x,y,right-x,bottom-y);
+      }
     }
-    note.textContent=copy; note.dataset.shown=String(!!copy);
+    radarBaseDirty=false;radarGeoDamage=[];radarMetrics.basePaints++;
+    if(radarMetrics.firstPaintMs===null&&exact.some(t=>radarGeoTiles.has(radarGeoKey(z,t.x,t.y))))radarMetrics.firstPaintMs=performance.now()-radarMetrics.activationAt;
+  }
+  function radarFrameKey(f) { return (f.revision||radarView.data.tiles.revision)+'/'+(f.sourceId||radarView.data.sourceId)+'/'+f.stamp+'/'+JSON.stringify(f.siteScans||[]); }
+  function radarTileKey(f,z,x,y) {return radarFrameKey(f)+'/'+z+'/'+radarWrap(x,z)+'/'+y;}
+  function radarTileSet(c,z,margin=0) {
+    var p=radarWorldPoint(c.lat,c.lon,z),s=2**(c.zoom-z),x0=Math.floor((p[0]-478/s)/256)-margin,y0=Math.max(0,Math.floor((p[1]-245/s)/256)-margin);
+    var x1=Math.ceil((p[0]+478/s)/256)-1+margin,y1=Math.min(2**z-1,Math.ceil((p[1]+245/s)/256)-1+margin),out=[];
+    for(var y=y0;y<=y1;y++)for(var x=x0;x<=x1;x++)out.push({x,y,z,d:Math.hypot(x+.5-p[0]/256,y+.5-p[1]/256)});return out.sort((a,b)=>a.d-b.d);
+  }
+  function radarLevel() {return clamp(Math.floor(radarCamera.zoom+1e-9),radarView.data.zoomMin,radarView.data.zoomMax);}
+  function radarTileURL(source,site,stamp,z,x,y) {
+    if(!['iem-mrms-lcref','iem-nexrad-n0b','rainviewer'].includes(source)||!/^(-|K[A-Z0-9]{3}|P[A-Z0-9]{3}|T[A-Z0-9]{3}|R[A-Z0-9]{3})$/.test(site)||!/^\d{12}$/.test(stamp))throw Error('tile identity');
+    var rev=radarView.pendingSource?.data.tiles.revision||radarView.data.tiles.revision;if(!/^[a-f0-9]{12}$/.test(rev))throw Error('render revision');
+    return 'radar/t/'+rev+'/'+source+'/'+site+'/'+stamp+'/'+z+'/'+radarWrap(x,z)+'/'+y+'.png';
+  }
+  function radarStamp(ts) {return new Date(ts*1000).toISOString().slice(0,16).replace(/[-T:]/g,'');}
+  function radarPNGMeta(buffer) {
+    var a=buffer instanceof Uint8Array?buffer:new Uint8Array(buffer),v=new DataView(a.buffer,a.byteOffset,a.byteLength),pos=8;
+    if(a.length<24||v.getUint32(0)!==0x89504e47)throw Error('tile PNG');
+    var meta=null,visible=null;
+    while(pos+12<=a.length){var len=v.getUint32(pos),type=String.fromCharCode(...a.subarray(pos+4,pos+8));if(pos+12+len>a.length)throw Error('tile chunk');
+      if(type==='tEXt'){var text=new TextDecoder().decode(a.subarray(pos+8,pos+8+len));if(text.startsWith('radarRemap\0'))meta=JSON.parse(text.slice(11));if(text.startsWith('radarVisiblePixels\0'))visible=Number(text.slice(19));}pos+=len+12;}
+    if(!meta||typeof meta.remapped!=='boolean'||meta.revision!==(radarView.pendingSource?.data.tiles.remapRevision||radarView.data.tiles.remapRevision))throw Error('tile metadata');
+    for(var k of ['unmatchedColors','opaqueColors','unmatchedPixels','opaquePixels','ambiguousPixels'])if(!Number.isInteger(meta[k])||meta[k]<0)throw Error('tile counts');
+    if(meta.unmatchedPixels>meta.opaquePixels||meta.opaquePixels>65536||meta.ambiguousPixels>meta.opaquePixels||meta.remapped!==(meta.unmatchedPixels<=.02*meta.opaquePixels&&!meta.ambiguousPixels))throw Error('tile honesty');if(!Number.isInteger(visible)||visible<0||visible>65536)throw Error('tile visibility');meta.visiblePixels=visible;return meta;
+  }
+  function radarTileRemember(key,tile) {
+    var old=radarTiles.get(key);if(old&&old.bitmap!==tile.bitmap)old.bitmap.close();radarTiles.delete(key);
+    var current=radarView.good,z=radarCamera&&radarLevel(),protectedKeys=new Set(current&&radarCamera?radarTileSet(radarCamera,z,1).map(t=>radarTileKey(current,z,t.x,t.y)):[]);
+    while(radarTiles.size>=40){var victim=[...radarTiles.keys()].find(k=>!protectedKeys.has(k))||radarTiles.keys().next().value;radarTiles.get(victim).bitmap.close();radarTiles.delete(victim);}
+    if(!radarAdmit(RAD_TILE_BYTES)){tile.bitmap.close();return;}
+    radarTiles.set(key,tile);radarUnreserve(RAD_TILE_BYTES);
+  }
+  function radarQueueTiles() {
+    radarTileQueue=[];if(!radarView.active||!radarCamera||!radarView.good)return;
+    var pending=radarView.pendingSource,f=pending?pending.frame:radarView.current||radarView.good,z=pending?clamp(Math.round(radarCamera.zoom),pending.data.zoomMin,pending.data.zoomMax):radarLevel(),seen=new Set();
+    function add(fr,t,history=false) {if(!radarExpected(fr,t))return;var manifest=pending?pending.data.tiles:radarView.data.tiles,grid=manifest&&manifest.grid;
+      if(grid&&manifest.newest&&fr.stamp===manifest.newest.stamp&&t.z===manifest.z&&t.x>=grid.x0&&t.x<grid.x0+grid.w&&t.y>=grid.y0&&t.y<grid.y0+grid.h){var bit=(t.y-grid.y0)*grid.w+t.x-grid.x0;if(!(BigInt('0x'+(manifest.newest.mask||'0'))&(1n<<BigInt(bit))))return;}
+      var key=radarTileKey(fr,t.z,t.x,t.y);if(!seen.has(key)&&(!radarTiles.has(key)||radarTiles.get(key).partial&&performance.now()>=radarTiles.get(key).retryAt)&&!radarTilePending.has(key)&&performance.now()>=(radarTileAbsent.get(key)||0)){seen.add(key);radarTileQueue.push({f:fr,...t,key,history,source:fr.sourceId||radarView.data.sourceId,epoch:radarEchoEpoch,transition:radarView.transition});}}
+    radarTileSet(radarCamera,z).forEach(t=>add(f,t));if(pending){radarPumpTiles();return;}if(radarGesture.state!=='idle'){radarPumpTiles();return;}radarTileSet(radarCamera,z,1).forEach(t=>add(f,t));
+    for(var level of [z-1,z+1])if(level>=radarView.data.zoomMin&&level<=radarView.data.zoomMax){var p=radarWorldPoint(radarCamera.lat,radarCamera.lon,level);for(var y of [Math.floor(p[1]/256)-1,Math.floor(p[1]/256)])for(var x of [Math.floor(p[0]/256)-1,Math.floor(p[0]/256)])if(x>=0&&y>=0)add(f,{z:level,x,y});}
+    if(radarGesture.state==='idle'&&radarCompositeJob)for(var t of radarCompositeJob.tiles)if(!radarCompositeJob.done.has(t.x+'/'+t.y))add(radarCompositeJob.f,t,true);
+    radarPumpTiles();
+  }
+  function radarPumpTiles(){
+    while(radarTileBusy+radarGeoBusy<4&&(radarTileQueue.length||radarGeoQueue.length)){
+      if(!radarAdmit(786432))break;
+      // Geography first on a cold map, then measurement acquisition.
+      if(radarGeoQueue.length){var job=radarGeoQueue.shift();radarGeoBusy++;radarGeoPending.add(job.key);radarFetchGeo(job);}
+      else{var job=radarTileQueue.shift();radarTileBusy++;radarTilePending.add(job.key);radarFetchTile(job);}
+    }
+  }
+  function radarExpected(f,t){return !f.siteScans?.length||f.siteScans.some(s=>radarSiteCovers(s.id,t.z,t.x,t.y));}
+  function radarSiteCovers(id,z,x,y) {
+    if(id==='-')return true;
+    var site=radarSiteTable.find(s=>s.id===id)||(radarView.pendingSource?.data.sites||radarView.data.sites||[]).find(s=>s.id===id);
+    if(!site)return true;
+    var nw=radarWorldInverse(x*256,y*256,z),se=radarWorldInverse((x+1)*256,(y+1)*256,z),rad=Math.PI/180;
+    var width=(se.lon-nw.lon+360)%360,offset=(site.lon-nw.lon+360)%360,edges=offset<=width?[site.lon]:[nw.lon,se.lon],a=site.lat*rad;
+    for(var edge of edges){var dl=((edge-site.lon+540)%360-180)*rad,opt=Math.atan2(Math.sin(a),Math.cos(a)*Math.cos(dl))/rad;
+      for(var lat of [se.lat,nw.lat,clamp(opt,se.lat,nw.lat)]){var b=lat*rad,h=Math.sin((b-a)/2)**2+Math.cos(a)*Math.cos(b)*Math.sin(dl/2)**2;if(6371008.8*2*Math.asin(Math.sqrt(Math.min(1,h)))<=230000)return true;}}
+    return false;
+  }
+  async function radarFetchTile(job) {
+    var bitmap=null,meta={opaquePixels:0,unmatchedPixels:0,ambiguousPixels:0,unmatchedColors:0,opaqueColors:0,remapped:true},hasEcho=false;
+    var actualSites=[],partial=false;
+    var scans=job.f.siteScans&&job.f.siteScans.length?job.f.siteScans:[{id:'-',ts:job.f.ts}];
+    try {
+      for(var scan of scans) {
+        if(!radarSiteCovers(scan.id,job.z,job.x,job.y))continue;
+        var url=radarTileURL(job.source,scan.id,radarStamp(scan.ts),job.z,job.x,job.y),res=await fetch(url);
+        if(!res.ok){partial=true;continue;}var buf=await radarReadPNG(res);var m=radarPNGMeta(buf);
+        var next=await createImageBitmap(new Blob([buf],{type:'image/png'}));if(next.width!==256||next.height!==256){next.close();throw Error('tile size');}
+        var cx=radarTileScratch.getContext('2d',{willReadFrequently:true});cx.imageSmoothingEnabled=false;cx.clearRect(0,0,256,256);if(bitmap)cx.drawImage(bitmap,0,0);cx.drawImage(next,0,0);next.close();if(bitmap)bitmap.close();
+        // One shared scratch, synchronous merge/transfer: never four RGBA site layers.
+        hasEcho=hasEcho||m.visiblePixels>0;
+        bitmap=radarTileScratch.transferToImageBitmap();if(scan.id!=='-')actualSites.push(scan);for(var k of ['opaquePixels','unmatchedPixels','ambiguousPixels','opaqueColors','unmatchedColors'])meta[k]+=m[k];
+      }
+      if(!bitmap)throw Error('tile absent');
+      meta.remapped=meta.unmatchedPixels<=.02*meta.opaquePixels&&!meta.ambiguousPixels;
+      if(job.epoch!==radarEchoEpoch||!radarView.active){bitmap.close();bitmap=null;return;}
+      radarUnreserve(786432);job.released=true;
+      radarTileRemember(job.key,{bitmap,meta,hasEcho,z:job.z,x:job.x,y:job.y,key:job.key,sites:actualSites,partial,retryAt:performance.now()+2000});bitmap=null;
+      if(radarView.pendingSource&&job.transition===radarView.transition&&radarFrameKey(job.f)===radarFrameKey(radarView.pendingSource.frame)){
+        var next=radarView.pendingSource.data;radarView.pendingSource=null;
+        radarView.loaded.forEach(f=>{if(f.bitmap)f.bitmap.close();});radarView.loaded=[];radarView.readyFrames=[];radarView.good=radarView.current=null;radarCompositeJob=null;
+        radarView.acceptingSource=true;renderRadar({radar:next});radarView.acceptingSource=false;radarCamera.zoom=clamp(radarCamera.zoom,next.zoomMin,next.zoomMax);radarCameraDirty=true;radarBaseDirty=true;radarEchoDirty=true;
+      }
+      if(radarView.current&&radarFrameKey(job.f)===radarFrameKey(radarView.current)){radarTileDamage.push({x:job.x,y:job.y,z:job.z});radarEchoDirty=true;}radarWake();
+    } catch(e){if(bitmap)bitmap.close();radarTileAbsent.set(job.key,performance.now()+2000);}
+    finally {if(!job.released)radarUnreserve(786432);radarTileBusy--;radarTilePending.delete(job.key);radarMemory();radarPumpTiles();}
+  }
+  function radarFindTile(f,z,x,y) {
+    for(var delta=0;delta<=2;delta++){var factor=2**delta,level=z-delta;if(level<0)break;var key=radarTileKey(f,level,Math.floor(x/factor),Math.floor(y/factor)),t=radarTiles.get(key);
+      if(t){radarTiles.delete(key);radarTiles.set(key,t);return {tile:t,sx:((x%factor+factor)%factor)*256/factor,sy:(y%factor)*256/factor,size:256/factor};}}
+    return null;
+  }
+  function radarHatchPattern(ctx) {
+    if(!radarHatch){var c=new OffscreenCanvas(8,8),x=c.getContext('2d');x.strokeStyle=radarBaseStyle['--rule-faint'];x.lineWidth=1;x.beginPath();x.moveTo(-1,1);x.lineTo(1,-1);x.moveTo(0,8);x.lineTo(8,0);x.moveTo(7,9);x.lineTo(9,7);x.stroke();radarHatch=ctx.createPattern(c,'repeat');}return radarHatch;
+  }
+  function radarPaintHatch(ctx,rects,z){
+    var p=radarWorldPoint(radarCamera.lat,radarCamera.lon,z),s=2**(radarCamera.zoom-z);
+    ctx.save();ctx.beginPath();for(var tile of radarTileSet(radarCamera,z)){
+      if([0,1,2].some(d=>z-d>=4&&radarGeoTiles.has(radarGeoKey(z-d,Math.floor(tile.x/2**d),Math.floor(tile.y/2**d))))){
+        var x=Math.round(478+(tile.x*256-p[0])*s),y=Math.round(245+(tile.y*256-p[1])*s);ctx.rect(x,y,Math.round(256*s),Math.round(256*s));
+      }
+    }ctx.clip();ctx.fillStyle=radarHatchPattern(ctx);ctx.beginPath();rects.forEach(r=>ctx.rect(...r));ctx.fill();ctx.restore();
+  }
+  function radarEchoPaint(f,ctx=$('rad-echo').getContext('2d'),hatch=true) {
+    if(!f){ctx.clearRect(0,0,956,490);return;}
+    if(f.bitmap&&radarGesture.state==='idle'&&JSON.stringify(f.camera)===JSON.stringify(radarCamera)){
+      ctx.clearRect(0,0,956,490);ctx.imageSmoothingEnabled=false;ctx.drawImage(f.bitmap,0,0);
+      var level=radarLevel(),cp=radarWorldPoint(radarCamera.lat,radarCamera.lon,level),outside=radarTileSet(radarCamera,level).filter(t=>!radarExpected(f,t));
+      var gaps=outside.filter(t=>{var key='coverage/'+level+'/'+t.x+'/'+t.y;if(!radarMissingSince.has(key))radarMissingSince.set(key,performance.now());return performance.now()-radarMissingSince.get(key)>=400;})
+        .map(t=>[Math.round(478+t.x*256-cp[0]),Math.round(245+t.y*256-cp[1]),256,256]);
+      radarMetrics.hatchRects=gaps.length;if(hatch&&gaps.length)radarPaintHatch(ctx,gaps,level);
+      $('rad-plate').setAttribute('aria-label','Reflectivity radar'+(f.siteScans?.length?' · '+f.siteScans.map(s=>s.id).join(', '):'')+(gaps.length?' · partial coverage':''));
+      radarView.clear=f.ready&&!f.hasEcho&&!outside.length&&f.legend?.remapped!==false;return;
+    }
+    var z=radarLevel(),p=radarWorldPoint(radarCamera.lat,radarCamera.lon,z),s=2**(radarCamera.zoom-z),missing=[],drawn=[],now=performance.now(),hasEcho=false;
+    ctx.clearRect(0,0,956,490);ctx.imageSmoothingEnabled=false;
+    // A playing history scan has a measured plate bitmap, even after its tiles
+    // leave the LRU. Reproject that retained region while missing tiles load.
+    var retained=f.bitmap&&f.camera&&radarGesture.state!=='idle';
+    if(retained){hasEcho=f.hasEcho;var origin=radarWorldPoint(f.camera.lat,f.camera.lon,radarCamera.zoom),cp=radarWorldPoint(radarCamera.lat,radarCamera.lon,radarCamera.zoom),rs=2**(radarCamera.zoom-f.camera.zoom);ctx.imageSmoothingEnabled=false;ctx.drawImage(f.bitmap,Math.round(478+origin[0]-cp[0]-478*rs),Math.round(245+origin[1]-cp[1]-245*rs),Math.round(956*rs),Math.round(490*rs));ctx.save();ctx.beginPath();ctx.rect(0,0,956,490);ctx.rect(Math.round(478+origin[0]-cp[0]-478*rs),Math.round(245+origin[1]-cp[1]-245*rs),Math.round(956*rs),Math.round(490*rs));ctx.clip('evenodd');}
+    var counts={opaquePixels:0,unmatchedPixels:0,ambiguousPixels:0};
+    for(var t of radarTileSet(radarCamera,z)) {var x=Math.round(478+(t.x*256-p[0])*s),y=Math.round(245+(t.y*256-p[1])*s),right=Math.round(478+((t.x+1)*256-p[0])*s),bottom=Math.round(245+((t.y+1)*256-p[1])*s),found=radarFindTile(f,z,t.x,t.y),key=radarExpected(f,t)?radarTileKey(f,z,t.x,t.y):'coverage/'+z+'/'+t.x+'/'+t.y;
+      if(found){ctx.imageSmoothingEnabled=false;ctx.drawImage(found.tile.bitmap,found.sx,found.sy,found.size,found.size,x,y,right-x,bottom-y);drawn.push(found.tile);hasEcho=hasEcho||found.tile.hasEcho;if(found.tile.partial){if(!radarMissingSince.has(key))radarMissingSince.set(key,now);if(now-radarMissingSince.get(key)>=400)missing.push([x,y,right-x,bottom-y]);}else radarMissingSince.delete(key);}
+      else {if(!radarMissingSince.has(key))radarMissingSince.set(key,now);if(now-radarMissingSince.get(key)>=400)missing.push([x,y,right-x,bottom-y]);}
+    }
+    if(retained)ctx.restore();
+    var unique=new Set(drawn);for(var t of unique)for(var k of Object.keys(counts))counts[k]+=t.meta[k];
+    var incomplete=counts.unmatchedPixels>.02*counts.opaquePixels||counts.ambiguousPixels>0;
+    if(!retained){f.legend={remapped:!incomplete};f.hasEcho=hasEcho;f.ready=drawn.length===radarTileSet(radarCamera,z).filter(t=>radarExpected(f,t)).length&&drawn.every(t=>!t.partial);f.drawnSites=[...new Map(drawn.flatMap(t=>t.sites||[]).map(s=>[s.id,s])).values()];}
+    radarMetrics.drawnTiles=[...unique].map(t=>t.key);radarMetrics.hatchRects=hatch&&drawn.length&&radarGesture.state==='idle'?missing.length:0;
+    if(radarMetrics.hatchRects)radarPaintHatch(ctx,missing,z);
+    ctx.imageSmoothingEnabled=true;$('rad-echo').hidden=false;
+    var sites=f.drawnSites||f.siteScans||[];var aria='Reflectivity radar'+(sites.length?' · '+sites.map(s=>s.id).join(', '):'')+(radarMetrics.hatchRects?' · partial coverage':'');
+    if($('rad-plate').getAttribute('aria-label')!==aria)$('rad-plate').setAttribute('aria-label',aria);
+    radarView.clear=f.ready&&!hasEcho&&!incomplete&&f.legend?.remapped!==false&&(!retained||drawn.length===radarTileSet(radarCamera,z).length&&drawn.every(t=>!t.partial))&&radarTileSet(radarCamera,z).every(t=>radarExpected(f,t));
+  }
+  function radarHistoryWork() {
+    if(radarGesture.state!=='idle'||!radarView.good)return;
+    var z=radarLevel();
+    if(!radarCompositeJob){var f=radarView.loaded.slice(0,-1).reverse().find(f=>!f.bitmap&&!f.compositeFailed&&f.levels[String(z)]===true);if(!f)return;
+      radarCompositeJob={f,revision:radarCameraRevision,tiles:radarTileSet(radarCamera,z).filter(t=>radarExpected(f,t)),done:new Set(),hasEcho:false,meta:{opaquePixels:0,unmatchedPixels:0,ambiguousPixels:0}};radarScratch.getContext('2d').clearRect(0,0,956,490);radarQueueTiles();}
+    var job=radarCompositeJob,ctx=radarScratch.getContext('2d'),p=radarWorldPoint(radarCamera.lat,radarCamera.lon,z);
+    ctx.imageSmoothingEnabled=false;
+    for(var t of job.tiles){var id=t.x+'/'+t.y;if(job.done.has(id))continue;var tile=radarTiles.get(radarTileKey(job.f,z,t.x,t.y));if(!tile||tile.partial)continue;
+      ctx.drawImage(tile.bitmap,Math.round(478+t.x*256-p[0]),Math.round(245+t.y*256-p[1]));job.done.add(id);job.hasEcho=job.hasEcho||tile.hasEcho;for(var k of Object.keys(job.meta))job.meta[k]+=tile.meta[k];}
+    if(job.done.size===job.tiles.length){if(!radarAdmit(RAD_PLATE_BYTES))return;var completed=radarScratch.transferToImageBitmap();radarReserved-=RAD_PLATE_BYTES;job.f.bitmap=completed;job.f.camera={...radarCamera};job.f.ready=true;job.f.hasEcho=job.hasEcho;job.f.legend={remapped:job.meta.unmatchedPixels<=.02*job.meta.opaquePixels&&!job.meta.ambiguousPixels};radarCompositeJob=null;radarUpdateReady();radarLoopSync();radarMemory();radarQueueTiles();}
+  }
+  function radarUpdateReady(){var frames=radarView.loaded,start=frames.length;while(start>0&&frames[start-1].ready)--start;radarView.readyFrames=frames.slice(start);}
+  function radarReady(){return radarView.readyFrames;}
+  function radarRelease(){radarView.pendingSource=null;radarEchoEpoch++;radarTileQueue=[];radarTiles.forEach(t=>t.bitmap.close());radarTiles.clear();radarView.loaded.forEach(f=>{if(f.bitmap)f.bitmap.close();});radarView.loaded=[];radarView.readyFrames=[];radarView.good=radarView.current=null;radarCompositeJob=null;radarView.nextAt=0;radarMissingSince.clear();radarMemory();$('rad-loop').hidden=true;}
+  function radarFrameLabel(fr){if(fr.at)return fr.at;var r=radarView.data;if(!r||!r.observedAt||!isNum(fr.ts))return '—';var a=r.observedAt.split(':'),m=(+a[0]*60+(+a[1])-Math.round((r.observedTs-fr.ts)/60)+1440)%1440;return String(Math.floor(m/60)).padStart(2,'0')+':'+String(m%60).padStart(2,'0');}
+  function radarCouldLoop(){return !radarView.pendingSource&&radarGesture.state==='idle'&&radarView.active&&!document.hidden&&radarReady().length>=2&&radarReady().some(f=>f.hasEcho)&&!radarView.data.stale;}
+  function radarLoopSync(){var r=radarView.data,ready=radarReady(),play=$('rad-play'),loop=$('rad-loop');if(!r||!radarView.active){loop.hidden=true;return;}
+    loop.hidden=false;var intent=!radarView.paused&&(!radarReduced()||radarView.singleSweep);play.hidden=false;play.disabled=false;play.textContent=intent?'❙❙':'▶';play.setAttribute('aria-label',intent?'Pause radar loop':'Play radar loop');$('rad-track').dataset.frames=ready.length?'1':'0';
+    var read=$('rad-frame-time'),f=radarView.current;read.removeAttribute('aria-label');
+    if(ready.length<2&&!(f&&!f.ready&&radarMetrics.drawnTiles.length))read.textContent=(intent?'Buffering':'Paused')+' · '+ready.length+' of 8';
+    else if(ready.length>=2&&ready.every(f=>!f.hasEcho&&(!f.legend||f.legend.remapped!==false))&&!(r.sites||[]).some(s=>s.reason))read.textContent=(intent?'':'Paused · ')+'No echoes · clear';
+    else if(f)read.textContent=(intent?'':'Paused · ')+radarFrameLabel(f)+' · '+(f.ts===r.observedTs?'newest':'−'+Math.round((r.observedTs-f.ts)/60)+' min');
+    var index=ready.indexOf(f);$('rad-tick').style.left=(ready.length>1?Math.max(0,index)/(ready.length-1)*218:218)+'px';
+    if(!radarCouldLoop()||!intent)radarView.nextAt=0;else if(!radarView.nextAt)radarView.nextAt=performance.now()+RAD_HOLD_MS;
+    radarWake();
+  }
+  $('rad-play').addEventListener('click',function(){if(radarReduced()){radarView.singleSweep=!radarView.singleSweep;radarView.paused=!radarView.singleSweep;radarView.current=radarView.good;radarEchoDirty=true;}else radarView.paused=!radarView.paused;radarLoopSync();if(!radarReduced())$('rad-play').animate([{opacity:.5},{opacity:1}],{duration:120});});
+  function radarPreload(r){if(!radarView.active)return;var frames=(r.tiles&&r.tiles.frames||[]).slice(-8),have=new Map(radarView.loaded.map(f=>[radarFrameKey(f),f]));
+    radarView.loaded=frames.map(f=>{var old=have.get(radarFrameKey(f));if(old){Object.assign(old,f);have.delete(radarFrameKey(f));return old;}return {...f,ready:false,hasEcho:false};});have.forEach(f=>{if(f.bitmap)f.bitmap.close();});
+    var newest=radarView.loaded.at(-1)||null;if(newest!==radarView.good){if(newest&&newest.bitmap){newest.bitmap.close();delete newest.bitmap;}radarView.good=newest;radarView.current=newest;radarEchoDirty=true;}
+    radarUpdateReady();radarQueueTiles();radarWake();
+  }
+  function radarOverlayBuild(){if(!radarCamera||!radarView.data)return;var r=radarView.data,over=$('rad-over');if(!radarOverlay){over.replaceChildren();radarOverlay={geo:el('g',{id:'rad-geo'},over),chrome:el('g',{id:'rad-chrome'},over),labels:[]};}
+    var o=radarOverlay;o.geo.replaceChildren();o.chrome.replaceChildren();o.labels=[];var p=radarWorldPoint(r.center.lat,r.center.lon,9),mpp=156543.034*Math.cos(r.center.lat*Math.PI/180)/512;
+    function geo(tag,attrs){return el(tag,{...attrs,'vector-effect':'non-scaling-stroke'},o.geo);}
+    for(var ring of r.rings||[]){var radius=ring.meters/mpp;geo('circle',{class:'ring',cx:p[0],cy:p[1],r:radius});var text=el('text',{x:0,y:0},o.chrome);text.textContent=ring.label;o.labels.push({translated:true,node:text,x:p[0],y:p[1]-radius,dx:8,dy:-5});}
+    var iconScale=2**(9-radarCamera.zoom);
+    var displaced=Math.hypot(radarCamera.lat-r.center.lat,radarCamera.lon-r.center.lon)>1e-8;
+    if(!displaced)geo('path',{class:'rad-cross',d:'M'+(p[0]-18*iconScale)+','+p[1]+'h'+36*iconScale+' M'+p[0]+','+(p[1]-18*iconScale)+'v'+36*iconScale});else geo('circle',{class:'rad-station-accent',cx:p[0],cy:p[1],r:10*iconScale});
+    geo('circle',{class:'rad-station',cx:p[0],cy:p[1],r:6*iconScale});geo('circle',{class:'rad-dot',cx:p[0],cy:p[1],r:2*iconScale});
+    var sites=(r.sites||[]).filter(s=>s.contributing);if(sites.length>=2)for(var site of sites){var staticSite=radarSiteTable.find(s=>s.id===site.id)||site;if(!isNum(staticSite.lat)||!isNum(staticSite.lon))continue;
+      var path=radarSitePaths.get(site.id);if(!path){path='';var a=staticSite.lat*Math.PI/180,l=staticSite.lon*Math.PI/180,d=230000/6371008.8;for(var i=0;i<=120;i++){var b=i/120*2*Math.PI,lat=Math.asin(Math.sin(a)*Math.cos(d)+Math.cos(a)*Math.sin(d)*Math.cos(b)),lon=l+Math.atan2(Math.sin(b)*Math.sin(d)*Math.cos(a),Math.cos(d)-Math.sin(a)*Math.sin(lat)),q=radarWorldPoint(lat*180/Math.PI,lon*180/Math.PI,9);path+=(i?'L':'M')+q[0]+','+q[1];}path+='Z';radarSitePaths.set(site.id,path);}
+      var wrapOffset=Math.round((r.center.lon-staticSite.lon)/360)*256*512;geo('path',{class:'rad-site-edge',d:path,transform:'translate('+wrapOffset+',0)'});var q=radarWorldPoint(staticSite.lat,staticSite.lon,9);q[0]+=wrapOffset;geo('circle',{class:'rad-site-dot',cx:q[0],cy:q[1],r:2*iconScale});var text=el('text',{class:'rad-site-label'},o.chrome);text.textContent=site.id;o.labels.push({node:text,x:q[0],y:q[1],dx:5,dy:13});}
+    var choices=r.scaleChoices||[],m=156543.034*Math.cos(radarCamera.lat*Math.PI/180)/2**radarCamera.zoom;o.scale=choices.filter(c=>c.meters/m<=490*.25).at(-1)||{meters:0,label:''};o.bar=el('path',{class:'rad-scale'},o.chrome);el('text',{x:340,y:458},o.chrome).textContent=o.scale.label;
+    var cp=radarWorldPoint(radarCamera.lat,radarCamera.lon,radarCamera.zoom),sc=2**(radarCamera.zoom-9);
+    o.labels=o.labels.filter(l=>{var x=l.x*sc+478-cp[0],y=l.y*sc+245-cp[1]+l.dy,keep=x>=0&&x+42<=956&&y-12>=76&&y<=412;if(!keep)l.node.remove();return keep;});
+    radarOverlayPaint();
+  }
+  function radarOverlayPaint(){if(!radarOverlay)return;var o=radarOverlay,c=radarCamera,p=radarWorldPoint(c.lat,c.lon,c.zoom),s=2**(c.zoom-9),tx=478-p[0]+Math.round((c.lon-radarView.data.center.lon)/360)*256*2**c.zoom,ty=245-p[1];o.geo.setAttribute('transform','translate('+tx+','+ty+') scale('+s+')');
+    for(var l of o.labels){var x=l.x*s+tx+l.dx,y=l.y*s+ty+l.dy;if(l.translated)l.node.setAttribute('transform','translate('+x+','+clamp(y,88,412)+')');else{l.node.setAttribute('x',x);l.node.setAttribute('y',clamp(y,88,412));}}
+    var mpp=156543.034*Math.cos(c.lat*Math.PI/180)/2**c.zoom;o.bar.setAttribute('d','M340,464v8H'+(340+o.scale.meters/mpp)+'v-8');
+  }
+  function radarCameraSet(c){radarCamera={lat:c.lat,lon:c.lon,zoom:c.zoom};radarCameraDirty=true;radarEchoDirty=true;radarWake();}
+  function radarClampCamera(c,resist=false){var p=radarWorldPoint(c.lat,c.lon,c.zoom),r=radarView.data.center,h=radarWorldPoint(r.lat,r.lon,c.zoom),world=256*2**c.zoom;h[0]+=Math.round((p[0]-h[0])/world)*world;var v=[p[0]-h[0],p[1]-h[1]],d=Math.hypot(...v),cap=1.5*Math.hypot(956,490),w=256*2**c.zoom,q=p.slice();
+    if(d>cap){q=[h[0]+v[0]*cap/d,h[1]+v[1]*cap/d];}q=[q[0],clamp(q[1],245,w-245)];if(resist)q=q.map((n,i)=>n+.3*(p[i]-n));return {...radarWorldInverse(...q,c.zoom),zoom:c.zoom};}
+  function radarFocal(c,z,from,to=from){var p=radarWorldPoint(c.lat,c.lon,c.zoom),s=2**(z-c.zoom),q=[(p[0]+from.x-478)*s-(to.x-478),(p[1]+from.y-245)*s-(to.y-245)];return {...radarWorldInverse(...q,z),zoom:z};}
+  function radarBegin(){clearTimeout(radarIntent.timer);radarGesture.animation=null;radarGesture.inertia=null;radarGesture.state='gesturing';radarView.nextAt=0;radarCompositeJob=null;radarIdleSync(true);}
+  function radarSettle(){radarGesture.state='idle';radarGesture.animation=null;radarGesture.inertia=null;radarCameraSet(radarClampCamera(radarCamera));radarBaseDirty=true;radarCameraRevision++;radarCompositeJob=null;
+    radarView.loaded.forEach(f=>{if(f.bitmap){f.bitmap.close();delete f.bitmap;}f.ready=false;delete f.compositeFailed;});radarView.current=radarView.good;radarUpdateReady();
+    try{sessionStorage.setItem('radarCamera',JSON.stringify({...radarCamera,auto:radarZoom.auto,requested:radarZoom.requested}));}catch(e){}radarOverlayBuild();radarGeoRequest();radarQueueTiles();radarZoomRender();radarPostIntent();radarIdleSync(true);radarMemory();}
+  function radarEase(target,duration,focal){radarBegin();if(radarReduced()){radarCameraSet(target);radarSettle();return;}radarGesture.animation={from:{...radarCamera},target,duration,start:performance.now(),focal};radarWake();}
+  function radarZoomChange(step,focal={x:478,y:245}){if(!radarView.active||!radarCamera)return;var r=radarView.data,z=step===0?clamp(r.zoomAutoLevel,r.zoomMin,r.zoomMax):clamp(Math.round(radarCamera.zoom)+step,r.zoomMin,r.zoomMax);radarZoom.auto=step===0;radarZoom.requested=step===0?null:z;radarEase(radarFocal(radarCamera,z,focal),160,focal);}
+  function radarRecenter(){if(radarView.active&&radarCamera)radarEase({...radarView.data.center,zoom:radarCamera.zoom},280);}
+  function radarIdleSync(reset){if(reset){clearTimeout(radarGesture.idleTimer);radarGesture.idleTimer=null;}if(!radarView.active||document.hidden||!radarCamera)return;var home=radarView.data.center,away=Math.hypot(radarCamera.lat-home.lat,radarCamera.lon-home.lon)>1e-8;$('rad-recenter').hidden=!away;if(away&&radarGesture.state==='idle'&&!radarGesture.idleTimer)radarGesture.idleTimer=setTimeout(radarRecenter,90000);}
+  function radarGestureCancel(){
+    var moved=radarGesture.state!=='idle',ids=[...radarGesture.pointers.keys()];radarGesture.pointers.clear();
+    for(var id of ids)if($('rad-plate').hasPointerCapture(id))$('rad-plate').releasePointerCapture(id);
+    radarGesture.animation=null;radarGesture.inertia=null;radarGesture.pinchEnded=false;radarGesture.state='idle';
+    clearTimeout(radarGesture.idleTimer);radarGesture.idleTimer=null;
+    if(moved&&radarCamera&&radarView.data){var z=clamp(Math.round(radarCamera.zoom),radarView.data.zoomMin,radarView.data.zoomMax);radarCameraSet(radarFocal(radarCamera,z,radarGesture.focal||{x:478,y:245}));radarSettle();}
+  }
+  function radarPointer(e){var b=$('rad-plate').getBoundingClientRect();return {x:(e.clientX-b.left-$('rad-plate').clientLeft)*956/$('rad-plate').clientWidth,y:(e.clientY-b.top-$('rad-plate').clientTop)*490/$('rad-plate').clientHeight};}
+  function radarPointerMode(){var g=radarGesture,pts=[...g.pointers.values()];g.start={camera:{...radarCamera},point:pts[0]};g.mode=pts.length>1?'pinch':'pan';g.samples=[{...pts[0],t:performance.now()}];if(pts.length>1){g.start.distance=Math.hypot(pts[1].x-pts[0].x,pts[1].y-pts[0].y);g.start.mid={x:(pts[0].x+pts[1].x)/2,y:(pts[0].y+pts[1].y)/2};}}
+  $('rad-plate').addEventListener('pointerdown',e=>{if(!radarView.active||!radarCamera||e.target.closest(RAD_CONTROLS)||radarGesture.pointers.size>=2||(e.pointerType==='mouse'&&e.button!==0))return;e.preventDefault();radarBegin();radarGesture.pointers.set(e.pointerId,radarPointer(e));try{$('rad-plate').setPointerCapture(e.pointerId);}catch(e){}radarPointerMode();});
+  $('rad-plate').addEventListener('pointermove',e=>{var g=radarGesture;if(!g.pointers.has(e.pointerId))return;e.preventDefault();g.pointers.set(e.pointerId,radarPointer(e));var pts=[...g.pointers.values()],st=g.start;
+    if(g.mode==='pinch'){var mid={x:(pts[0].x+pts[1].x)/2,y:(pts[0].y+pts[1].y)/2},z=clamp(st.camera.zoom+Math.log2(Math.hypot(pts[1].x-pts[0].x,pts[1].y-pts[0].y)/Math.max(1,st.distance)),radarView.data.zoomMin,radarView.data.zoomMax);g.focal=mid;radarZoom.auto=false;radarZoom.requested=Math.round(z);radarCameraSet(radarFocal(st.camera,z,st.mid,mid));}
+    else {var p=radarWorldPoint(st.camera.lat,st.camera.lon,st.camera.zoom),q=radarWorldInverse(p[0]-(pts[0].x-st.point.x),p[1]-(pts[0].y-st.point.y),st.camera.zoom);radarCameraSet(radarClampCamera({...q,zoom:st.camera.zoom},true));var now=performance.now();g.samples.push({...pts[0],t:now});g.samples=g.samples.filter(p=>now-p.t<=60);}
+  },{passive:false});
+  $('rad-plate').addEventListener('pointerup',e=>{var g=radarGesture;if(!g.pointers.has(e.pointerId))return;var pinch=g.mode==='pinch';g.pointers.delete(e.pointerId);if($('rad-plate').hasPointerCapture(e.pointerId))$('rad-plate').releasePointerCapture(e.pointerId);
+    if(pinch){g.pinchEnded=true;}if(g.pointers.size){radarPointerMode();return;}
+    if(!pinch&&!g.pinchEnded&&e.pointerType==='touch'&&Math.hypot(radarPointer(e).x-g.start.point.x,radarPointer(e).y-g.start.point.y)<8){var tap=radarPointer(e),now=performance.now();if(g.tap&&now-g.tap.t<320&&Math.hypot(tap.x-g.tap.x,tap.y-g.tap.y)<24){g.tap=null;radarZoomChange(1,tap);return;}g.tap={...tap,t:now};}
+    if(pinch||g.pinchEnded){g.pinchEnded=false;var focal=g.focal||{x:478,y:245};radarEase(radarFocal(radarCamera,Math.round(radarCamera.zoom),focal),160,focal);return;}
+    g.samples=g.samples.filter(p=>performance.now()-p.t<=60);var a=g.samples[0],b=g.samples.at(-1),dt=b&&a?b.t-a.t:0,v=dt>0?[(b.x-a.x)*1000/dt,(b.y-a.y)*1000/dt]:[0,0],speed=Math.hypot(...v);if(speed>2400)v=v.map(n=>n*2400/speed);
+    if(!radarReduced()&&speed>=8){g.state='inertia';g.inertia={v,start:performance.now(),last:performance.now(),travel:0};radarWake();}else radarSettle();
+  });
+  $('rad-plate').addEventListener('pointercancel',radarGestureCancel);
+  $('rad-plate').addEventListener('lostpointercapture',e=>{if(radarGesture.pointers.has(e.pointerId))radarGestureCancel();});
+  $('rad-plate').addEventListener('wheel',e=>{if(!radarView.active||e.target.closest(RAD_CONTROLS)||!e.deltaY)return;e.preventDefault();radarZoomChange(e.deltaY<0?1:-1,radarPointer(e));},{passive:false});
+  $('rad-plate').addEventListener('dblclick',e=>{if(!e.target.closest(RAD_CONTROLS))radarZoomChange(1,radarPointer(e));});
+  $('rad-recenter').addEventListener('click',radarRecenter);$('rad-zoom-in').addEventListener('click',()=>radarZoomChange(1));$('rad-zoom-out').addEventListener('click',()=>radarZoomChange(-1));$('rad-zoom-reset').addEventListener('click',()=>radarZoomChange(0));
+  document.addEventListener('keydown',e=>{if(!radarView.active||e.ctrlKey||e.metaKey||e.altKey||e.target.isContentEditable||/^(INPUT|TEXTAREA|SELECT)$/.test(e.target.tagName))return;var step={'+':1,'=':1,'-':-1,'−':-1,'_':-1,'0':0}[e.key];if(step!==undefined){e.preventDefault();radarZoomChange(step);}});
+  document.addEventListener('visibilitychange',()=>{if(document.hidden){radarGestureCancel();radarRelease();}else if(radarView.active)radarActivate();});
+  window.matchMedia('(prefers-reduced-motion: reduce)').addEventListener('change',()=>{radarView.singleSweep=false;radarView.current=radarView.good;radarEchoDirty=true;if(radarGesture.inertia)radarSettle();radarLoopSync();});
+  function radarPostIntent(){clearTimeout(radarIntent.timer);radarIntent.postedAt=Date.now();radarIntent.timer=setTimeout(()=>{if(radarGesture.state==='idle'){radarIntent.generation=(radarIntent.generation||0)+1;radarIntent.ready=true;poll();}},120);}
+  function radarZoomRender(){var r=radarView.data,rail=$('rad-zoom');rail.hidden=!r;if(!r||!radarCamera)return;var z=Math.round(radarCamera.zoom);rail.dataset.mode=radarZoom.auto?'auto':'manual';rail.dataset.state='confirmed';rail.setAttribute('aria-busy','false');$('rad-zoom-mode').textContent=radarZoom.auto?'Auto':String(z);$('rad-zoom-reset').hidden=radarZoom.auto;$('rad-zoom-out').disabled=z<=r.zoomMin;$('rad-zoom-in').disabled=z>=r.zoomMax;radarView.zoomNote=r.zoomCapped&&r.zoomDesired>r.zoomMax?'Set closer than '+r.zoomSource+' reaches — showing its closest.':z>=r.zoomMax?'Closest view for '+r.zoomSource:'';radarNoteRender();}
+  function radarNoteRender(){var r=radarView.data,f=radarView.refresh,note=$('rad-note'),copy='';clearTimeout(radarIntent.noteTimer);if(!r)return;var elapsed=Date.now()-radarIntent.postedAt;if(elapsed<600){note.dataset.shown='false';radarIntent.noteTimer=setTimeout(radarNoteRender,601-elapsed);return;}if(f.state==='newest')copy='Refreshing · newest frame';else if(f.state==='history')copy='Refreshing · frame '+f.frameIndex+' of '+f.frameTotal;else if(f.state==='failed')copy="Couldn't refresh · showing "+radarFrameLabel(radarView.current||{});if(!copy)copy=radarView.zoomNote||'';if(!copy&&r.sourceFallback==='site-zoom-floor'&&radarSource.desired!=='mosaic'){var site=(r.sources||[]).find(s=>s.mode==='site');if(site&&site.siteId)copy=site.siteId+' resumes at zoom '+r.siteResumeZoom;}note.textContent=copy;note.dataset.shown=String(!!copy);}
+  function radarState(){var r=radarView.data;if(!r)return;var f=radarView.current,state=r.stale||r.refresh&&r.refresh.state==='failed'?'stale':radarView.clear?'clear':'current';$('rad-status').dataset.state=state;$('rad-plate').dataset.state=state;var status=$('rad-status');status.replaceChildren(document.createTextNode('As of '));var at=document.createElement('span');at.id='rad-asof';at.textContent=r.observedAt||'—';status.append(at);var age=r.ageSec||0;if(age>=.8*r.staleSec)status.append(document.createTextNode(' · '+Math.floor(age/60)+' min old'));}
+  function radarActivate(){if(!radarView.data)return;radarMetrics.activationAt=performance.now();radarMetrics.firstPaintMs=null;if(!radarCamera){var r=radarView.data,saved=null;try{saved=JSON.parse(sessionStorage.getItem('radarCamera'));}catch(e){}radarCamera=saved&&isNum(saved.lat)&&isNum(saved.lon)&&isNum(saved.zoom)?{lat:clamp(saved.lat,-RAD_MAX_LAT,RAD_MAX_LAT),lon:clamp(saved.lon,-180,180),zoom:clamp(saved.zoom,r.zoomMin,r.zoomMax)}:{...r.center,zoom:clamp(r.zoomAuto?r.zoomAutoLevel:r.zoomDesired,r.zoomMin,r.zoomMax)};radarZoom.auto=saved&&typeof saved.auto==='boolean'?saved.auto:r.zoomAuto;radarZoom.requested=radarZoom.auto?null:(saved?.requested??r.zoomDesired??radarCamera.zoom);radarCamera=radarClampCamera(radarCamera);}
+    if(!Object.keys(radarBaseStyle).length)radarResolveStyle();radarCameraDirty=true;radarOverlayBuild();radarGeoRequest();radarPreload(radarView.data);radarZoomRender();radarPostIntent();radarWake();
+    if(!radarSiteTable.length)fetch(radarView.data.geo.sites).then(r=>r.ok?r.json():[]).then(s=>{radarSiteTable=s.filter(p=>/^[A-Z0-9]{4}$/.test(p.id)&&isNum(p.lat)&&isNum(p.lon));if(radarGesture.state==='idle')radarOverlayBuild();}).catch(()=>{});
+  }
+  function renderRadar(d){var r=d.radar,tab=document.querySelector('.tab[data-screen="s-radar"]');tab.hidden=!(r&&r.available);document.querySelector('.page').dataset.radarAlerts=d.alerts&&d.alerts.length?'on':'off';if(tab.hidden){radarRelease();radarView.data=null;if($('s-radar').classList.contains('active'))activate('s-obs');return;}
+    var old=radarView.data,changed=old&&(old.sourceId!==r.sourceId||old.siteId!==r.siteId||JSON.stringify(old.center)!==JSON.stringify(r.center));
+    if(old&&!changed&&r.observedTs&&old.observedTs>r.observedTs){old.ageSec=Math.max(old.ageSec||0,d.ts-old.observedTs);old.stale=old.ageSec>=old.staleSec;radarState();return;}
+    if(radarView.pendingSource){radarView.pendingSource=null;radarView.transition=(radarView.transition||0)+1;}
+    if(changed&&old&&JSON.stringify(old.center)===JSON.stringify(r.center)&&!radarView.acceptingSource){
+      var newest=r.tiles&&r.tiles.frames&&r.tiles.frames.at(-1);if(newest&&radarView.good){radarView.transition=(radarView.transition||0)+1;radarView.pendingSource={data:r,frame:{...newest,sourceId:r.sourceId,revision:r.tiles.revision}};radarView.nextAt=0;radarQueueTiles();return;}
+    }
+    if(changed&&!radarView.acceptingSource){radarRelease();if(JSON.stringify(old.center)!==JSON.stringify(r.center)){radarCamera=null;try{sessionStorage.removeItem('radarCamera');}catch(e){}}}
+    if(old&&old.geo&&r.geo&&old.geo.version!==r.geo.version){radarGeoClear();radarBaseDirty=true;}
+    radarView.data=r;if(radarCamera&&radarGesture.state==='idle'&&old&&(old.zoomMax!==r.zoomMax||old.sourceId!==r.sourceId)){var effective=clamp(radarZoom.auto?r.zoomAutoLevel:radarZoom.requested??radarCamera.zoom,r.zoomMin,r.zoomMax);if(effective!==radarCamera.zoom){radarCamera.zoom=effective;radarSettle();}}radarView.refresh=r.refresh||{state:'idle'};
+    if(radarSource.desired&&(r.sourcePref||r.sourceMode)===radarSource.desired)radarSource.desired=null;
+    radarLegendRender();radarSourceRender();radarState();
+    if(radarView.active){if(!radarCamera)radarActivate();else{if(radarGesture.state==='idle'){radarGeoRequest();var overlayKey=JSON.stringify([r.center,r.rings,(r.sites||[]).map(s=>[s.id,s.lat,s.lon,s.contributing])]);if(overlayKey!==radarView.overlayKey){radarView.overlayKey=overlayKey;radarOverlayBuild();}}radarPreload(r);radarLoopSync();}}
+    radarZoomRender();radarNoteRender();
+  }
+  ['mosaic','site'].forEach(mode=>$('rad-src-'+mode).addEventListener('click',()=>{radarSource.desired=mode;if(mode==='site'&&radarCamera.zoom<7)radarZoomChange(7-Math.round(radarCamera.zoom));else radarPostIntent();radarSourceRender();}));
+  function radarFrame(now){radarRaf=null;if(!radarView.active||document.hidden||!radarCamera)return;var started=performance.now(),g=radarGesture,gesture=g.state!=='idle';
+    if(now-radarLastPaint<1000/30-.5){radarWake();return;}radarLastPaint=now;
+    if(g.animation){var a=g.animation,t=clamp((now-a.start)/a.duration,0,1),e=1-(1-t)**3,z=a.from.zoom+(a.target.zoom-a.from.zoom)*e;
+      radarCameraSet(a.focal?radarFocal(a.from,z,a.focal):{lat:a.from.lat+(a.target.lat-a.from.lat)*e,lon:a.from.lon+(a.target.lon-a.from.lon)*e,zoom:z});if(t>=1){radarCameraSet(a.target);radarSettle();}}
+    if(g.inertia){var v=g.inertia,elapsed=(now-v.start)/1000,last=(v.last-v.start)/1000,decay=Math.exp(-elapsed/.325),factor=.325*(Math.exp(-last/.325)-decay),p=radarWorldPoint(radarCamera.lat,radarCamera.lon,radarCamera.zoom),dx=v.v[0]*factor,dy=v.v[1]*factor,target={...radarWorldInverse(p[0]-dx,p[1]-dy,radarCamera.zoom),zoom:radarCamera.zoom},legal=radarClampCamera(target);v.last=now;v.travel+=Math.hypot(dx,dy);radarCameraSet(legal);if(Math.hypot(...v.v)*decay<8||Math.hypot(legal.lat-target.lat,legal.lon-target.lon)>1e-8)radarSettle();}
+    var cameraMoved=radarCameraDirty,painted=false;
+    if(radarCameraDirty||radarBaseDirty||radarGeoDamage.length){radarBasePaint(!radarCameraDirty&&!radarBaseDirty);radarOverlayPaint();radarCameraDirty=false;painted=true;if(g.state==='idle')radarMetrics.settlePoints=radarMetrics.lastPoints;}
+    if(cameraMoved){radarGeoRequest();radarQueueTiles();radarZoomRender();}
+    if(radarEchoDirty||cameraMoved){var damageContext=$('rad-echo').getContext('2d');if(!cameraMoved&&radarTileDamage.length){damageContext.save();damageContext.beginPath();for(var tile of radarTileDamage){var sc=2**(radarCamera.zoom-tile.z),cp=radarWorldPoint(radarCamera.lat,radarCamera.lon,tile.z);damageContext.rect(Math.round(478+(tile.x*256-cp[0])*sc),Math.round(245+(tile.y*256-cp[1])*sc),Math.round(256*sc),Math.round(256*sc));}damageContext.clip();radarEchoPaint(radarView.current);damageContext.restore();}else radarEchoPaint(radarView.current);radarTileDamage=[];radarEchoDirty=false;radarUpdateReady();radarLoopSync();var key=JSON.stringify([radarView.current&&radarView.current.stamp,radarView.current&&radarView.current.legend,radarView.clear]);if(key!==radarView.captionKey){radarView.captionKey=key;radarSourceRender();radarState();}painted=true;}
+    if(g.state==='idle'){
+      if(!painted&&!radarView.nextAt||!painted&&now<radarView.nextAt)radarHistoryWork();
+      if(!painted&&radarView.nextAt&&now>=radarView.nextAt){var ready=radarReady(),index=(ready.indexOf(radarView.current)+1)%ready.length;radarView.current=ready[index];radarEchoPaint(radarView.current);radarState();radarSourceRender();if(index===0&&!radarReduced())radarView.dipAt=now;var newest=index===ready.length-1;if(newest&&radarView.singleSweep){radarView.singleSweep=false;radarView.paused=true;}radarView.nextAt=Math.max(radarView.nextAt+(newest?1100:radarView.data.sourceId==='rainviewer'?clamp(2400/ready.length,110,180):110),now+1);radarLoopSync();painted=true;}
+      if(now>=radarIdlePrefetchAt){radarIdlePrefetchAt=now+500;radarGeoRequest(true);}
+      if(radarMissingSince.size&&[...radarMissingSince.values()].some(t=>now-t>=400)&&!radarMetrics.hatchRects&&radarMetrics.drawnTiles.length){radarEchoDirty=true;}
+    }
+    if(radarView.dipAt){var phase=(now-radarView.dipAt)/120;$('rad-echo').style.opacity=phase>=1?'':String(.45+.55*Math.abs(phase*2-1));if(phase>=1)radarView.dipAt=0;}
+    radarMemory();
+    if(gesture&&painted){radarMetrics.drawMs.push(performance.now()-started);if(radarMetrics.drawMs.length>1800)radarMetrics.drawMs.shift();}
+    radarWake();
   }
   function radarSourceRender() {
     var r=radarView.data; if (!r) return;
     var site=(r.sources || []).find(s => s.mode==='site');
     var mode=r.sourceMode || 'mosaic', picker=$('rad-src'), button=$('rad-src-site');
-    if (radarSource.sent && (r.sourcePref || mode)===radarSource.desired) {
-      radarSource.desired=null; radarSource.sent=false;
-    }
     picker.hidden=(r.sourceId || 'rainviewer')==='rainviewer';
     picker.dataset.mode=mode; picker.dataset.state=radarSource.desired ? 'pending' : 'confirmed';
     $('rad-src-mosaic').setAttribute('aria-pressed',String(mode==='mosaic'));
     button.setAttribute('aria-pressed',String(mode==='site'));
     button.dataset.preferred=String(radarSource.desired!==null ? radarSource.desired==='site' : r.sitePreferred===true);
-    var currentFrame=(r.frames || []).find(f => radarView.current && f.id===radarView.current.id);
-    var contributors=currentFrame && currentFrame.siteScans ? currentFrame.siteScans : (r.sites || []).filter(s => s.contributing);
-    if (mode==='site' && !Array.isArray(r.sites) && !(currentFrame && Array.isArray(currentFrame.siteScans)) && r.siteId)
-      contributors=[{id:r.siteId}];  // legacy single-site payload has no contributor array
+    var currentFrame=radarView.current;
+    var contributors=currentFrame && currentFrame.drawnSites ? currentFrame.drawnSites : currentFrame && currentFrame.siteScans ? currentFrame.siteScans : (r.sites || []).filter(s => s.contributing);
     var extra=Math.max(0,contributors.length-1);
     var name=(mode==='site' ? (contributors.some(s => s.id===r.siteId) ? r.siteId : contributors[0] && contributors[0].id) : site && site.reason!=='no site in range' && site.siteId) || 'No site';
     if (mode==='site' && extra) name+=' +'+extra;
@@ -2778,740 +3111,13 @@
     var dark=(r.sites || []).filter(s => s.reason==='not reporting');
     if (mode==='site' && dark.length) cap.append(document.createTextNode(' · '+dark.map(s => s.id).join(', ')+' not reporting'));
     else if (site && site.reason==='not reporting') cap.append(document.createTextNode(' · '+site.siteId+' not reporting'));
-    var current=radarView.current, frame=(r.frames || []).find(f => current && f.id===current.id);
+    var current=radarView.current, frame=current;
     if ((frame && frame.legend ? frame.legend : r.legend || {}).remapped===false)
       cap.append(document.createTextNode(' · palette incomplete'));
     if (r.sourceFallback==='site-zoom-floor' && site && radarSource.desired!=='mosaic') cap.append(document.createTextNode(' · wider than '+site.siteId+' reaches'));
     radarNoteRender();
   }
-  ['mosaic','site'].forEach(function(mode) {
-    $('rad-src-'+mode).addEventListener('click',function() {
-      radarSource.desired=mode; radarSource.sent=false;
-      if (mode==='site' && radarEffectiveZoom()<7) {
-        var factor=2**(7-radarEffectiveZoom()), g=radarGesture;
-        radarZoom.desired=7; radarZoom.sent=false;
-        var mx=$('rad-plate').clientWidth/2, my=$('rad-plate').clientHeight/2;
-        radarTransform(g.scale*factor,mx+(g.x-mx)*factor,my+(g.y-my)*factor,true);
-      }
-      radarGesturePending(); radarSourceRender(); radarPostIntent();
-    });
-  });
-  var radarZoom = { desired: null, sent: false };
-  function radarZoomRender() {
-    var r = radarView.data, rail = $("rad-zoom"), note = $("rad-note");
-    rail.hidden = !(r && typeof r.zoomAuto === "boolean" && isNum(r.zoomMin) && isNum(r.zoomMax));
-    if (rail.hidden) { radarView.zoomNote=""; radarNoteRender(); return; }
-    var pending = radarZoom.desired !== null;
-    if (pending && radarZoom.sent &&
-        (radarZoom.desired === "auto" ? r.zoomAuto :
-         !r.zoomAuto && r.zoomDesired === radarZoom.desired &&
-         r.zoom === clamp(radarZoom.desired, r.zoomMin, r.zoomMax))) {
-      radarZoom.desired = null; radarZoom.sent = false; pending = false;
-    }
-    var auto = pending ? radarZoom.desired === "auto" : r.zoomAuto;
-    var level = pending ? (auto ? r.zoomAutoLevel : clamp(radarZoom.desired, r.zoomMin, r.zoomMax)) : r.zoom;
-    rail.dataset.mode = auto ? "auto" : "manual";
-    rail.dataset.state = pending ? "pending" : "confirmed";
-    rail.setAttribute("aria-busy", String(pending));
-    $("rad-zoom-mode").textContent = auto ? "Auto" : "Manual";
-    $("rad-zoom-reset").hidden = auto;
-    $("rad-zoom-out").disabled = level <= r.zoomMin;
-    $("rad-zoom-in").disabled = level >= r.zoomMax;
-    radarView.zoomNote = r.zoomCapped && !r.zoomAuto && r.zoomDesired > r.zoomMax ?
-      "Set closer than " + r.zoomSource + " reaches — showing its closest." :
-      r.zoom >= r.zoomMax ? "Closest view for " + r.zoomSource : "";
-    radarNoteRender();
-  }
-  function radarZoomChange(step) {
-    var r = radarView.data;
-    if (!radarView.active || $("rad-zoom").hidden || !r) return;
-    var current = radarZoom.desired === null ? r.zoom : radarZoom.desired === "auto" ?
-      r.zoomAutoLevel : clamp(radarZoom.desired, r.zoomMin, r.zoomMax);
-    var target = step === 0 ? "auto" : Math.max(r.zoomMin, Math.min(r.zoomMax, current + step));
-    if (step !== 0 && target === current) return;
-    if (step === 0 && (radarZoom.desired === "auto" || (radarZoom.desired === null && r.zoomAuto))) return;
-    radarZoom.desired = target; radarZoom.sent = false;
-    // Real-time feel: every press previews the new level instantly — the same
-    // centre-scale + held-transform path a pinch commits through — and the server
-    // frame at the new zoom replaces it when it lands (settle clears the transform).
-    // Without this a press showed nothing until the ~2 s poll + re-composite.
-    if (radarView.good && radarGesture.state!=='gesturing') {
-      var factor=2**((target==='auto' ? r.zoomAutoLevel : target)-current), g=radarGesture;
-      var mx=$('rad-plate').clientWidth/2,my=$('rad-plate').clientHeight/2;
-      radarTransform(g.scale*factor,mx+(g.x-mx)*factor,my+(g.y-my)*factor,true);
-      radarGesturePending();
-    } else if (!radarView.good) radarGesturePending();
-    radarZoomRender();
-    // Post soon, not on the next 2 s tick — but debounced so a burst of presses
-    // still coalesces into ONE server re-composite at the final level.
-    radarPostIntent();
-  }
-  $("rad-zoom-in").addEventListener("click", function () { radarZoomChange(1); });
-  $("rad-zoom-out").addEventListener("click", function () { radarZoomChange(-1); });
-  $("rad-zoom-reset").addEventListener("click", function () { radarZoomChange(0); });
-  document.addEventListener("keydown", function (e) {
-    if (!radarView.active || e.ctrlKey || e.metaKey || e.altKey ||
-        e.target.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(e.target.tagName)) return;
-    var step = {"+":1, "=":1, "-":-1, "−":-1, "_":-1, "0":0}[e.key];
-    if (step !== undefined) { e.preventDefault(); radarZoomChange(step); }
-  });
-
-  // Exact Mercator mirror of lib/radar_geometry.py (independent CSS axes).
-  var RAD_MAX_LAT = 85.05112878;
-  function radarWorldPoint(lat, lon, zoom) {
-    lat = Math.max(-RAD_MAX_LAT, Math.min(RAD_MAX_LAT, lat));
-    var world = 256 * 2 ** zoom;
-    return [(lon + 180) / 360 * world,
-            (1 - Math.asinh(Math.tan(lat * Math.PI / 180)) / Math.PI) / 2 * world];
-  }
-  function radarWorldInverse(x, y, zoom) {
-    var world = 256 * 2 ** zoom;
-    return {lat:Math.atan(Math.sinh(Math.PI * (1 - 2 * y / world))) * 180 / Math.PI,
-            lon:x / world * 360 - 180};
-  }
-  var radarCenter = {desired:null, sent:false};
-  var radarGesture = {state:'idle', pointers:new Map(), scale:1, x:0, y:0,
-                      idleTimer:null, springTimer:null, wheelTimer:null};
-  var RAD_CONTROLS = '.rad-src,.rad-src-cap,.rad-legend,.rad-loop,.rad-zoom,.rad-recenter';
-  function radarCenterMatches(r, desired) {
-    return desired === null || (desired === 'station' ? r.centered !== false :
-      Math.abs(r.center.lat-desired.lat)<1e-8 && Math.abs(r.center.lon-desired.lon)<1e-8);
-  }
-  function radarIntentMatches(r) {
-    var z=radarZoom.desired;
-    return (!r.intent || !radarIntent.targetSeq || r.intent.seq===radarIntent.targetSeq) && (radarSource.desired===null || (r.sourcePref || r.sourceMode)===radarSource.desired) &&
-      radarCenterMatches(r,radarCenter.desired) && (z===null ||
-      (z==='auto' ? r.zoomAuto : !r.zoomAuto && r.zoomDesired===z && r.zoom===clamp(z,r.zoomMin,r.zoomMax)));
-  }
-  function radarIdleSync(reset) {
-    if (reset) { clearTimeout(radarGesture.idleTimer); radarGesture.idleTimer=null; }
-    if (!radarView.active || document.hidden || !radarView.data || radarView.data.centered!==false) {
-      clearTimeout(radarGesture.idleTimer); radarGesture.idleTimer=null; return;
-    }
-    if (!radarGesture.idleTimer && !radarGesture.pointers.size) {
-      radarGesture.idleTimer=setTimeout(function() {
-        radarGesture.idleTimer=null; radarRecenter();
-      },90000);
-    }
-  }
-  function radarCenterRender() {
-    var r=radarView.data;
-    if (radarCenter.desired!==null && radarCenter.sent && radarCenterMatches(r,radarCenter.desired)) {
-      radarCenter.desired=null; radarCenter.sent=false;
-    }
-    $('rad-recenter').hidden=!r || r.centered!==false;
-    radarIdleSync(false);
-  }
-  function radarTransform(s,x,y,spring) {
-    var g=radarGesture, stack=$('rad-echo');
-    clearTimeout(g.springTimer); g.springTimer=null;
-    stack.style.transition=spring && !radarReduced() ? 'transform 160ms ease-out' : '';
-    g.scale=s; g.x=x; g.y=y;
-    stack.style.transform=s===1 && x===0 && y===0 ? '' : 'translate('+x+'px,'+y+'px) scale('+s+')';
-    var map=radarView.mapPreview || {scale:1,x:0,y:0}, ratio=s/map.scale;
-    ['rad-base','rad-over'].forEach(function(id) {
-      var layer=$(id), dx=x-map.x*ratio, dy=y-map.y*ratio;
-      layer.style.transition=stack.style.transition;
-      layer.style.transform=Math.abs(ratio-1)<1e-10 && Math.abs(dx)+Math.abs(dy)<1e-8 ? '' :
-        'translate('+dx+'px,'+dy+'px) scale('+ratio+')';
-    });
-    if (stack.style.transition) g.springTimer=setTimeout(function() {
-      stack.style.transition=''; $('rad-base').style.transition=''; $('rad-over').style.transition=''; g.springTimer=null;
-    },170);
-  }
-  function radarGestureFence() {
-    // Invalidate pending image/history decodes using the existing generation guards.
-    ++radarView.generation; radarView.pending=null; radarView.wantedKey=null;
-    radarView.loadKey=null; radarView.loadToken=null;
-    radarStopLoop(false);
-  }
-  function radarGestureReset(spring) {
-    var g=radarGesture;
-    g.state='idle';
-    if (radarView.holdingGeometry) {
-      var map=radarView.mapPreview; radarTransform(map.scale,map.x,map.y,false);
-    } else { radarView.mapPreview=null; radarTransform(1,0,0,spring); }
-    radarIdleSync(false); radarLoopSync();
-  }
-  function radarGestureCancel() {
-    var g=radarGesture;
-    var ids=Array.from(g.pointers.keys()); g.pointers.clear();
-    ids.forEach(function(id) {
-      if ($('rad-plate').hasPointerCapture(id)) $('rad-plate').releasePointerCapture(id);
-    });
-    if (g.state==='gesturing' && g.before) {
-      Object.assign(radarZoom,g.before.zoom); Object.assign(radarCenter,g.before.center);
-    } clearTimeout(g.wheelTimer); g.wheelTimer=null;
-    clearTimeout(g.idleTimer); g.idleTimer=null;
-    // Posted intent may already be building. Cancel only the preview, never pretend
-    // an external write was undone; the next visible payload remains authoritative.
-    if (g.state!=='idle') radarGestureFence();
-    radarGestureReset(false); radarZoomRender();
-  }
-  function radarGesturePending() {
-    var g=radarGesture;
-    if (radarCenter.desired===null && radarZoom.desired===null && radarSource.desired===null) { radarGestureReset(true); return; }
-    g.state='committing'; radarGestureFence();
-    radarZoomRender(); radarIdleSync(true); radarPostIntent();
-    if (g.frozen) { var frozen=g.frozen; g.frozen=null; renderRadar(frozen); }
-  }
-  function radarRecenter() {
-    if (!radarView.active || document.hidden || !radarView.data) return;
-    radarCenter.desired='station'; radarCenter.sent=false;
-    radarGesturePending();
-  }
-  $('rad-recenter').addEventListener('click',radarRecenter);
-  function radarEffectiveZoom() {
-    var r=radarView.data, z=radarZoom.desired;
-    return z===null ? r.zoom : z==='auto' ? r.zoomAutoLevel : clamp(z,r.zoomMin,r.zoomMax);
-  }
-  function radarEffectiveCenter() {
-    var r=radarView.data, c=radarCenter.desired;
-    return c && c!=='station' ? c : c==='station' ? radarStationCenter() : r.center;
-  }
-  function radarStationCenter() {
-    var r=radarView.data;
-    if (r.centered!==false) return r.center;
-    // Only used for the soft distance cap/recenter preview; actual pan conversion
-    // always starts at the exact payload/desired center, never at the marker.
-    var w=radarWorldPoint(r.center.lat,r.center.lon,r.zoom);
-    return radarWorldInverse(w[0]+(r.marker.x-.5)*956,w[1]+(r.marker.y-.5)*490,r.zoom);
-  }
-  function radarPan(dx,dy,start) {
-    var plate=$('rad-plate'), sx=plate.clientWidth/956, sy=plate.clientHeight/490;
-    var world=256*2**start.zoom, c=radarWorldPoint(start.center.lat,start.center.lon,start.zoom);
-    var station=radarStationCenter(), home=radarWorldPoint(station.lat,station.lon,start.zoom);
-    var nx=c[0]-dx/sx, ny=c[1]-dy/sy;
-    var vx=nx-home[0], vy=ny-home[1], distance=Math.hypot(vx,vy), cap=1.5*Math.hypot(956,490);
-    if (distance>cap) { nx=home[0]+vx*cap/distance; ny=home[1]+vy*cap/distance; }
-    // Keep the entire committed crop inside the world; preview alone resists.
-    nx=clamp(nx,478,world-478); ny=clamp(ny,245,world-245);
-    var legalX=(c[0]-nx)*sx, legalY=(c[1]-ny)*sy;
-    var center=radarWorldInverse(nx,ny,start.zoom); center.lat=clamp(center.lat,-RAD_MAX_LAT,RAD_MAX_LAT);
-    return {center:center,x:legalX,y:legalY,previewX:legalX+.3*(dx-legalX),previewY:legalY+.3*(dy-legalY)};
-  }
-  function radarGestureStartMode() {
-    var g=radarGesture, pts=Array.from(g.pointers.values());
-    g.start={scale:g.scale,x:g.x,y:g.y,zoom:radarEffectiveZoom(),center:radarEffectiveCenter()};
-    g.mode=pts.length>=2 ? 'pinch' : 'pan';
-    g.start.point=pts[0]; g.moved=false; g.pan=null;
-    if (g.mode==='pinch') {
-      g.start.distance=Math.max(1,Math.hypot(pts[1].x-pts[0].x,pts[1].y-pts[0].y));
-      var box=$('rad-plate').getBoundingClientRect();
-      g.start.mid={x:(pts[0].x+pts[1].x)/2-box.left-$('rad-plate').clientLeft,
-                   y:(pts[0].y+pts[1].y)/2-box.top-$('rad-plate').clientTop};
-      g.rawScale=1;
-    }
-  }
-  function radarGestureFinishMode() {
-    var g=radarGesture, st=g.start, r=radarView.data;
-    if (!g.moved) return;
-    if (g.mode==='pan' && g.pan) {
-      radarCenter.desired=g.pan.center; radarCenter.sent=false;
-      radarTransform(st.scale,st.x+g.pan.x,st.y+g.pan.y,true);
-    } else if (g.mode==='pinch') {
-      var target=clamp(st.zoom+Math.round(Math.log2(g.rawScale)),r.zoomMin,r.zoomMax);
-      if (target!==st.zoom) { radarZoom.desired=target; radarZoom.sent=false; }
-      var scale=2**(target-st.zoom), mid=st.mid;
-      radarTransform(st.scale*scale,mid.x+(st.x-mid.x)*scale,mid.y+(st.y-mid.y)*scale,true);
-    }
-  }
-  $('rad-plate').addEventListener('pointerdown',function(e) {
-    radarIdleSync(true);
-    if (e.target.closest(RAD_CONTROLS) || !radarView.active || document.hidden || !radarView.good ||
-        $('rad-zoom').hidden || (e.pointerType==='mouse' && e.button!==0)) return;
-    var g=radarGesture;
-    if (g.pointers.size>=2) return;
-    e.preventDefault();
-    if (g.pointers.size) radarGestureFinishMode();
-    else {
-      g.before={zoom:Object.assign({},radarZoom),center:Object.assign({},radarCenter)};
-      radarGestureFence();
-    }
-    g.state='gesturing'; g.pointers.set(e.pointerId,{x:e.clientX,y:e.clientY});
-    // Synthetic PointerEvents have no UA-active pointer; real touches/mouse capture.
-    try { $('rad-plate').setPointerCapture(e.pointerId); } catch(error) { if (error.name!=='NotFoundError') throw error; }
-    radarGestureStartMode(); radarIdleSync(true);
-  });
-  $('rad-plate').addEventListener('pointermove',function(e) {
-    var g=radarGesture; if (!g.pointers.has(e.pointerId)) return;
-    e.preventDefault(); g.pointers.set(e.pointerId,{x:e.clientX,y:e.clientY}); radarIdleSync(true);
-    var pts=Array.from(g.pointers.values()), st=g.start;
-    if (g.mode==='pan') {
-      var dx=pts[0].x-st.point.x,dy=pts[0].y-st.point.y;
-      if (!g.moved && Math.hypot(dx,dy)<3) return;
-      g.moved=true; g.pan=radarPan(dx,dy,st);
-      radarTransform(st.scale,st.x+g.pan.previewX,st.y+g.pan.previewY,false);
-    } else {
-      g.moved=true; g.rawScale=Math.max(.01,Math.hypot(pts[1].x-pts[0].x,pts[1].y-pts[0].y)/st.distance);
-      var r=radarView.data, legal=clamp(g.rawScale,2**(r.zoomMin-st.zoom),2**(r.zoomMax-st.zoom));
-      var scale=legal+.3*(g.rawScale-legal), mid=st.mid;
-      radarTransform(st.scale*scale,mid.x+(st.x-mid.x)*scale,mid.y+(st.y-mid.y)*scale,false);
-    }
-  },{passive:false});
-  $('rad-plate').addEventListener('pointerup',function(e) {
-    var g=radarGesture; if (!g.pointers.has(e.pointerId)) return;
-    radarGestureFinishMode(); g.pointers.delete(e.pointerId);
-    if ($('rad-plate').hasPointerCapture(e.pointerId)) $('rad-plate').releasePointerCapture(e.pointerId);
-    if (g.pointers.size) radarGestureStartMode();
-    else radarGesturePending();
-  });
-  $('rad-plate').addEventListener('pointercancel',radarGestureCancel);
-  $('rad-plate').addEventListener('lostpointercapture',function(e) {
-    if (radarGesture.pointers.has(e.pointerId)) radarGestureCancel();
-  });
-  $('rad-plate').addEventListener('wheel',function(e) {
-    if (!radarView.active || e.target.closest(RAD_CONTROLS)) return;
-    e.preventDefault(); radarIdleSync(true);
-    if (!e.deltaY || radarGesture.pointers.size) return;
-    clearTimeout(radarGesture.wheelTimer);
-    var step=e.deltaY<0 ? 1 : -1;
-    radarGesture.wheelTimer=setTimeout(function() {
-      radarGesture.wheelTimer=null; radarZoomChange(step);
-      clearTimeout(radarIntent.timer); radarIntent.timer=null; radarIntent.ready=true; poll();
-    },120);
-  },{passive:false});
-
-  /* Pre-decoded observed scans, hard-cut on a monotonic rAF clock.
-     At 956×490, sixteen bitmaps use ~29 MiB; no image work on a tick. */
-  var RAD_FRAME_MS = 110, RAD_HOLD_MS = 1100, RAD_MAX_DECODED = 16;
-  function radarReduced() { return window.matchMedia("(prefers-reduced-motion: reduce)").matches; }
-  function radarUpdateReady() {
-    var frames = radarView.loaded, start = frames.length;
-    while (start > 0 && frames[start-1].ready) --start;
-    radarView.readyFrames = frames.slice(start);
-  }
-  function radarReady() { return radarView.readyFrames || []; }
-  function radarRelease() {
-    radarStopLoop(false);
-    radarView.loaded.forEach(function(f) { if (f.bitmap) f.bitmap.close(); });
-    radarView.loaded = []; radarView.readyFrames = []; radarView.loadKey = null; radarView.loadToken = null;
-  }
-  function radarDraw(fr) {
-    if (!fr || !(fr.bitmap || fr.img)) return;
-    var echo = $("rad-echo"), ctx = echo.getContext("2d");
-    ctx.clearRect(0, 0, echo.width, echo.height);
-    ctx.drawImage(fr.bitmap || fr.img, 0, 0, echo.width, echo.height);
-    echo.hidden = false; radarView.current = fr;
-    var remapped=fr.legend ? fr.legend.remapped : radarView.data.legend && radarView.data.legend.remapped;
-    if (radarView.shownRemapped!==remapped) { radarView.shownRemapped=remapped; radarSourceRender(); }
-    $("rad-frame-time").removeAttribute("aria-label");
-    $("rad-frame-time").textContent = radarFrameLabel(fr) + " · " +
-      (fr.ts === radarView.data.observedTs ? "newest" : "−" + Math.round((radarView.data.observedTs-fr.ts)/60) + " min");
-    radarNoteRender(); radarSourceRender();
-    var ready = radarReady(), index = ready.indexOf(fr);
-    $("rad-tick").style.left = (ready.length > 1 ? Math.max(0,index)/(ready.length-1)*218 : 218) + "px";
-  }
-  function radarFrameLabel(fr) {
-    if (fr.at) return fr.at;
-    /* station-local HH:MM, derived from the latest frame's own local time so a
-       browser in a different timezone than the station never mislabels it */
-    var r = radarView.data;
-    if (!r || !r.observedAt || !isNum(r.observedTs)) return "—";
-    var m = String(r.observedAt).split(":");
-    if (m.length !== 2) return "—";
-    var mins = (parseInt(m[0], 10) * 60 + parseInt(m[1], 10)) - Math.round((r.observedTs - fr.ts) / 60);
-    mins = ((mins % 1440) + 1440) % 1440;
-    return ("0" + Math.floor(mins / 60)).slice(-2) + ":" + ("0" + (mins % 60)).slice(-2);
-  }
-  function radarPreload(r) {
-    if (!radarView.active) return;
-    var complete = (r.frames || []).filter(f => f.complete && f.url).slice(-RAD_MAX_DECODED);
-    var generation = radarView.generation;
-    var key = generation + ":" + complete.map(f => f.id + f.url).join(",");
-    if (key === radarView.loadKey) {
-      radarView.loaded.forEach(fr => { var current=complete.find(f => f.id===fr.id); if (current) Object.assign(fr,current); });
-      return;
-    }
-    radarView.loadKey = key;
-    var token = {}; radarView.loadToken = token;
-    var have = new Map(radarView.loaded.map(f => [f.id, f]));
-    radarView.loaded = complete.map(f => have.get(f.id) || Object.assign({}, f, {ready:false, hasEcho:false}));
-    have.forEach(f => { if (!complete.some(n => n.id === f.id) && f.bitmap) f.bitmap.close(); });
-    radarView.loaded.sort((a,b) => a.ts-b.ts); radarUpdateReady();
-    // Newest first; serialize decode to bound temporary memory and yield to paint.
-    var queue = radarView.loaded.slice().reverse();
-    (async function() {
-      for (var fr of queue) {
-        if (generation !== radarView.generation || !radarView.active || radarView.loadKey !== key || radarView.loadToken !== token) return;
-        if (fr.ready) continue;
-        try {
-          var img = new Image(); img.decoding = "async"; img.src = fr.url;
-          await img.decode();
-          if (img.naturalWidth !== r.viewport.w || img.naturalHeight !== r.viewport.h) throw Error("radar dimensions");
-          var bitmap = await createImageBitmap(img);
-          if (generation !== radarView.generation || !radarView.active || radarView.loadKey !== key || radarView.loadToken !== token) { bitmap.close(); return; }
-          var c = document.createElement("canvas"); c.width=bitmap.width; c.height=bitmap.height;
-          var cx=c.getContext("2d", {willReadFrequently:true}); cx.drawImage(bitmap,0,0);
-          var px=cx.getImageData(0,0,c.width,c.height).data;
-          for (var a=3;a<px.length;a+=4) if (px[a]) { fr.hasEcho=true; break; }
-          c.width=c.height=0; fr.bitmap=bitmap; fr.ready=true;
-        } catch(e) { fr.failed=true; }
-        radarUpdateReady(); radarLoopSync();
-      }
-      radarView.bufferDone = true; radarLoopSync();
-    })();
-    radarView.bufferDone = false;
-  }
-  function radarCouldLoop() {
-    var ready=radarReady();
-    return !radarView.holdingGeometry && radarGesture.state==='idle' && radarView.active && !radarView.pending && !radarView.failed && !document.hidden &&
-      ready.length >= 2 && ready.some(f => f.hasEcho) && !radarView.data.stale;
-  }
-  function radarStopLoop(showLatest) {
-    if (radarView.timer) cancelAnimationFrame(radarView.timer);
-    radarView.timer=null; radarView.nextAt=0; $("rad-echo").style.opacity="";
-    if (showLatest && radarView.good && radarView.data) radarDraw(radarView.good);
-  }
-  function radarLoopStep(now) {
-    radarView.timer=null;
-    if (!radarCouldLoop() || radarView.paused || (radarReduced() && !radarView.singleSweep)) { radarLoopSync(); return; }
-    var ready=radarReady();
-    if (radarView.dipAt) {
-      var phase=(now-radarView.dipAt)/120;
-      $("rad-echo").style.opacity=phase>=1 ? "" : String(.45+.55*Math.abs(phase*2-1));
-      if (phase>=1) radarView.dipAt=0;
-    }
-    if (now >= radarView.nextAt) {
-      var index=ready.findIndex(f => radarView.current && f.id===radarView.current.id);
-      index=(index+1)%ready.length;
-      if (index===0 && !radarReduced()) radarView.dipAt=now;
-      radarDraw(ready[index]);
-      var newest=index===ready.length-1;
-      if (newest && radarView.singleSweep) {
-        radarView.singleSweep=false; radarView.paused=true; radarLoopSync(); return;
-      }
-      var interval=radarView.data.sourceId==='rainviewer' ? clamp(2400/ready.length,110,180) : RAD_FRAME_MS;
-      // Clock-referenced scheduling avoids chained-timer drift. Resume after a
-      // long stall at the next real scan, never double-paint catch-up frames.
-      radarView.nextAt=Math.max(radarView.nextAt + (newest ? RAD_HOLD_MS : interval), now+1);
-    }
-    radarView.timer=requestAnimationFrame(radarLoopStep);
-  }
-  function radarLoopSync() {
-    var loop=$("rad-loop"), play=$("rad-play"), r=radarView.data, ready=radarReady();
-    if (!radarView.active || !r) { radarStopLoop(false); loop.hidden=true; return; }
-    var intentPlay=!radarView.paused && (!radarReduced() || radarView.singleSweep);
-    var clear=ready.length && radarView.clear && !ready.some(f => f.hasEcho || f.legend && f.legend.remapped===false) &&
-      !(r.sites || []).some(s => s.reason);
-    loop.hidden=false;
-    $("rad-track").dataset.frames=ready.length ? "1" : "0";
-    play.hidden=false; play.disabled=false;
-    play.textContent=intentPlay ? "❙❙" : "▶";
-    play.setAttribute("aria-label",intentPlay ? "Pause radar loop" : "Play radar loop");
-    var read=$("rad-frame-time");
-    read.removeAttribute("aria-label");
-    if (ready.length < 2) {
-      radarStopLoop(ready.length > 0);
-      read.textContent=(intentPlay ? "Buffering" : "Paused")+" · "+ready.length+" of 8";
-      return;
-    }
-    if (clear) {
-      radarStopLoop(true); read.textContent=(intentPlay ? "" : "Paused · ")+"No echoes · clear"; return;
-    }
-    if (radarView.current) {
-      var fr=radarView.current;
-      read.textContent=(intentPlay ? "" : "Paused · ")+radarFrameLabel(fr)+" · "+
-        (fr.ts===r.observedTs ? "newest" : "−"+Math.round((r.observedTs-fr.ts)/60)+" min");
-    }
-    var run=radarCouldLoop() && intentPlay;
-    if (!run) { radarStopLoop(false); return; }
-    if (!radarView.timer) {
-      radarView.nextAt=performance.now()+RAD_HOLD_MS;
-      radarView.timer=requestAnimationFrame(radarLoopStep);
-    }
-  }
-  $("rad-play").addEventListener("click",function() {
-    if (radarReduced()) { radarView.singleSweep=!radarView.singleSweep; radarView.paused=!radarView.singleSweep; if (radarView.singleSweep) radarDraw(radarView.good); }
-    else radarView.paused=!radarView.paused;
-    radarLoopSync();
-    if (!radarReduced()) $("rad-play").animate([{opacity:.5},{opacity:1}],{duration:120});
-  });
-  document.addEventListener("visibilitychange",function() {
-    if (document.hidden) radarGestureCancel();
-    radarIdleSync(false); radarLoopSync();
-  });
-  window.matchMedia("(prefers-reduced-motion: reduce)").addEventListener("change",function() {
-    radarView.singleSweep=false; radarStopLoop(true); radarLoopSync();
-  });
-  function radarState() {
-    var r = radarView.data;
-    if (!r || !r.available) return;
-    var holding=radarView.holdingGeometry && radarView.good;
-    var hasFrame = (r.frames || []).some(function(f) { return f.id === r.latest; });
-    var decoded = radarView.good && (radarView.good.id === r.latest || radarView.failed);
-    var state = !hasFrame || (!decoded && !radarView.failed) ? "loading" :
-                r.stale || radarView.failed ? "stale" : radarView.clear ? "clear" : "live";
-    if (holding) state="stale";
-    $("rad-echo").hidden = !holding && (!hasFrame || !decoded);
-    var stamp = holding ? (radarView.current || radarView.good).at : !decoded ? null : radarView.failed && radarView.good ? radarView.good.at : r.observedAt;
-    var age = r.ageSec || 0;
-    if (radarView.failed && radarView.good) age += Math.max(0, r.observedTs - radarView.good.ts);
-    var status = $("rad-status");
-    status.dataset.state = state;
-    $("rad-plate").dataset.state = state;
-    status.replaceChildren();
-    status.append(document.createTextNode("As of "));
-    var asof = document.createElement("span"); asof.id = "rad-asof"; asof.textContent = stamp || "—";
-    status.append(asof);
-
-    if (state === "loading") status.append(document.createTextNode(" · Fetching radar"));
-    /* Suffix at 80% of the source's own fresh window (staleSec) — not a bare
-       cadence multiple, which fires on every healthy MRMS frame (skipped until
-       ~5 min old). So a routinely-late feed reads clean, and the suffix becomes
-       the early warning that accent-stale is coming. */
-    var ageFloor = r.staleSec || 3 * (r.cadenceSec || 600);
-    if (age >= 0.8 * ageFloor) status.append(document.createTextNode(" · " + Math.floor(age / 60) + " min old"));
-  }
-  function radarPresentationKey(r) {
-    return JSON.stringify([r.sourceId || "rainviewer", r.legend && (r.legend.id || r.legend.colorId),
-                           r.siteId, r.center, r.zoom, r.bounds, r.viewport, r.latest]);
-  }
-  function radarEchoSettled(r) {
-    radarView.echoGeometry=r; radarView.holdingGeometry=false; radarView.mapPreview=null;
-    radarTransform(1,0,0,false);
-  }
-  function radarGeometryCommit(d) {
-    var r=d.radar, old=radarView.echoGeometry || radarView.data;
-    if (radarView.good && old) {
-      var scale=2**(r.zoom-old.zoom), p=radarWorldPoint(old.center.lat,old.center.lon,r.zoom);
-      var q=radarWorldPoint(r.center.lat,r.center.lon,r.zoom), world=256*2**r.zoom;
-      var dx=((p[0]-q[0]+world/2)%world+world)%world-world/2;
-      var w=$('rad-plate').clientWidth, h=$('rad-plate').clientHeight;
-      var map={scale:scale,x:w/2*(1-scale)+dx*w/956,y:h/2*(1-scale)+(p[1]-q[1])*h/490};
-      radarView.mapPreview=map; radarView.holdingGeometry=true;
-      radarTransform(map.scale,map.x,map.y,false);
-    } else {
-      radarView.mapPreview=null; radarTransform(1,0,0,false);
-    }
-    radarStopLoop(false);
-    radarCommit(d);
-  }
-  function renderRadar(d) {
-    var r = d.radar, tab = document.querySelector('.tab[data-screen="s-radar"]');
-    // Fetch telemetry is independent of decoded pixels and gesture intent guards.
-    radarView.refresh = r && r.refresh || {state:'idle'};
-    // Fast polling ends when the intent is acknowledged WITH a frame, not at the
-    // geometry-only map publish: echoes ready at ~0.7 s must not wait for a 2 s tick.
-    if (r && r.intent && radarIntent.targetSeq && r.intent.seq>=radarIntent.targetSeq &&
-        !r.geometryOnly && r.latest) radarFastUntil=0;
-    if (r && r.intent) radarIntent.localSeq=Math.max(radarIntent.localSeq,r.intent.seq || 0, radarView.refresh.forSeq || 0);
-    if (r && !r.geometryOnly && (r.frames || []).filter(f=>f.complete).length>=8) radarHistoryUntil=0;
-    var refresh=radarView.refresh;
-    if (refresh.state==='failed' && radarView.good) radarView.refreshFailure=true;
-    else if (refresh.state==='idle' || refresh.frameIndex>0 && ['newest','history'].includes(refresh.state)) radarView.refreshFailure=false;
-    if (refresh.state==='superseded' && radarIntent.restartKey!==refresh.forSeq) {
-      radarIntent.restartKey=refresh.forSeq; radarIntent.restartUntil=Math.max(Date.now(),radarIntent.postedAt+600)+800;
-    }
-    radarNoteRender();
-    tab.hidden = !(r && r.available);
-    document.querySelector(".page").dataset.radarAlerts = d.alerts && d.alerts.length ? "on" : "off";
-    if (tab.hidden) {
-      ++radarView.generation; radarView.pending = null; radarView.wantedKey = null;
-      radarRelease();
-      radarStopLoop(false); $("rad-loop").hidden = true;
-      if ($("s-radar").classList.contains("active")) activate("s-obs");
-      return;
-    }
-    // Freeze the complete presentation, including same-frame polls, under fingers.
-    // Reject superseded centers/zooms before they can change generation or pixels.
-    if (radarGesture.state==='gesturing') { radarGesture.frozen=d; return; }
-    if (radarGesture.state==='committing' && !radarIntentMatches(r)) return;
-    if (r.geometryOnly) {
-      if (!radarIntentMatches(r)) return;
-      var geometryKey=radarPresentationKey(r);
-      if (radarView.geometryIntent!==geometryKey) {
-        radarGestureFence(); radarView.geometryIntent=geometryKey;
-      }
-      radarGeometryCommit(d); return;
-    }
-    var frame = (r.frames || []).find(function (f) { return f.id === r.latest && f.complete && f.url; });
-    if (!frame) return;
-    if (radarView.data && radarView.good && r.sourceId === radarView.data.sourceId && r.siteId === radarView.data.siteId &&
-        JSON.stringify(r.center) === JSON.stringify(radarView.data.center) && r.zoom === radarView.data.zoom &&
-        r.observedTs < radarView.good.ts) {
-      radarView.data.ageSec = Math.max(radarView.data.ageSec || 0, (d.ts || Date.now()/1000)-radarView.good.ts);
-      /* source-tuned staleness (a bare cadence multiple flags a healthy MRMS frame,
-         which is skipped until ~5 min old); fall back only for a legacy payload */
-      radarView.data.stale = radarView.data.ageSec >= (radarView.data.staleSec || 3*(radarView.data.cadenceSec || 600));
-      radarState(); return;
-    }
-    var key = radarPresentationKey(r) + frame.url;
-    if (key !== radarView.wantedKey) {
-      radarView.wantedKey = key; ++radarView.generation;
-      radarView.pending = null; radarView.retryAt = 0;
-    }
-    if (radarView.good && radarView.good.key === key) {
-      radarView.failed = false;
-      radarView.good.at = frame.at || r.observedAt;
-      if (radarView.holdingGeometry) { radarEchoSettled(r); radarDraw(radarView.good); }
-      radarCommit(d);  // successful same-frame refresh: update metadata without a download
-      return;
-    }
-    if (radarView.pending) { radarView.pending.data = d; return; }
-    if (Date.now() < radarView.retryAt) return;
-    var generation = radarView.generation, image = new Image();
-    var pending = { data: d };
-    radarView.pending = pending;
-    radarStopLoop(false);
-    image.decoding = "async";
-    function failed() {
-      if (generation !== radarView.generation || radarView.pending !== pending) return;
-      radarView.pending = null; radarView.failed = true; radarView.retryAt = Date.now() + 120000;
-      radarState();  // retained image, legend, attribution and times all stay together
-    }
-    image.onerror = failed;
-    image.onload = async function () {
-      try {
-        if (image.decode) await image.decode();
-        if (generation !== radarView.generation || radarView.pending !== pending) return;
-        if (image.naturalWidth !== r.viewport.w || image.naturalHeight !== r.viewport.h) { failed(); return; }
-        var canvas = document.createElement("canvas"); canvas.width = r.viewport.w; canvas.height = r.viewport.h;
-        var ctx = canvas.getContext("2d", {willReadFrequently:true}); ctx.drawImage(image, 0, 0);
-        var pixels = ctx.getImageData(0, 0, canvas.width, canvas.height).data, clear = true;
-        for (var a = 3; a < pixels.length; a += 4) if (pixels[a]) { clear = false; break; }
-        var staged = [];
-        if (radarView.active && radarView.good && radarView.data.sourceId !== r.sourceId) {
-          // Keep the old source on the plate until the new source has a decoded
-          // newest-ending window (eight scans, or its complete shorter history).
-          var windowFrames = (r.frames || []).filter(f => f.complete && f.url).slice(-8).reverse();
-          for (var f of windowFrames) {
-            if (generation !== radarView.generation || radarView.pending !== pending) break;
-            try {
-              var readyImage = image;
-              if (f.id !== frame.id) { readyImage = new Image(); readyImage.src = f.url; await readyImage.decode(); }
-              if (readyImage.naturalWidth !== r.viewport.w || readyImage.naturalHeight !== r.viewport.h) break;
-              var bitmap = await createImageBitmap(readyImage);
-              ctx.clearRect(0,0,canvas.width,canvas.height); ctx.drawImage(bitmap,0,0);
-              var sample = ctx.getImageData(0,0,canvas.width,canvas.height).data, hasEcho = false;
-              for (var at=3;at<sample.length;at+=4) if (sample[at]) { hasEcho=true; break; }
-              staged.push(Object.assign({},f,{bitmap:bitmap,ready:true,hasEcho:hasEcho}));
-            } catch(e) { break; } // partial history never pads or invents a scan
-          }
-        }
-        if (generation !== radarView.generation || radarView.pending !== pending) {
-          staged.forEach(f => f.bitmap.close()); return;
-        }
-        var current = pending.data.radar;
-        radarView.good = {key:key, id:frame.id, url:frame.url, ts:frame.ts, at:frame.at || current.observedAt, img:image};
-        radarView.current = radarView.good;
-        radarView.clearPixels = clear;
-        radarView.clear = clear && (frame.legend || r.legend || {}).remapped!==false &&
-          !(r.sites || []).some(s => s.reason); radarView.failed = false; radarView.pending = null; radarView.retryAt = 0;
-        radarRelease(); radarView.idx = 0;
-        if (radarView.active) { radarView.loaded = staged; radarUpdateReady(); }
-        else staged.forEach(f => f.bitmap.close());
-        image.onload = image.onerror = null;
-        radarEchoSettled(current);
-        radarView.data = current; radarDraw(radarView.good);
-        radarCommit(pending.data);
-      } catch (e) { failed(); }
-    };
-    if (!radarView.good) radarCommit(d); // cold load still paints geography, rings and marker
-    image.src = frame.url;
-  }
-  var radarBasemaps = new Map();
-  function radarGraticule() {
-    var base = $("rad-base"); base.replaceChildren();
-    delete base.dataset.basemapHash;
-    for (var i = 80; i < 956; i += 80) {
-      el("line", {x1:i, y1:0, x2:i, y2:490}, base);
-      if (i < 490) el("line", {x1:0, y1:i, x2:956, y2:i}, base);
-    }
-  }
-  function radarBasemapSync() {
-    var r = radarView.data;
-    if (!radarView.active || !r) return;
-    var bm = r.basemap;
-    if (!bm || !/^[a-f0-9]{20}$/.test(bm.hash) || bm.url !== "radar/basemap/" + bm.hash + ".svg") return;
-    var entry = radarBasemaps.get(bm.hash);
-    if (entry) {
-      if (entry.nodes && $("rad-base").dataset.basemapHash !== bm.hash) {
-        $("rad-base").replaceChildren.apply($("rad-base"), entry.nodes.map(function(n) { return n.cloneNode(true); }));
-        $("rad-base").dataset.basemapHash = bm.hash;
-      }
-      return;
-    }
-    entry = {nodes:null}; radarBasemaps.set(bm.hash, entry);
-    // Bounded viewport cache, including failed fetches; never fetch on a loop tick.
-    if (radarBasemaps.size > 16) radarBasemaps.delete(radarBasemaps.keys().next().value);
-    fetch(bm.url).then(function(response) {
-      if (!response.ok) throw new Error("basemap missing");
-      return response.text();
-    }).then(function(text) {
-      var svg = new DOMParser().parseFromString(text, "image/svg+xml");
-      var root = svg.documentElement;
-      if (root.localName !== "svg" || root.getAttribute("viewBox") !== "0 0 956 490" || svg.querySelector("parsererror"))
-        throw new Error("invalid basemap");
-      // Import only the class/path contract. No style, scripts, links or colours.
-      entry.nodes = Array.from(root.children).map(function(node) {
-        var cls = node.getAttribute("class"), path = node.getAttribute("d");
-        if (node.localName !== "path" || !/^bm-(ocean|lake|coast|admin0|admin1|road)$/.test(cls) ||
-            !path || !/^[MLZ0-9, \-]+$/.test(path)) throw new Error("invalid basemap path");
-        var safe = document.createElementNS("http://www.w3.org/2000/svg", "path");
-        safe.setAttribute("class", cls); safe.setAttribute("d", path); return safe;
-      });
-      if (radarView.active && radarView.data && radarView.data.basemap && radarView.data.basemap.hash === bm.hash)
-        radarBasemapSync();
-    }).catch(function() { entry.nodes = null; }); // keep the existing graticule
-  }
-  function radarCommit(d) {
-    var r = d.radar;
-    radarView.data = r;
-    radarView.clear = radarView.clearPixels && (r.legend || {}).remapped!==false &&
-      (r.frames || []).every(f => !f.complete || !f.legend || f.legend.remapped!==false) && !(r.sites || []).some(s => s.reason);
-    var settled=radarGesture.state==='committing' && radarIntentMatches(r) &&
-      radarView.good && radarView.good.id===r.latest && !radarView.pending;
-    radarZoomRender(); radarCenterRender();
-    if (settled) radarGestureReset(false);
-    var key = JSON.stringify([r.centered, r.zoom, r.metersPerPixel, r.bounds, r.marker, r.rings, r.scaleBar, (r.sites || []).map(s => [s.id,s.lat,s.lon,s.contributing]), r.basemap && r.basemap.hash]);
-    if (radarView.geometry !== key) {
-      radarView.geometry = key;
-      var over = $("rad-over"); over.replaceChildren();
-      radarGraticule();
-      var contributors=(r.sites || []).filter(s => r.geometryOnly || s.contributing);
-      $('rad-plate').setAttribute('aria-label','Reflectivity radar'+(contributors.length ? ' · '+contributors.map(s => s.id).join(', ') : ''));
-      if (contributors.length>=2) {
-        var center=radarWorldPoint(r.center.lat,r.center.lon,r.zoom);
-        contributors.forEach(function(site) {
-          if (!isNum(site.lat) || !isNum(site.lon)) return;
-          function point(lat,lon) {
-            var p=radarWorldPoint(lat,lon,r.zoom), world=256*2**r.zoom;
-            return [((p[0]-center[0]+world/2)%world+world)%world-world/2+478,p[1]-center[1]+245];
-          }
-          // Geodesic circle, projected into this viewport (Mercator is not equidistant).
-          var path='', a=site.lat*Math.PI/180, l=site.lon*Math.PI/180, d=230000/6371008.8;
-          for (var i=0;i<=120;i++) {
-            var bearing=i/120*2*Math.PI, lat=Math.asin(Math.sin(a)*Math.cos(d)+Math.cos(a)*Math.sin(d)*Math.cos(bearing));
-            var lon=l+Math.atan2(Math.sin(bearing)*Math.sin(d)*Math.cos(a),Math.cos(d)-Math.sin(a)*Math.sin(lat));
-            var p=point(lat*180/Math.PI,lon*180/Math.PI);
-            path+=(i?'L':'M')+p[0].toFixed(1)+','+p[1].toFixed(1);
-          }
-          el('path',{class:'rad-site-edge',d:path+'Z'},over);
-          var p=point(site.lat,site.lon), labelY=p[1]+13;
-          if (p[0]>=0 && p[0]+42<=956 && p[1]>=0 && p[1]<=490 && labelY-12>=76 && labelY<=412) {
-            el('circle',{class:'rad-site-dot',cx:p[0],cy:p[1],r:2},over);
-            el('text',{class:'rad-site-label',x:p[0]+5,y:labelY},over).textContent=site.id;
-          }
-        });
-      }
-      var x = r.marker.x * 956, y = r.marker.y * 490;
-      (r.rings || []).forEach(function (ring) {
-        el("circle", {class:"ring", cx:x, cy:y, r:ring.px}, over);
-        if (y - ring.px - 5 >= 76 && y - ring.px - 5 <= 412) el("text", {x:x+8, y:y-ring.px-5}, over).textContent = ring.label;
-      });
-      if (r.centered!==false) el("path", {class:"rad-cross", d:"M"+(x-18)+","+y+"h36 M"+x+","+(y-18)+"v36"}, over);
-      if (r.centered===false) el("circle", {class:"rad-station-accent", cx:x, cy:y, r:10}, over);
-      el("circle", {class:"rad-station", cx:x, cy:y, r:6}, over);
-      el("circle", {class:"rad-dot", cx:x, cy:y, r:2}, over);
-      if (r.scaleBar && r.scaleBar.pixels) {
-        var end = 340 + r.scaleBar.pixels;
-        el("path", {class:"rad-scale", d:"M340,464v8H"+end+"v-8"}, over);
-        el("text", {x:340, y:458}, over).textContent = r.scaleBar.distDisp;
-      }
-    }
-    radarBasemapSync();
-    radarSourceRender();
+  function radarLegendRender(){var r=radarView.data;
     var legendKey = (r.sourceId || "rainviewer") + ":" + (r.legend && (r.legend.id || r.legend.colorId)) + ":" + (r.legend && r.legend.floorDbz);
     if (r.legend && radarView.legendKey !== legendKey) {
       radarView.legendKey=legendKey;
@@ -3533,9 +3139,6 @@
         tick.style.left=((dbz-floorDbz)/(75-floorDbz)*372)+'px'; ticks.append(tick);
       });
     }
-    radarState();
-    if (!r.geometryOnly) radarPreload(r);      /* load the past-hour frames (when the history is present) */
-    radarLoopSync();      /* start/continue/stop the loop for the current state */
   }
 
   function render(data) {
@@ -3551,10 +3154,10 @@
   }
 
   var POLL_MS      = 2000;
-  var radarFastUntil = 0, radarHistoryUntil = 0, pollTimer = null, pollController = null;
+  var pollTimer = null, pollController = null;
   function schedulePoll() {
     clearTimeout(pollTimer);
-    pollTimer=setTimeout(poll, Date.now()<radarHistoryUntil ? 100 : Date.now()<radarFastUntil ? 400 : POLL_MS);
+    pollTimer=setTimeout(poll, POLL_MS);
   }
   var FETCH_MS     = 4000;   /* deadline for one request; past it we abandon it */
   var failCount    = 0;
@@ -3572,6 +3175,7 @@
   function poll(viewStart) {
     var started = Date.now();
     clearTimeout(pollTimer); schedulePoll();
+    if (radarView.active && radarGesture.state!=='idle') return;
     if (polling && viewStart === true) {
       if (pollController) pollController.abort();
       polling=false;
@@ -3592,37 +3196,17 @@
        failed request after it must not re-send it */
     var ack = reportRender; reportRender = false;
     var radarActive = $("s-radar").classList.contains("active") && !document.hidden;
-    var zoomQuery = "", posting=radarIntent.ready && radarActive && radarGesture.state!=='gesturing';
-    if (posting) {
-      var r=radarView.data, center=radarCenter.desired!==null ? radarCenter.desired :
-        r.centered===false ? r.center : 'station';
-      var desiredZoom=radarZoom.desired!==null ? radarZoom.desired : r.zoomAuto ? 'auto' : r.zoomDesired!==null && r.zoomDesired!==undefined ? r.zoomDesired : r.zoom;
-      var desiredSource=radarSource.desired!==null ? radarSource.desired : r.sourcePref || r.sourceMode || 'mosaic';
-      zoomQuery='&radarZoom='+encodeURIComponent(desiredZoom)+'&radarSource='+desiredSource+
-        '&radarCenter='+encodeURIComponent(center==='station' ? center : center.lat.toFixed(10)+','+center.lon.toFixed(10));
-      var seq=++radarIntent.localSeq;
-      radarIntent.targetSeq=seq;
-      radarIntent.pending={seq:seq, query:zoomQuery+'&radarSeq='+seq};
-      radarZoom.sent=radarZoom.desired!==null; radarCenter.sent=radarCenter.desired!==null; radarSource.sent=radarSource.desired!==null;
-      radarIntent.ready=false; radarIntent.postedAt=Date.now(); radarFastUntil=Date.now()+20000; schedulePoll(); radarNoteRender();
+    var sentIntentGeneration=radarIntent.generation,zoomQuery = "", posting=radarIntent.ready && radarActive && radarGesture.state==='idle' && radarCamera;
+    if(posting){var r=radarView.data,c=radarCamera;
+      // A wall-clock-derived monotonic generation survives reloads without a
+      // pixel acknowledgement. The durable grammar is deliberately unchanged.
+      var seq=Math.max(radarIntent.localSeq+1,Math.floor(Date.now()/10));radarIntent.localSeq=seq;
+      zoomQuery='&radarZoom='+(radarZoom.auto?'auto':(radarZoom.requested??Math.round(c.zoom)))+'&radarSource='+(radarSource.desired||r.sourcePref||'mosaic')+
+        '&radarCenter='+encodeURIComponent(c.lat.toFixed(10)+','+(((c.lon+180)%360+360)%360-180).toFixed(10))+'&radarSeq='+seq;
     }
-    var sentIntent=radarActive && radarGesture.state!=='gesturing' ? radarIntent.pending : null;
-    zoomQuery=sentIntent ? sentIntent.query : '';
-    fetch("wx.json?_=" + started + (ack ? "&r=1" : "") + (radarActive ? "&view=radar" + zoomQuery : ""), opts)
+    fetch("wx.json?_=" + started + (ack ? "&r=1" : "") + (radarActive ? "&view=radar&radarTheme="+radarBaseStyle.theme+"&radarMoving="+(radarGesture.state!=='idle'?1:0) + zoomQuery : ""), opts)
       .then(function (r) {
         if (!r.ok) throw new Error("HTTP " + r.status);
-        var marker=r.headers.get('X-Radar-Intent-Seq');
-        if (!/^[0-9]+$/.test(marker || '')) marker=null;
-        if (marker!==null) {
-          var serverSeq=Number(marker);
-          radarIntent.localSeq=Math.max(radarIntent.localSeq,serverSeq);
-          if (sentIntent && radarIntent.pending===sentIntent && serverSeq>sentIntent.seq) {
-            // A reload raced a newer authoritative generation: reissue the
-            // same desired geometry above it, without regressing the marker.
-            radarIntent.pending=null; radarIntent.ready=true;
-          }
-        }
-        if (sentIntent && radarIntent.pending===sentIntent && (marker===null || Number(marker)===sentIntent.seq)) radarIntent.pending=null;
         var srv = Date.parse(r.headers.get("Date") || "");   /* the producer's clock, 1 s resolution */
         return r.json().then(function (d) { return { d: d, srvMs: srv }; });
       })
@@ -3631,6 +3215,7 @@
         var d = x.d;
         if (!validPayload(d)) throw new Error("bad payload");
         render(d);                                /* may throw — book success AFTER it */
+        if(posting&&radarIntent.generation===sentIntentGeneration)radarIntent.ready=false;
         lastRenderMs = Date.now();
         /* file age at receipt on the SERVER's clock (falls back to ours), then
            advanced by a monotonic clock — a viewer whose wall clock is minutes
@@ -3645,7 +3230,7 @@
       .then(function () {
         clearTimeout(kill);
         if (gen === pollGen) { polling = false; updateFreshness(); schedulePoll();
-          if (radarIntent.ready && radarActive && radarGesture.state!=='gesturing') poll();
+          if (radarIntent.ready && radarIntent.generation!==sentIntentGeneration && radarActive && radarGesture.state==='idle') poll();
         }
       });
   }

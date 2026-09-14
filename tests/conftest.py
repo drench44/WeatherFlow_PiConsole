@@ -135,12 +135,14 @@ from types import SimpleNamespace                         # noqa: E402
 
 
 @pytest.fixture
-def make_emitter(tmp_path):
+def make_emitter(tmp_path, monkeypatch):
     """ Build an AlmanacEmitter over a fake holder. `scenario` is a
     dict(Obs, Met, Astro, Sager) from fixtures.obs_scenarios; `config` defaults
     to fixtures.config.make_config(); extra kwargs set instance attrs (e.g.
     _aqi=42) to stand in for the off-thread network results. """
     from lib.almanac_emit import AlmanacEmitter
+    from lib import almanac_emit
+    monkeypatch.setattr(almanac_emit, 'RADAR_DIR', str(tmp_path / 'radar'))
     from tests.fixtures.config import make_config
 
     def _make(scenario=None, config=None, api_data=None, **attrs):
