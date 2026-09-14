@@ -154,7 +154,7 @@ def test_site_mode_neighbour_press_is_a_cache_hit(scene, hybrid, multisite, tmp_
         assert not any(k[0]==SITE and k[1]==site and url.endswith('/%s/%s/%s.png' % (k[4],k[5],k[6])) for k in warm)
 
 
-def test_settled_mosaic_loop_precedes_cross_mode_warm_and_press(make_emitter, hybrid, multisite, tmp_path, monkeypatch):
+def test_settled_mosaic_newest_precedes_cross_mode_warm_and_press(make_emitter, hybrid, multisite, tmp_path, monkeypatch):
     (tmp_path/'radar_source').write_text('mosaic'); hybrid.view()
     emitter = make_emitter()
     request = emitter._radar_request
@@ -166,7 +166,7 @@ def test_settled_mosaic_loop_precedes_cross_mode_warm_and_press(make_emitter, hy
     emitter._do_radar()
     first_site = next(i for i,(s,u) in enumerate(events) if s == SITE)
     preceding = [u for s,u in events[:first_site] if 'mrms::' in u]
-    assert len(preceding) == 30+4+4  # newest + adjacent levels before cross-mode warm and history
+    assert len(preceding) == 30  # newest, then current-camera site before optional zoom neighbours
     assert 2<=sum(f['complete'] for f in emitter._radar_result.frames)<=8  # cross-mode tier may consume this pass's reserve
     # Let the real rolling window expire, retaining continuous viewed demand.
     hybrid.mono = 60; hybrid.view(); emitter._do_radar(intent_triggered=False)

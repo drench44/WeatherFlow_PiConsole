@@ -7,6 +7,18 @@ to shared upstream code that the classic console benefits from too.
 ## 2026-09-14
 
 ### Radar
+- **Radar v4.3 immediate source choice.** Touch contact, click and keyboard show
+  a dotted pending choice and honest fetching caption immediately. The displayed
+  source retains `aria-pressed`; the group exposes busy state. Intent uses the
+  existing loopback GET immediately, coalesces bursts and supersedes a stalled
+  poll. Follow-up polling is 300ms until source acknowledgement, capped at 20s.
+- **Warm source switches use the cache.** Current-camera opposite-source tiles
+  precede optional zoom neighbours. Interrupted rounds and missing disk tiles
+  resume, and a complete mosaic tab return no longer skips missing site warming.
+  Shared request limits remain in force. Already decoded tiles complete a source
+  transition without waiting for a new fetch; repeated payloads preserve pending
+  tile work. Older site volumes can publish their first tile across a source
+  change without waiting for the whole viewport.
 - **Radar v4.2 geography scheduling.** An independent `geo` worker starts home
   pre-warming with the engine, even on Observations and before radar fetches.
   It renders one missing tile per 250ms scheduling quantum, yields between

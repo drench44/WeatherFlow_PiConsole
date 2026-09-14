@@ -104,16 +104,16 @@ def radar_server():
                     for x in range(cx-5,cx+6):
                         p=radar/'t'/ae._radar_render_revision()/'iem-mrms-lcref'/'-'/frame['stamp']/str(z)/str(x)/f'{y}.png';p.parent.mkdir(parents=True,exist_ok=True);p.write_bytes(raw)
                         site=radar/'t'/ae._radar_render_revision()/'iem-nexrad-n0b'/'KATX'/frame['stamp']/str(z)/str(x)/f'{y}.png';site.parent.mkdir(parents=True,exist_ok=True);site.hardlink_to(p)
-        requests=[]
+        requests=[];request_times=[]
         class Handler(server_module.Handler):
             def do_GET(self):
-                requests.append(self.path)
+                requests.append(self.path);request_times.append(dict(path=self.path,at=time.time()*1000))
                 return super().do_GET()
             def log_message(self,*args): pass
         server_module.WEB=str(root);server_module.DATA=str(root/'wx.json')
         server=server_module.http.server.ThreadingHTTPServer(('127.0.0.1',0),Handler)
         thread=threading.Thread(target=server.serve_forever,daemon=True);thread.start()
-        try:yield SimpleNamespace(root=root,data=data,requests=requests,url=f'http://127.0.0.1:{server.server_port}',module=server_module)
+        try:yield SimpleNamespace(root=root,data=data,requests=requests,request_times=request_times,url=f'http://127.0.0.1:{server.server_port}',module=server_module)
         finally:server.shutdown();server.server_close();thread.join()
 
 
@@ -661,7 +661,7 @@ def review_cases(browser,server,theme):
       site.sourceId='iem-nexrad-n0b';site.sourceMode='site';site.siteId='KATX';site.tiles.frames.forEach(f=>f.siteScans=[{id:'KATX',ts:f.ts}]);
       renderRadar({radar:site});const staged=!!radarView.pendingSource;renderRadar({radar:old});await new Promise(r=>setTimeout(r,300));
       if(!staged||radarView.pendingSource||radarView.data.sourceId!==old.sourceId)throw Error('obsolete transition installed');
-      const primary=structuredClone(site);radarView.acceptingSource=true;renderRadar({radar:primary});radarView.acceptingSource=false;const older=structuredClone(primary);older.siteId='KLGX';older.observedTs-=60;renderRadar({radar:older});if(radarView.pendingSource?.data.siteId!=='KLGX')throw Error('primary rewind rejected');radarView.pendingSource=null;radarView.acceptingSource=true;renderRadar({radar:old});radarView.acceptingSource=false;
+      const primary=structuredClone(site);radarView.acceptingSource=true;renderRadar({radar:primary});radarView.acceptingSource=false;const older=structuredClone(primary);older.siteId='KLGX';older.observedTs-=60;renderRadar({radar:older});if((radarView.pendingSource?.data||radarView.data).siteId!=='KLGX'||(radarView.pendingSource?.data||radarView.data).observedTs!==older.observedTs)throw Error('primary rewind rejected');radarView.pendingSource=null;radarView.acceptingSource=true;renderRadar({radar:old});radarView.acceptingSource=false;
       const newest=radarView.data.observedAt;radarView.current=radarView.loaded[0];radarView.data.ageSec=480;radarState();
       const header=document.getElementById('rad-status').textContent;if(!header.includes(newest)||!header.includes('8 min old'))throw Error('header measurement mismatch');
       // Historical translucency remains alpha 180 with component tiles present or absent during pan.

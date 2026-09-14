@@ -906,7 +906,9 @@ class AlmanacEmitter:
         self._radar_tiles = OrderedDict()
         self._radar_disk_files = 0
         self._radar_disk_bytes = 0
-        self._radar_prefetched = {}  # (source, zoom, centre) -> attempted scan set
+        self._radar_idle_context = None
+        self._radar_warm_pending = False
+        self._radar_prefetched = {}  # (source, zoom, centre) -> completed scan set
         self._radar_was_viewed = False
         self._radar_view_pending = False
         self._radar_view_session = None
@@ -1161,6 +1163,20 @@ class AlmanacEmitter:
                 self._radar_view_pending = False
                 self._radar_zoom_stamp = stamp
                 self._spawn('radar', lambda: self._do_radar(intent_triggered=True, view_started=view_started))
+        elif self._running and viewed and self._radar_warm_pending and 'radar' not in self._inflight:
+            self._radar_warm_pending = False
+            self._spawn('radar', self._radar_resume_warm)
+
+    def _radar_resume_warm(self):
+        if self._radar_idle_context is None:
+            return
+        source, warm = self._radar_idle_context
+        warm = dict(warm, viewed=True, refresh=dict(state='idle'),
+                    deadline=time.monotonic()+RADAR_BUILD_DEADLINE_SEC)
+        try:
+            self._radar_prefetch(source, warm)
+        except _RadarSuperseded:
+            pass  # the watcher owns the newer camera/source
 
     def _check_radar_geo(self, _dt=None):
         if not self._running or 'geo' in self._inflight:
@@ -1517,7 +1533,9 @@ class AlmanacEmitter:
                     self._radar_checkpoint(ctx)
                     # Publish partial newest inventory as each independent tile lands.
                     snap = self._radar_result
-                    if (snap.ts_frame is None or ts >= snap.ts_frame) and not ctx.get('prefetch'):
+                    if (snap.source_id != source or
+                            source == 'iem-nexrad-n0b' and snap.site_id != ctx.get('site_id') or
+                            snap.ts_frame is None or ts >= snap.ts_frame) and not ctx.get('prefetch'):
                         settings = _RADAR_SOURCES[source]
                         # A tile is an independently validated measurement; publish
                         # its stamp before the remaining viewport tiles finish.
@@ -1844,6 +1862,7 @@ class AlmanacEmitter:
                 for x,y,_,_ in _radar_site_tiles(ctx,site)) for site,scan in pairs)
         if not publish():
             raise ValueError('IEM frame aged out during acquisition')
+        self._radar_idle_context = (source, dict(ctx))
         if ctx['viewed']:
             self._radar_publish_refresh(ctx,state='idle')
             self._radar_prefetch(source,ctx)
@@ -1923,16 +1942,14 @@ class AlmanacEmitter:
         return self._radar_result
 
     def _radar_prefetch(self, source, ctx):
-        """Idle source/zoom rounds after loop-eight; newest native tiles only."""
+        """Idle source/zoom rounds before history; newest native and disk tiles."""
         if (not ctx['viewed'] or not self._radar_is_viewed() or
                 ctx.get('refresh', {}).get('state') != 'idle'):
             return
         known_ctx = dict(ctx, intent_triggered=True)
         newest = self._radar_result.ts_frame
-        if source != 'iem-nexrad-n0b':
-            known = self._radar_known(source, known_ctx)
-            if known is None or known['newest'] != newest:
-                return
+        known = self._radar_known(source, known_ctx) if source != 'iem-nexrad-n0b' else None
+        own_fresh = source == 'iem-nexrad-n0b' or known is not None and known['newest'] == newest
         floor = RADAR_SITE_MIN_ZOOM if source == 'iem-nexrad-n0b' else RADAR_MIN_ZOOM
         targets = [(source, z) for z in (ctx['zoom']-1, ctx['zoom']+1)
                    if floor <= z <= _RADAR_SOURCES[source]['max_zoom']]
@@ -1945,20 +1962,29 @@ class AlmanacEmitter:
             targets.extend(('iem-nexrad-n0b', z) for z in
                            (ctx['zoom'], ctx['zoom']-1, ctx['zoom']+1)
                            if RADAR_SITE_MIN_ZOOM <= z <= 10)
+        # The current camera's opposite mode comes before optional zoom neighbours.
+        targets.sort(key=lambda item: item[0] == source or item[1] != ctx['zoom'])
+        targets = [(target,z) for target,z in targets if target != source or own_fresh]
         retry = self._radar_session.on_retry
-        admitted_source = None
+        admitted_sources = set()
+        denied_sources = set()
         try:
             for target, zoom in targets:
+                if target in denied_sources:
+                    continue
                 warm = dict(ctx, intent_triggered=True, prefetch=True, sources=list(ctx['sources']),
                             request_reserve=RADAR_HISTORY_RESERVE, tile_workers=RADAR_TILE_WORKERS)
                 self._radar_checkpoint(warm)
-                if target != admitted_source:
+                if target not in admitted_sources:
                     # As with the original Z±1 tier, admit a source round once
                     # with 60 spare slots; every request still preserves 34.
                     if self._radar_headroom_delay(target, RADAR_PREFETCH_HEADROOM + RADAR_HISTORY_RESERVE):
                         self._radar_budget_retry(target, RADAR_PREFETCH_HEADROOM + RADAR_HISTORY_RESERVE)
-                        break
-                    admitted_source = target
+                        # A source cooldown must not block the other source.
+                        # The shared request cap and reserve still apply to both.
+                        denied_sources.add(target)
+                        continue
+                    admitted_sources.add(target)
                 tiles, _, bounds, _ = _radar_viewport(ctx['center']['lat'], ctx['center']['lon'],
                     zoom, RADAR_VIEWPORT_W, RADAR_VIEWPORT_H)
                 if target == source:
@@ -1991,13 +2017,18 @@ class AlmanacEmitter:
                         pairs = ((None, newest),)
                         signature = pairs
                     key = (target, zoom, ctx['center']['lat'], ctx['center']['lon'])
-                    if self._radar_prefetched.get(key) == signature:
+                    if (self._radar_prefetched.get(key) == signature and
+                            all(_radar_tile_path(target, site, stamp, zoom, x, y).is_file()
+                                for site, stamp in pairs
+                                for x, y, _, _ in _radar_site_tiles(warm, site))):
                         continue
-                    # Bounded memory, one attempt per geometry and scan set. Successful
+                    # Bounded completion memory per geometry and scan set. Successful
                     # in-flight tiles survive cancellation in the ordinary tile LRU.
                     if len(self._radar_prefetched) >= RADAR_TILE_CACHE_SIZE:
                         self._radar_prefetched.pop(next(iter(self._radar_prefetched)))
-                    self._radar_prefetched[key] = signature
+                    # Record completion only after every tile succeeds. An intent
+                    # interrupt must not turn a partial round into a permanent hit.
+                    self._radar_prefetched.pop(key, None)
                     for site, stamp in pairs:
                         utc = datetime.fromtimestamp(stamp, timezone.utc).strftime('%Y%m%d%H%M')
                         if target == 'iem-mrms-lcref':
@@ -2015,6 +2046,7 @@ class AlmanacEmitter:
                         except Exception:
                             self._radar_forget(target, site)
                             raise
+                    self._radar_prefetched[key] = signature
                 except (_RadarBudget, _RadarSuperseded):
                     raise
                 except Exception:
@@ -2082,6 +2114,7 @@ class AlmanacEmitter:
             # explicitly force validation even if an intent arrived meanwhile.
             intent_triggered = stamp != self._radar_zoom_stamp or self._radar_restart
         self._radar_restart = False
+        self._radar_warm_pending = False
         self._radar_zoom_stamp = stamp
         self._radar_migrate_cache()
         self._radar_prune()
@@ -2089,8 +2122,11 @@ class AlmanacEmitter:
             previous = self._radar_result
             if (previous.available and previous.ts_frame and 0 <= time.time()-previous.ts_frame < previous.stale_sec
                     and len(previous.frames)>=8 and all(f['complete'] for f in previous.frames[-8:])
-                    and self._radar_inventory_valid(previous)):
+                    and self._radar_inventory_valid(previous) and self._radar_idle_context is not None):
                 self._radar_retained_refresh('idle')
+                # Publish the retained loop first. Resume the idle tier on the
+                # next watcher tick, in the same single-flight radar lane.
+                self._radar_warm_pending = True
                 return
         try:
             config = getattr(self.app, 'config', {}) or {}

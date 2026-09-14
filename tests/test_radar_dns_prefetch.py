@@ -209,7 +209,7 @@ def test_prefetch_exact_headroom_and_new_intent_cancels_round(make_emitter, hybr
     assert all('/7/' in c[2] for c in hybrid.calls)
     assert emitter._radar_result is snap and emitter._radar_refresh == refresh
     assert any(k[4] == 7 for k in emitter._radar_tiles)
-    assert emitter._radar_prefetched[(source, 7, snap.center['lat'], snap.center['lon'])] == ((None, snap.ts_frame),)
+    assert (source, 7, snap.center['lat'], snap.center['lon']) not in emitter._radar_prefetched  # interrupted, resumable round
 
 
 def test_rainviewer_prefetch_once_per_stamp_and_source_bounds(make_emitter, hybrid, monkeypatch, tmp_path):

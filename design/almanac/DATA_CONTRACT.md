@@ -288,7 +288,7 @@ Successful partial tiles survive another tile's failure or a budget yield.
 | Priority | Work |
 | --- | --- |
 | 1 | Newest, integer Z, viewport plus one-tile margin, nearest first; at most 35 tiles per mosaic |
-| 2 | Newest centre 2×2 at Z−1 and Z+1, then the other mode's newest at Z |
+| 2 | Other mode newest at the current camera/Z first, then newest centre 2×2 at Z−1 and Z+1 and other-mode neighbours |
 | 3 | History slots 2–8, viewport only, at most 15 tiles per mosaic |
 | 4 | History 9–31, viewport only, after 20 seconds of continuous viewing at this view |
 
@@ -297,7 +297,8 @@ adjacent-level work after its current-level tiles, within the same reserve.
 The `radar_viewed` 15-minute demand hint and runtime `radar_viewing:{since,last}`
 continuous-view gate survive. Hidden documents omit the view signal. Off-tab
 passes fetch newest only and retain the hour on disk; warm view-start publishes
-that retained manifest without provider HTTP or changed observation/fetch times.
+that retained manifest without changed observation/fetch times. It also resumes
+missing opposite-mode warming; already resident rounds need no provider HTTP.
 Scheduled provider checks remain 180 seconds; external failures retry at 120
 seconds; capacity and view-gate yields schedule their next eligible opportunity.
 
@@ -579,9 +580,19 @@ monotonic local sequence, seeded from current epoch deciseconds to survive page
 reloads without an acknowledgement handshake. The sequence only cancels obsolete
 worker warm-ups, never gates pixels.
 
-Reports occur on activation and after settle's 120ms trailing debounce. Polling
-is flat 2s and omitted during active gestures/inertia; there are no 100/400ms
-windows. New pointer activity cancels an unposted report. An in-flight tile is
+Camera reports occur on activation and after settle's 120ms trailing debounce.
+**v4.3 source input** renders intent synchronously on primary pointer contact;
+native click also supports mouse, keyboard and assistive activation. The next
+event-loop task sends the complete intent on the existing loopback `wx.json` GET
+channel, coalescing a synchronous burst and aborting an obsolete in-flight poll.
+The pointer's compatibility click does not send a duplicate transaction. Source
+input below the site floor snaps the camera to zoom 7 before sending.
+
+Ordinary polling remains 2s and is omitted during gestures/inertia. A source
+choice polls every 300ms until the payload acknowledges its source preference,
+for at most 20s; hidden/inactive Radar never gets accelerated polling. Pending
+presentation lasts until that source's tiles land, even after fast polling ends.
+New plate activity cancels an unposted camera report. An in-flight tile is
 allowed to finish into the LRU; the pending queue is rebuilt for the new camera.
 Four concurrent page tile requests leave room for wx.json. Newest-visible tiles
 precede margin, adjacent 2×2 and newest-first history. During gestures only newly
@@ -596,6 +607,35 @@ the visible scan, upper zoom-cap copy, then `KATX resumes at zoom 7`. Copy remai
 `Couldn't refresh · showing 17:12`. Only a 120ms opacity transition is used,
 disabled for reduced motion. There is no Updating pill, spinner, second note,
 or `aria-busy` write on the interactive plate.
+
+### Immediate source choice (v4.3)
+
+`#rad-src` and the requested segment carry `data-state="pending"`; the group
+carries `aria-busy="true"`. The requested segment has a static dotted underline,
+while `aria-pressed` continues to identify the displayed source. The caption
+immediately reads `NEXRAD · KATX · fetching` (using the available site ID) or
+`MRMS mosaic · fetching`. A matching payload starts tile acquisition; the real
+caption and confirmed state replace pending when a tile is available to draw.
+A decoded tile can complete the transition without another fetch. Repeated
+payloads for the same transition retain its in-flight work; a newer choice
+invalidates the old transition. Refresh progress remains in the existing note.
+No new animation is introduced, including under reduced motion.
+
+The emitter's existing idle tier writes both native LRU bytes and the immutable
+remapped disk paths used by `serve.py` and the v4 page. Opposite-mode newest at
+the current camera takes precedence over optional zoom neighbours. Source
+cooldowns cannot block another source's eligible round; the shared 240/minute
+cap, 34-request reserve and 60-slot round admission still apply. A round is
+remembered only after all its tiles succeed; missing disk files invalidate the
+completion shortcut. Interrupted rounds resume using paid-for native/disk tiles.
+A warm eight-frame tab return publishes immediately and resumes missing
+opposite-mode work on the next 100ms watcher tick in the same radar flight lane. Expired
+current-source metadata prevents warming its own neighbours, but does not prevent
+discovery of the opposite source. Warm intent passes reuse fresh listings; no
+listing request is needed until their existing cadence expires. Cold passes
+retain the fetching caption while discovery/acquisition runs. First-tile
+publication orders timestamps within source/primary identity, so a site volume
+older than the displayed mosaic can still publish immediately.
 
 ### Shared reflectivity palette
 
