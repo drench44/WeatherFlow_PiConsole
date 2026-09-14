@@ -160,14 +160,14 @@ def test_source_marker_loopback_validation(monkeypatch,tmp_path,address,query,va
 
 
 def test_wide_crop_registration_and_basemap():
-    tiles,mpp,bounds,marker=ae._radar_viewport(47.72,-121.97,8,956,490)
+    tiles,mpp,bounds,marker=ae._radar_viewport(47.61,-122.33,8,956,490)
     mask=Image.new('1',(956,490))
     for _,_,x,y in tiles: mask.paste(1,(x,y,x+256,y+256))
     assert mask.getextrema()==(1,1) and marker==(478,245)
     assert 195000<mpp*490<205000
     bar,_=ae._radar_scale(mpp,490,'mi',max_fraction=.25)
     assert bar['distDisp']=='25 mi'
-    svg,_=bm.render(47.72,-121.97,8,bounds,(956,490))
+    svg,_=bm.render(47.61,-122.33,8,bounds,(956,490))
     assert 'viewBox="0 0 956 490"' in svg
 
 

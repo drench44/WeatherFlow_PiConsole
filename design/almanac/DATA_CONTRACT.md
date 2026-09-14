@@ -309,7 +309,7 @@ site shows disabled `NO SITE`.
 
 Auto targets 200,000 m across the **490px short axis**:
 `round(log2(156543.03392*cos(lat)/(200000/490)))`, bounded 4–9 before each
-source's own limits. Duvall resolves to z8, approximately 393×201 km, with a
+source's own limits. Seattle (47.6° N) resolves to z8, approximately 393×201 km, with a
 25-mile scale bar. RainViewer clamps auto to z7. Manual desired zoom persists
 independently of effective source bounds, allowing 4–10. `zoomCapped` is true
 when the desired manual or auto level differs from the effective level,
