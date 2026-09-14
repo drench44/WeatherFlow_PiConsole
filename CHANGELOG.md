@@ -7,6 +7,16 @@ to shared upstream code that the classic console benefits from too.
 ## 2026-09-14
 
 ### Radar
+- **Radar v4.4 keeps hatch to a few real holes.** The 400ms hatch requires the
+  manifest's expected bit and drawn site-range/MRMS coverage, clips at coverage
+  edges, and disappears when more than 40% of expected cells are missing.
+  Acquiring views use the loop/refresh copy. The reporting nearest radar keeps
+  its subject while tiles are late, with `KATX loading` instead of `timeline KATX`.
+- **Smoother local playback.** Frames advance every 200ms with the existing
+  1100ms newest hold and a 120ms linear blend of two real scans. RainViewer's
+  interval formula scales by 200/110. Nearest-neighbour sampling stays; reduced
+  motion hard-cuts through its opt-in single sweep. Eight cached composites fit
+  the existing 40MiB cap; playback fetches and decodes nothing.
 - **Radar v4.3b explains the source choice.** Region replaces Mosaic; the live
   callsign keeps its nearby count, with descriptive accessible names on both
   segments. Captions name the radar and new-image cadence, keep visible provider

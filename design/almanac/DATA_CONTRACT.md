@@ -394,15 +394,33 @@ frame read alone names the displayed historical scan, including partial coverage
 Incomplete acquisition or remapping cannot assert clear conditions.
 
 Missing tiles first use a **same-stamp**, same-source/site-set parent at Z−1 or
-Z−2, nearest-neighbour scaled. Other timestamps never fill a hole. With some
-coverage, uncovered rectangles acquire a 45° 1px `--rule-faint` hatch at 8px
-pitch after 400 ms. Hatch is suppressed during gestures and never appears for
-total absence. Its pigment is not a reflectivity measurement. While hatched, the
-plate's accessible name ends `· partial coverage`. Total absence reads
-`Buffering · 0 of 8` or `Paused · 0 of 8`; no Loading/Fetching text is introduced.
-With partial pixels the frame read names their own time, even before a complete
-frame is ready; inventory-only copy applies when no partial pixels are displayed.
-Cold tiles paint at full opacity on the next rAF after decode, without fades.
+Z−2, nearest-neighbour scaled. Other timestamps never fill an acquisition hole.
+A 45° 1px `--rule-faint` hatch at 8px pitch is reserved for **partial** acquisition:
+only cells set in the matching newest `expectedMask`, at its declared grid/zoom,
+and intersecting the drawn source's coverage qualify. Unknown/stale manifests,
+unrequested cells and outside-coverage cells never hatch. Site coverage is the
+union of actually contributing sites' 230km spherical range circles; MRMS uses
+20–55°N, 130–60°W. Boundary cells are additionally clipped to that coverage, so
+the hatch does not spill beyond a circle or domain edge. Geography must be present.
+
+Each eligible hole waits 400ms. If **more than 40%** of manifest-expected cells
+in the planned source coverage are missing (including incomplete site tiles), the state is acquiring: no hatch;
+the loop read uses `Buffering · n of 8` / `Paused · n of 8`, and the refresh note
+can say `Refreshing · newest frame`. Exactly 40% remains partial. Gestures and
+total absence never hatch. Arrivals repaint the whole echo plate because the
+cap is global; an old hatch cannot survive in an undamaged tile rectangle.
+While hatched, the accessible name ends `· partial coverage`. A few partial
+pixels keep their frame-time read. Cold acquisition tiles paint at full opacity
+on the next rAF after decode. The temporal playback blend below does not apply
+to newly acquired tiles.
+
+The reporting timeline owner (`siteId`, station-nearest reporting site) remains
+the caption/picker subject while its tiles are late: e.g. `Camano Island radar
++ 1 nearby · new scan every ~5 min · IEM / NOAA · KATX loading`. Nearby counts
+count actual other contributors; station distance stays with the nearest site.
+`KATX loading` replaces `timeline KATX` (v4.4 overrides the exception vocabulary
+retained in Fable v4.3 §1.4). A site explicitly marked `not reporting` can still
+yield to a drawn contributor, with the existing honest not-reporting suffix.
 
 Retired: public `frames`, frame `id/url/complete`, `latest`, `basemap`,
 `geometryOnly`, `marker`, `centered`, `bounds`, `viewport`, `metersPerPixel`,
@@ -505,8 +523,9 @@ contribution and `completeMask` means all required site contributions acquired.
 Outside-range tiles do not block playback, and partial site tiles cannot claim
 complete acquisition or clear conditions.
 
-History uses seven 956×490 bitmaps plus one reusable plate scratch; newest stays
-as tiles. A moving history bitmap exclusively owns its projected rectangle;
+Playback uses up to eight 956×490 bitmaps (including newest) plus one reusable
+plate scratch, within the same 40MiB admission cap. Newest tiles remain available
+for acquisition and camera moves. A moving history bitmap exclusively owns its projected rectangle;
 component tiles are clipped outside that rectangle, so alpha/reflectivity never
 double-composites. Its hasEcho/legend metadata remain attached to its pixels.
 Settle/cancellation snaps and clamps the camera, invalidates history and reports
@@ -548,9 +567,9 @@ Recenter and 90-second idle recenter ease to the station over 280ms. Only the
 plate uses touch-action:none; controls remain target-gated, with ≥44px hits.
 
 The only motion is 160ms zoom, 280ms recenter, inertia, 120ms note opacity,
-120ms rewind dip, 110ms tick movement and 120ms Play press dip. Reduced motion
-removes incidental animation and retains its opt-in single sweep. No tile fade,
-scan crossfade, shimmer, skeleton or loading pulse is introduced.
+120ms temporal scan crossfade, tick movement and 120ms Play press dip. Reduced
+motion removes blending and incidental animation, retaining its opt-in single
+sweep with hard cuts. No tile fade, shimmer, skeleton or loading pulse is introduced.
 
 A cold provider outage with a valid station keeps Radar available. The local map
 and graticule remain while measurement inventory is empty; no observed time or
@@ -738,14 +757,15 @@ survive. Each secondary scan is real, no later than the primary and no more than
 900s older. Tile failures preserve other successful tiles; the page combines
 aligned site tiles using one 256px scratch, never four viewport layers.
 
-The site picker names an actual contributor plus the number of other actual
-contributors (`KATX +2`), using the displayed frame's `siteScans`. A non-contributing
-primary is identified separately as `timeline KATX`.
+The site picker names the reporting primary plus the number of actual other
+contributors (`KATX +2`), using the displayed frame's drawn sites. A late primary
+keeps its identity and the caption adds `KATX loading`; an explicitly non-reporting
+primary can yield to an actual contributor.
 The visible segments are `Region` and the live callsign (`KATX`, `KATX +2`).
 The region segment has `aria-label="Region: many radars blended"`; the site
 segment expands to `KATX: Camano Island radar, 39 mi NE` or
 `KATX and 2 nearby: Camano Island radar, 39 mi NE`. Distance is omitted from
-both accessible and visible copy when that drawn primary is not `nexrad.id`.
+both accessible and visible copy when that primary is not `nexrad.id`.
 
 Caption copy (v4.3b) names the subject, arrival cadence, and provider:
 - MRMS: `Many radars blended · new image every 2 min · IEM / NOAA`.
@@ -764,7 +784,7 @@ No caption contains NEXRAD, MRMS, mosaic, volumes, or dBZ. Provider remains a
 visible `#rad-attrib` text-only anchor without href, including during switching.
 
 Exception wording and ordering after attribution remain as before (including
-`reflectivity only`, `latest only`, `scanning slowly`, `timeline KXXX`,
+`reflectivity only`, `latest only`, `scanning slowly`, `KXXX loading`,
 `scan unavailable`, `deferred`, `out of view`, `not reporting`,
 `palette incomplete`, `wider than KXXX reaches`). This follows Fable's exact
 RainViewer and dark-neighbour assertions; `· switching` is always last.
@@ -802,9 +822,15 @@ station accent is unchanged. Ramp colours are confined to echo data and its scal
 
 Playback draws pre-decoded ImageBitmaps onto one canvas. The visible canvas has
 no `src`; a tick neither fetches nor decodes. A monotonic requestAnimationFrame
-clock uses 110ms steps and an 1100ms newest hold. RainViewer short loops use
-`clamp(2400/frameCount,110,180)` ms (the design's explicit formula). A 120ms
-opacity dip marks rewind; no crossfade blends scans. A contiguous ready suffix
+clock uses **200ms** steps and an **1100ms** newest hold. RainViewer short loops
+use `clamp(2400/frameCount,110,180) * 200/110` ms, scaling the existing formula.
+Each transition (including loop wrap) blends two real cached scans linearly for
+120ms: previous weight `1-a`, next weight `a`. Two `drawImage` calls per composite
+paint use nearest-neighbour sampling. Premultiplied additive composition preserves
+translucent echo alpha; ordinary source-over would not give a linear mixture.
+The blend is **temporal**, never spatial smoothing or a fabricated scan. The loop
+read names the frame whose weight is ≥0.5 (next wins the tie). There is no rewind
+dip. Reduced motion hard-cuts and keeps the existing opt-in single sweep. A contiguous ready suffix
 ending at newest starts as soon as two frames are decoded and extends as older
 frames arrive. Play intent survives all acquisition/buffering fences; the second
 frame starts playback without another press.
@@ -831,7 +857,7 @@ or more it follows the drawn `HH:MM · newest` / `HH:MM · −N min`, prefixed b
 prefixed when paused. The read has neither status role nor aria-live; only the
 corner note describes pass progress and owns that live
 region and its 600ms suppression. Partial history
-reports its actual oldest time; no duplicate/padded scans. The browser retains seven history composites and live newest tiles.
+reports its actual oldest time; no duplicate/padded scans. The browser retains up to eight scan composites and live newest tiles.
 
 Play/Pause and station-local `HH:MM · −N min` / `HH:MM · newest` follow the drawn
 scan, with a hairline progress track. One supplied frame is static; clear data

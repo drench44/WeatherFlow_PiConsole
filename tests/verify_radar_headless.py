@@ -71,7 +71,7 @@ def payload():
         rings=[dict(meters=40233.6,label='25 mi'),dict(meters=80467.2,label='50 mi')])
     frames=[dict(ts=now-offset,at=datetime.fromtimestamp(now-offset,timezone.utc).strftime('%H:%M'),
                  stamp=datetime.fromtimestamp(now-offset,timezone.utc).strftime('%Y%m%d%H%M'),siteScans=[],levels={'7':True,'8':True,'9':True}) for offset in range(840,-1,-120)]
-    r['tiles']=dict(base='radar/t/',revision=ae._radar_render_revision(),remapRevision=ae.REMAP_REVISION,source=r['sourceId'],site='-',z=8,levels=[7,8,9],grid=dict(x0=38,y0=86,w=7,h=5),newest=dict(stamp=frames[-1]['stamp'],mask='7ffffffff'),frames=frames)
+    r['tiles']=dict(base='radar/t/',revision=ae._radar_render_revision(),remapRevision=ae.REMAP_REVISION,source=r['sourceId'],site='-',z=8,levels=[7,8,9],grid=dict(x0=38,y0=86,w=7,h=5),newest=dict(stamp=frames[-1]['stamp'],mask='7ffffffff',expectedMask='7ffffffff'),frames=frames)
     r.update(frameCount=8,completeFrameCount=8,historySpanSec=840);data['radar']=r;return data
 
 
@@ -123,12 +123,15 @@ def smoke(browser,server,theme,output):
     page=context.new_page();errors=[];page.on('pageerror',lambda e:errors.append(str(e)))
     page.goto(server.url+'/?tabs=1&theme='+theme);page.locator('.tab[data-screen="s-radar"]').click()
     try:
-        page.wait_for_function('radarView.good && radarReady().length===8',timeout=20000)
+        page.wait_for_function('radarView.good && radarReady().length===8 && radarTileBusy===0 && radarTileQueue.length===0 && radarGeoBusy===0 && radarGeoQueue.length===0',timeout=20000)
     except Exception:
         print('SMOKE DEBUG',theme,errors,page.evaluate('({n:radarReady().length,tiles:radarTiles.size,busy:radarTileBusy,queue:radarTileQueue.length,absent:[...radarTileAbsent],geo:radarGeoTiles.size,job:radarCompositeJob&&{done:radarCompositeJob.done.size,need:radarCompositeJob.tiles.length},f:radarView.good})'))
         raise
     page.evaluate('radarView.paused=true;radarView.current=radarView.good;radarEchoDirty=true;radarLoopSync()')
-    page.wait_for_timeout(100)
+    # Finish the acquisition warm pass after history assembly released its tiles.
+    page.evaluate('radarGeoRequest(true);radarQueueTiles()')
+    page.wait_for_function('radarTileBusy===0 && radarTileQueue.length===0 && radarGeoBusy===0 && radarGeoQueue.length===0')
+    page.wait_for_timeout(150)
     page.evaluate('audit.fetches=[];audit.frames=[]')
     start=len(server.requests)
     motion=page.evaluate('''async()=>{
@@ -202,6 +205,9 @@ def smoke(browser,server,theme,output):
       await parent(f);radarEchoPaint(f);const same=Array.from(ctx.getImageData(px,py,1,1).data);
       radarTiles.forEach(t=>t.bitmap.close());radarTiles.clear();await parent(old);radarEchoPaint(f);const other=Array.from(ctx.getImageData(px,py,1,1).data);
       radarTiles.forEach(t=>t.bitmap.close());radarTiles.clear();let key=radarTileKey(f,8,tile.x,tile.y);radarTileRemember(key,{key,z:8,x:tile.x,y:tile.y,bitmap:await createImageBitmap(c),meta,hasEcho:true});
+      const visible=radarTileSet(radarCamera,8),xs=visible.map(t=>t.x),ys=visible.map(t=>t.y),grid={x0:Math.min(...xs),y0:Math.min(...ys),w:Math.max(...xs)-Math.min(...xs)+1,h:Math.max(...ys)-Math.min(...ys)+1};
+      radarView.data.tiles={...radarView.data.tiles,z:8,grid,newest:{stamp:f.stamp,expectedMask:((1n<<BigInt(grid.w*grid.h))-1n).toString(16)}};
+      for(const t of visible.slice(1,-1)){const k=radarTileKey(f,8,t.x,t.y);radarTileRemember(k,{key:k,z:8,x:t.x,y:t.y,bitmap:await createImageBitmap(c),meta,hasEcho:true});}
       radarMissingSince.clear();radarEchoPaint(f);await new Promise(r=>setTimeout(r,300));radarEchoPaint(f);let hatch300=radarMetrics.hatchRects;
       await new Promise(r=>setTimeout(r,300));radarEchoPaint(f);radarState();radarView.active=true;radarLoopSync();radarView.active=false;let hatch600=radarMetrics.hatchRects,aria=document.getElementById('rad-plate').getAttribute('aria-label'),asof=document.getElementById('rad-asof').textContent;
       return {same,other,hatch300,hatch600,aria,asof,read:document.getElementById('rad-frame-time').textContent,color:radarBaseStyle['--rule-faint']};
@@ -310,7 +316,7 @@ def extended(page,server,theme,output):
     page.evaluate('radarView.paused=false;radarLoopSync()')
     while time.monotonic()-started<(2 if QUICK else 60):page.wait_for_timeout(min(1000,max(1,(60-(time.monotonic()-started))*1000)))
     memory=page.evaluate('''()=>{clearInterval(memoryTimer);return {samples:memorySamples.length,independent:Math.max(...memorySamples.map(s=>s.independent)),geo:Math.max(...memorySamples.map(s=>s.geo)),bytes:Math.max(...memorySamples.map(s=>s.bytes)),tiles:Math.max(...memorySamples.map(s=>s.tiles)),history:Math.max(...memorySamples.map(s=>s.history)),loopFrames:loopSeen.size};}''')
-    assert (QUICK or memory['samples']>=1000) and memory['bytes']<=40*1024*1024 and memory['tiles']<=40 and memory['history']<=7 and memory['geo']<=36 and memory['independent']<=40*1024*1024 and (QUICK or memory['loopFrames']>=8),memory
+    assert (QUICK or memory['samples']>=1000) and memory['bytes']<=40*1024*1024 and memory['tiles']<=40 and memory['history']<=8 and memory['geo']<=36 and memory['independent']<=40*1024*1024 and (QUICK or memory['loopFrames']>=8),memory
     print('R6/R11/R16',theme,dict(memory=memory,reposition=reposition,fallback=fallback),flush=True)
     (output/f'memory-{theme}.json').write_text(json.dumps(memory,indent=2))
     (server.root/'wx.json').write_text(json.dumps(initial));page.evaluate('d=>renderRadar(d)',initial)
@@ -374,7 +380,7 @@ def chrome(page,theme,data,output):
         (holds if a['stamp']==timing['newest'] else intervals).append(b['at']-a['at'])
     assert timing['fetches']==timing['decodes']==0,timing
     assert len(holds)>=2 and all(1030<=v<=1170 for v in holds),holds
-    assert intervals and 100<=sum(intervals)/len(intervals)<=125,intervals
+    assert intervals and 190<=sum(intervals)/len(intervals)<=210,intervals
     print('PLAYBACK',theme,dict(intervalMs=sum(intervals)/len(intervals),holds=holds,fetches=timing['fetches'],decodes=timing['decodes']),flush=True)
     page.emulate_media(reduced_motion='reduce')
     page.wait_for_timeout(100)
@@ -513,7 +519,7 @@ def chrome(page,theme,data,output):
     assert all(flag in tail for flag in ('IEM / NOAA','latest only','scanning slowly','KRTX not reporting','palette incomplete'))
     assert page.locator('#rad-src-cap').evaluate('e=>e.scrollWidth>e.clientWidth')
     page.evaluate("radarView.data.siteId='KATX';radarView.data.sites=[{id:'KLGX',contributing:true},{id:'KATX',reason:'not reporting'},{id:'KRTX',reason:'scan unavailable'},{id:'KOTX',reason:'deferred'},{id:'KMAX',reason:'out of view'}];radarView.data.sourceFallback='site-zoom-floor';radarSourceRender()")
-    assert caption()=='KLGX radar · every ~5 min · IEM / NOAA · latest only · scanning slowly · timeline KATX · KRTX scan unavailable · KOTX deferred · KMAX out of view · KATX not reporting · palette incomplete · wider than KATX reaches'
+    assert caption()=='KLGX radar · every ~5 min · IEM / NOAA · latest only · scanning slowly · KRTX scan unavailable · KOTX deferred · KMAX out of view · KATX not reporting · palette incomplete · wider than KATX reaches'
     page.evaluate('radarView.data.legend.floorDbz=10;radarLegendRender()')
     assert page.locator('.rad-clear-note').count()==0
     page.evaluate("document.getElementById('rad-src-cap').style.maxWidth='';radarSiteTable=savedSiteTable")
