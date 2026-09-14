@@ -138,6 +138,7 @@ def setup_prefetch(emitter, hybrid, monkeypatch):
     # A short completed history leaves idle budget; production history limits stay
     # untouched. This runs the real adapters, final idle hook and tile transport.
     monkeypatch.setattr(ae, 'RADAR_HISTORY_SEC', 120)
+    monkeypatch.setattr(ae, '_NEXRAD_SITES', {})  # isolate own-source tiers
     hybrid.view()
     contexts = []
     original = emitter._radar_prefetch
@@ -176,6 +177,7 @@ def test_prefetch_requires_fresh_view_idle_and_headroom(make_emitter, hybrid, mo
     assert {k[4] for k in emitter._radar_tiles} == {8}
     source = emitter._radar_result.source_id
     ctx = dict(viewed=True, zoom=8, center=emitter._radar_result.center,
+               sources=[dict(available=True), dict(available=False)],
                refresh=dict(state='idle'), deadline=100, preference_stamp=emitter._radar_preference_stamp())
     hybrid.view()
     if blocked == 'unviewed': (tmp_path/'radar_viewed').unlink()
@@ -194,6 +196,7 @@ def test_prefetch_exact_headroom_and_new_intent_cancels_round(make_emitter, hybr
     emitter = make_emitter(); emitter._do_radar(); hybrid.view()
     source = emitter._radar_result.source_id
     ctx = dict(viewed=True, zoom=8, center=emitter._radar_result.center,
+               sources=[dict(available=True), dict(available=False)],
         refresh=dict(state='idle'), deadline=100, preference_stamp=emitter._radar_preference_stamp())
     emitter._radar_request_times = [0.] * (ae.RADAR_REQUESTS_PER_MIN-ae.RADAR_HISTORY_RESERVE-60)
     snap, refresh = emitter._radar_result, dict(emitter._radar_refresh)
@@ -206,7 +209,7 @@ def test_prefetch_exact_headroom_and_new_intent_cancels_round(make_emitter, hybr
     assert all('/7/' in c[2] for c in hybrid.calls)
     assert emitter._radar_result is snap and emitter._radar_refresh == refresh
     assert any(k[4] == 7 for k in emitter._radar_tiles)
-    assert emitter._radar_prefetched[(source, 8, snap.center['lat'], snap.center['lon'])] == snap.ts_frame
+    assert emitter._radar_prefetched[(source, 7, snap.center['lat'], snap.center['lon'])] == ((None, snap.ts_frame),)
 
 
 def test_rainviewer_prefetch_once_per_stamp_and_source_bounds(make_emitter, hybrid, monkeypatch, tmp_path):
@@ -223,7 +226,7 @@ def test_rainviewer_prefetch_once_per_stamp_and_source_bounds(make_emitter, hybr
     assert len(hybrid.calls) == 1  # manifest only, including no repeated prefetch
     hybrid.rv += 600; hybrid.now += 600; hybrid.view()
     emitter._do_radar()
-    assert emitter._radar_prefetched[('rainviewer', limit, 47.61, -122.33)] == stamp+600
+    assert emitter._radar_prefetched[('rainviewer', limit-1, 47.61, -122.33)] == ((None, stamp+600),)
     assert any(k[3] == stamp+600 and k[4] == limit-1 for k in emitter._radar_tiles)
 
 
@@ -256,6 +259,7 @@ def test_newest_history_concurrency_bound(make_emitter, monkeypatch, workers):
 def test_adapters_select_six_newest_then_four_history(make_emitter, hybrid, monkeypatch):
     emitter = make_emitter()
     monkeypatch.setattr(ae, 'RADAR_HISTORY_SEC', 120)
+    monkeypatch.setattr(ae, '_NEXRAD_SITES', {})  # isolate own-source tiers
     hybrid.view()
     batches = []
     original = emitter._radar_tile_batch

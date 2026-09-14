@@ -831,7 +831,7 @@ class AlmanacEmitter:
         self._radar_newest = {}  # (source, site) -> (validated monotonic, knowledge)
         self._radar_archive_positive = set()  # immutable successful archive URLs
         self._radar_tiles = OrderedDict()
-        self._radar_prefetched = {}  # (source, zoom, centre) -> attempted newest stamp
+        self._radar_prefetched = {}  # (source, zoom, centre) -> attempted scan set
         self._radar_view_geometry = None
         self._radar_geometry_since = 0.
         self._radar_lock = _RLock()
@@ -1466,8 +1466,8 @@ class AlmanacEmitter:
             raise
         self._radar_archive_positive.add(url)
 
-    def _radar_iem_frames(self, ctx):
-        """Acquire a fresh complete primary first, probing even UTC slots backward."""
+    def _radar_iem_scan(self, ctx):
+        """Discover newest; foreground and idle warming share validation lifetime."""
         source = 'iem-mrms-lcref'
         deadline = min(ctx['deadline'], time.monotonic() + RADAR_PRIMARY_DEADLINE_SEC)
         known = self._radar_known(source, ctx)
@@ -1476,7 +1476,8 @@ class AlmanacEmitter:
             known = None
         if known is None:
             self._radar_forget(source)
-            meta = json.loads(self._radar_request(source, RADAR_IEM_METADATA_URL, deadline, metadata=True))['meta']
+            meta = json.loads(self._radar_request(source, RADAR_IEM_METADATA_URL, deadline, metadata=True,
+                **(dict(reserve=ctx['request_reserve']) if ctx.get('request_reserve') else {})))['meta']
             valid = datetime.fromisoformat(meta['end_valid'].replace('Z', '+00:00'))
             ts = int(valid.timestamp())
             if (valid.utcoffset() != timedelta(0) or meta.get('product') != 'lcref' or
@@ -1486,6 +1487,13 @@ class AlmanacEmitter:
             newest = min(ts, int(now - RADAR_IEM_READY_LAG_SEC) // 120 * 120)
         else:
             newest = known['newest']
+        return newest, known, deadline
+
+    def _radar_iem_frames(self, ctx):
+        """Acquire a fresh complete primary first, probing even UTC slots backward."""
+        source = 'iem-mrms-lcref'
+        newest, known, deadline = self._radar_iem_scan(ctx)
+        now = time.time()
         self._radar_publish_refresh(ctx, frameTotal=RADAR_HISTORY_SEC // 120 + 1 if ctx['viewed'] else 1)
         def build(stamp, limit):
             utc = datetime.fromtimestamp(stamp, timezone.utc)
@@ -1512,8 +1520,8 @@ class AlmanacEmitter:
                 return self._radar_history(source, candidate, newest, ctx, build, latest)
         raise ValueError('no fresh complete IEM frame: ' + ctx.get('last_error', 'unavailable'))
 
-    def _radar_site_frames(self, ctx):
-        """List each intersecting N0B site once; nearest reporting site owns time."""
+    def _radar_site_discover(self, ctx):
+        """Concurrent per-site listings, reused by intent and idle tile warming."""
         from urllib.parse import urlencode
         source = 'iem-nexrad-n0b'
         now = time.time()
@@ -1526,7 +1534,7 @@ class AlmanacEmitter:
         ctx.update(sites=sites, sites_considered=considered, site_scans={})
         fmt = lambda t: datetime.fromtimestamp(t, timezone.utc).strftime('%Y-%m-%dT%H:%MZ')
         deadline = min(ctx['deadline'], time.monotonic() + RADAR_PRIMARY_DEADLINE_SEC)
-        # Query nearest first so the primary is known even if later metadata fails.
+        # Timeline ownership is independent of viewport selection and arrival order.
         timeline = sorted((dict(id=i, lat=a, lon=b, distanceMeters=distance_meters(*ctx['station'],a,b))
                            for i,(a,b,_) in _NEXRAD_SITES.items()
                            if distance_meters(*ctx['station'],a,b) <= RADAR_SITE_RANGE_METERS),
@@ -1534,7 +1542,7 @@ class AlmanacEmitter:
         listings = {s['id']:s for s in sites}
         for site in timeline:
             listings.setdefault(site['id'], dict(site, reporting=False, newestTs=None, reason='not reporting'))
-        for site in sorted(listings.values(), key=lambda s:(s['distanceMeters'],s['id'])):
+        def discover(site):
             self._radar_checkpoint(ctx)
             url = RADAR_SITE_LIST_URL + '?' + urlencode(dict(operation='list', radar=site['id'][1:],
                 product='N0B', start=fmt(now - RADAR_HISTORY_SEC - RADAR_SITE_MAX_AGE_SEC), end=fmt(now)))
@@ -1543,10 +1551,10 @@ class AlmanacEmitter:
                 known = self._radar_known(source, ctx, site['id'])
                 if known is not None:
                     stamps = [t for t in known['stamps'] if 0 <= now-t <= RADAR_HISTORY_SEC + RADAR_SITE_MAX_AGE_SEC]
-                    ctx['reuse_newest'] = True
                 else:
                     self._radar_forget(source, site['id'])
-                    listing = json.loads(self._radar_request(source, url, deadline, metadata=True))
+                    listing = json.loads(self._radar_request(source, url, deadline, metadata=True,
+                        **(dict(reserve=ctx['request_reserve']) if ctx.get('request_reserve') else {})))
                     for scan in listing['scans']:
                         valid = datetime.fromisoformat(scan['ts'].replace('Z', '+00:00'))
                         if valid.utcoffset() != timedelta(0):
@@ -1566,7 +1574,15 @@ class AlmanacEmitter:
             newest = stamps[-1] if stamps else None
             site.update(reporting=newest is not None and now-newest < RADAR_SITE_MAX_AGE_SEC,
                         newestTs=newest, ageSec=int(now-newest) if newest is not None else None)
-            ctx['site_scans'][site['id']] = tuple(stamps)
+            return site['id'], tuple(stamps), known is not None
+        with ThreadPoolExecutor(max_workers=RADAR_TILE_WORKERS, thread_name_prefix='radar-list') as pool:
+            futures = [pool.submit(discover, site) for site in
+                       sorted(listings.values(), key=lambda s:(s['distanceMeters'],s['id']))]
+            for future in futures:
+                site, stamps, reused = future.result()
+                ctx['site_scans'][site] = stamps
+                ctx['reuse_newest'] = ctx.get('reuse_newest', False) or reused
+        self._radar_checkpoint(ctx)
         reporting = sorted((s for s in listings.values() if s['reporting'] and s['id'] in {t['id'] for t in timeline}), key=lambda s: (s['distanceMeters'], s['id']))
         if not reporting:
             ctx.setdefault('site_failure', 'scan unavailable' if any(s['reason']=='scan unavailable' for s in sites) else 'not reporting')
@@ -1576,7 +1592,12 @@ class AlmanacEmitter:
             site.update(primary=site['id']==ctx['site_id'], contributing=site['reporting'],
                         reason=None if site['reporting'] else site['reason'])
         ctx['sources'][1] = dict(mode='site', siteId=ctx['site_id'], available=True, reason=None)
-        stamps = ctx['site_scans'][ctx['site_id']]
+        return ctx['site_scans'][ctx['site_id']], deadline
+
+    def _radar_site_frames(self, ctx):
+        source = 'iem-nexrad-n0b'
+        now = time.time()
+        stamps, deadline = self._radar_site_discover(ctx)
         def build(ts, limit):
             layers = []
             for site, scan in _radar_site_pairs(ctx, ts):
@@ -1738,16 +1759,20 @@ class AlmanacEmitter:
                         if self._radar_headroom_delay(source, needed):
                             deferred = True
                             break
-                        if deep:
-                            # The least urgent frames must not evict the newest
-                            # native tiles just warmed for the next press. Touch
-                            # these entries before each bounded frame build.
-                            stamps = (set((p['id'], p['ts']) for p in latest.get('siteScans', ()))
-                                      if source == 'iem-nexrad-n0b' else {(None, newest)})
-                            with self._radar_lock:
-                                for key in list(self._radar_tiles):
-                                    if key[0] == source and (key[1], key[3]) in stamps:
-                                        self._radar_tiles.move_to_end(key)
+                        # Loop and deep history must not evict the newest
+                        # native tiles just warmed for the next press. Touch
+                        # these entries before each bounded frame build.
+                        stamps = (set((p['id'], p['ts']) for p in latest.get('siteScans', ()))
+                                  if source == 'iem-nexrad-n0b' else {(None, newest)})
+                        protected = {(source, site, stamp) for site, stamp in stamps}
+                        protected.update((key[0], site, stamp)
+                            for key, signature in self._radar_prefetched.items()
+                            if key[2:] == (ctx['center']['lat'], ctx['center']['lon'])
+                            for site, stamp in signature)
+                        with self._radar_lock:
+                            for key in list(self._radar_tiles):
+                                if (key[0], key[1], key[3]) in protected:
+                                    self._radar_tiles.move_to_end(key)
                         self._radar_publish_refresh(ctx, state='history', frameTotal=len(slots))
                         try:
                             frame = build(t, ctx['deadline'])
@@ -1773,59 +1798,100 @@ class AlmanacEmitter:
         return self._radar_result
 
     def _radar_prefetch(self, source, ctx):
-        """Idle-only native tiles: no crops, history entries or publications."""
-        snap = self._radar_result
-        newest = snap.ts_frame
-        key = (source, ctx['zoom'], ctx['center']['lat'], ctx['center']['lon'])
+        """Idle source/zoom rounds after loop-eight; newest native tiles only."""
         if (not ctx['viewed'] or not self._radar_is_viewed() or
-                ctx.get('refresh', {}).get('state') != 'idle' or
-                self._radar_prefetched.get(key, -1) >= newest or
-                self._radar_headroom_delay(source, RADAR_PREFETCH_HEADROOM + RADAR_HISTORY_RESERVE)):
+                ctx.get('refresh', {}).get('state') != 'idle'):
             return
         known_ctx = dict(ctx, intent_triggered=True)
+        newest = self._radar_result.ts_frame
         if source != 'iem-nexrad-n0b':
             known = self._radar_known(source, known_ctx)
             if known is None or known['newest'] != newest:
                 return
-        self._radar_checkpoint(ctx)
-        self._radar_prefetched = {k: t for k, t in self._radar_prefetched.items()
-                                  if k[0] != source or t >= newest}
-        self._radar_prefetched[key] = newest  # interrupted rounds also cost once per geometry
-        warm = dict(ctx, prefetch=True, request_reserve=RADAR_HISTORY_RESERVE, tile_workers=RADAR_TILE_WORKERS)
+        floor = RADAR_SITE_MIN_ZOOM if source == 'iem-nexrad-n0b' else RADAR_MIN_ZOOM
+        targets = [(source, z) for z in (ctx['zoom']-1, ctx['zoom']+1)
+                   if floor <= z <= _RADAR_SOURCES[source]['max_zoom']]
+        if source == 'iem-nexrad-n0b':
+            targets.insert(0, ('iem-mrms-lcref', ctx['zoom']))
+            targets.extend(('iem-mrms-lcref', z) for z in (ctx['zoom']-1, ctx['zoom']+1)
+                           if RADAR_MIN_ZOOM <= z <= _RADAR_SOURCES['iem-mrms-lcref']['max_zoom'])
+        elif source == 'iem-mrms-lcref' and ctx['sources'][1]['available'] and ctx['zoom'] >= RADAR_SITE_MIN_ZOOM:
+            # Same-centre mode tap first; also cover a mode+zoom press (z8 -> site z7).
+            targets.extend(('iem-nexrad-n0b', z) for z in
+                           (ctx['zoom'], ctx['zoom']-1, ctx['zoom']+1)
+                           if RADAR_SITE_MIN_ZOOM <= z <= 10)
         retry = self._radar_session.on_retry
-        self._radar_session.on_retry = lambda end: self._radar_transport_retry(source, end, RADAR_HISTORY_RESERVE)
+        admitted_source = None
         try:
-            floor = RADAR_SITE_MIN_ZOOM if source == 'iem-nexrad-n0b' else RADAR_MIN_ZOOM
-            for zoom in (ctx['zoom'] - 1, ctx['zoom'] + 1):
+            for target, zoom in targets:
+                warm = dict(ctx, intent_triggered=True, prefetch=True, sources=list(ctx['sources']),
+                            request_reserve=RADAR_HISTORY_RESERVE, tile_workers=RADAR_TILE_WORKERS)
                 self._radar_checkpoint(warm)
-                if not floor <= zoom <= _RADAR_SOURCES[source]['max_zoom']:
-                    continue
+                if target != admitted_source:
+                    # As with the original Z±1 tier, admit a source round once
+                    # with 60 spare slots; every request still preserves 34.
+                    if self._radar_headroom_delay(target, RADAR_PREFETCH_HEADROOM + RADAR_HISTORY_RESERVE):
+                        self._radar_budget_retry(target, RADAR_PREFETCH_HEADROOM + RADAR_HISTORY_RESERVE)
+                        break
+                    admitted_source = target
                 tiles, _, bounds, _ = _radar_viewport(ctx['center']['lat'], ctx['center']['lon'],
                     zoom, RADAR_VIEWPORT_W, RADAR_VIEWPORT_H)
                 warm.update(zoom=zoom, tiles=tiles, bounds=bounds)
-                if source == 'iem-nexrad-n0b':
-                    sites, _ = _radar_sites(ctx['station'], bounds)
-                    warm['sites'] = [dict(s, reporting=bool(ctx['site_scans'].get(s['id']))) for s in sites]
-                    pairs = tuple((site, stamp) for site, stamp in _radar_site_pairs(warm, newest)
-                                  if self._radar_known(source, known_ctx, site) is not None)
-                else:
-                    pairs = ((None, newest),)
-                for site, stamp in pairs:
-                    utc = datetime.fromtimestamp(stamp, timezone.utc).strftime('%Y%m%d%H%M')
-                    if source == 'iem-mrms-lcref':
-                        url = lambda x, y: RADAR_IEM_TILE_TEMPLATE.format(stamp=utc, z=zoom, x=x, y=y)
-                    elif source == 'iem-nexrad-n0b':
-                        url = lambda x, y: RADAR_SITE_TILE_TEMPLATE.format(site=site[1:], stamp=utc, z=zoom, x=x, y=y)
+                self._radar_session.on_retry = lambda end: self._radar_transport_retry(
+                    target, end, RADAR_HISTORY_RESERVE)
+                try:
+                    if target == 'iem-nexrad-n0b':
+                        stamps, _ = self._radar_site_discover(warm)
+                        pairs = _radar_site_pairs(warm, stamps[-1])
+                        # Empty listings participate in the round identity too.
+                        signature = tuple(sorted(set(pairs) |
+                            {(site, scans[-1] if scans else None)
+                             for site, scans in warm['site_scans'].items()}, key=repr))
+                    elif target == 'iem-mrms-lcref':
+                        stamp, known, deadline = self._radar_iem_scan(warm)
+                        if known is None:
+                            utc = datetime.fromtimestamp(stamp, timezone.utc)
+                            self._radar_archive_probe(target, utc.strftime(RADAR_IEM_ARCHIVE_TEMPLATE),
+                                                      deadline, RADAR_HISTORY_RESERVE)
+                            self._radar_newest[(target, None)] = (time.monotonic(), dict(newest=stamp))
+                        pairs = ((None, stamp),)
+                        signature = pairs
                     else:
-                        url = lambda x, y: (f'{ctx["rainviewer_prefix"]}/256/{zoom}/{x}/{y}/'
-                            f'{RADAR_RAINVIEWER_COLOR}/{RADAR_RAINVIEWER_TILE_OPTS}.png')
-                    for _ in self._radar_tile_batch(source, stamp, warm, ctx['deadline'], url, site):
-                        pass
+                        pairs = ((None, newest),)
+                        signature = pairs
+                    key = (target, zoom, ctx['center']['lat'], ctx['center']['lon'])
+                    if self._radar_prefetched.get(key) == signature:
+                        continue
+                    # Bounded memory, one attempt per geometry and scan set. Successful
+                    # in-flight tiles survive cancellation in the ordinary tile LRU.
+                    if len(self._radar_prefetched) >= RADAR_TILE_CACHE_SIZE:
+                        self._radar_prefetched.pop(next(iter(self._radar_prefetched)))
+                    self._radar_prefetched[key] = signature
+                    for site, stamp in pairs:
+                        utc = datetime.fromtimestamp(stamp, timezone.utc).strftime('%Y%m%d%H%M')
+                        if target == 'iem-mrms-lcref':
+                            url = lambda x, y: RADAR_IEM_TILE_TEMPLATE.format(stamp=utc, z=zoom, x=x, y=y)
+                        elif target == 'iem-nexrad-n0b':
+                            url = lambda x, y: RADAR_SITE_TILE_TEMPLATE.format(site=site[1:], stamp=utc, z=zoom, x=x, y=y)
+                        else:
+                            url = lambda x, y: (f'{ctx["rainviewer_prefix"]}/256/{zoom}/{x}/{y}/'
+                                f'{RADAR_RAINVIEWER_COLOR}/{RADAR_RAINVIEWER_TILE_OPTS}.png')
+                        try:
+                            for _ in self._radar_tile_batch(target, stamp, warm, ctx['deadline'], url, site):
+                                pass
+                        except (_RadarBudget, _RadarSuperseded):
+                            raise
+                        except Exception:
+                            self._radar_forget(target, site)
+                            raise
+                except (_RadarBudget, _RadarSuperseded):
+                    raise
+                except Exception:
+                    # Optional warming cannot invalidate the foreground crop.
+                    continue
         except _RadarSuperseded:
             raise
-        except Exception:
-            # Optional warming must never invalidate the published pass or cause
-            # source fallback, negative frame caching, or additional retries.
+        except _RadarBudget:
             pass
         finally:
             self._radar_session.on_retry = retry

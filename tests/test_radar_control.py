@@ -166,6 +166,8 @@ def test_purged_site_relists_in_pass(make_emitter, hybrid, multisite, tmp_path):
 
 
 def test_prefetch_uses_validated_stamp_and_stops_at_expiry(make_emitter, hybrid, monkeypatch):
+    # This test isolates mosaic tiers; cross-mode budgets have dedicated coverage.
+    monkeypatch.setattr(ae, '_NEXRAD_SITES', {})
     emitter = make_emitter(); hybrid.view()
     monkeypatch.setattr(ae, 'RADAR_HISTORY_SEC', 0)
     original = emitter._radar_prefetch
@@ -187,6 +189,8 @@ def test_prefetch_uses_validated_stamp_and_stops_at_expiry(make_emitter, hybrid,
 
 
 def test_remembered_viewed_history_has_no_control_requests(make_emitter, hybrid, tmp_path, monkeypatch):
+    # This test isolates mosaic tiers; cross-mode budgets have dedicated coverage.
+    monkeypatch.setattr(ae, '_NEXRAD_SITES', {})
     emitter = make_emitter(); emitter._do_radar()
     hybrid.view(); monkeypatch.setattr(ae, 'RADAR_HISTORY_SEC', 240)
     (tmp_path/'radar_zoom').write_text('7'); hybrid.calls.clear()

@@ -67,7 +67,9 @@ def test_source_clamp_restore_sticky_and_reset(make_emitter, hybrid, tmp_path):
 
 
 @pytest.mark.parametrize('viewed', [False, True])
-def test_zoom_cache_identity_rebuild_and_retirement(make_emitter, hybrid, tmp_path, viewed):
+def test_zoom_cache_identity_rebuild_and_retirement(make_emitter, hybrid, tmp_path, viewed, monkeypatch):
+    # Isolate mosaic history/cache accounting from cross-mode discovery.
+    monkeypatch.setattr(ae, '_NEXRAD_SITES', {})
     if viewed: hybrid.view()
     emitter = make_emitter(); emitter._do_radar()
     old = emitter._radar_result

@@ -37,7 +37,9 @@ def mature_during_newest(hybrid, tmp_path):
     hybrid.failure = tick
 
 
-def test_request_order_loop_neighbours_deep_and_resume(make_emitter, hybrid, tmp_path):
+def test_request_order_loop_neighbours_deep_and_resume(make_emitter, hybrid, tmp_path, monkeypatch):
+    # This test isolates mosaic tiers; cross-mode budgets have dedicated coverage.
+    monkeypatch.setattr(ae, '_NEXRAD_SITES', {})
     emitter = make_emitter()
     mature_during_newest(hybrid, tmp_path)
     retries = []
@@ -82,6 +84,8 @@ def test_scheduled_new_stamp_repeats_tiers_before_deep(make_emitter, hybrid, tmp
 
 
 def test_press_during_deep_is_native_tile_cached(make_emitter, hybrid, tmp_path, monkeypatch):
+    # This test isolates mosaic tiers; cross-mode budgets have dedicated coverage.
+    monkeypatch.setattr(ae, '_NEXRAD_SITES', {})
     emitter = make_emitter(); mature_during_newest(hybrid, tmp_path)
     advance = hybrid.failure
     changed = []
@@ -150,7 +154,9 @@ def test_off_tab_during_deep_retains_published_loop(make_emitter, hybrid, tmp_pa
     assert not emitter._radar_negative
 
 
-def test_deep_transport_retries_preserve_atomic_floor(make_emitter, hybrid, tmp_path):
+def test_deep_transport_retries_preserve_atomic_floor(make_emitter, hybrid, tmp_path, monkeypatch):
+    # This test isolates mosaic tiers; cross-mode budgets have dedicated coverage.
+    monkeypatch.setattr(ae, '_NEXRAD_SITES', {})
     emitter = make_emitter(); mature_during_newest(hybrid, tmp_path)
     advance = hybrid.failure
     retried = []

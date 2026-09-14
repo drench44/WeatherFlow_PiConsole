@@ -276,7 +276,9 @@ def test_geometry_after_failed_pass_does_not_wait_for_retry_or_worker(make_emitt
     assert emitter._retries['radar'].timeout == 2
     emitter._radar_cooldowns['iem-mrms-lcref'] = 60
     if busy: emitter._inflight.add('radar')
-    else: monkeypatch.setattr(emitter, '_check_radar', emitter._do_radar)
+    else:
+        # Execute the worker deterministically before advancing the fake UI clock.
+        monkeypatch.setattr(emitter, '_spawn', lambda key, worker: worker())
     intent = dict(seq=2, zoom=6, source='mosaic', center='station')
     (tmp_path/'radar_intent').write_text(json.dumps(intent))
     hybrid.calls.clear()
@@ -286,7 +288,7 @@ def test_geometry_after_failed_pass_does_not_wait_for_retry_or_worker(make_emitt
     result = json.loads((tmp_path/'wx.json').read_text())['radar']
     elapsed = (time.perf_counter()-start)*1000
     print(f'geometry after failure: {elapsed:.1f} ms; busy={busy}')
-    assert elapsed < 100
+    assert clock.now == 0  # neither the two-second retry nor a worker wait was needed
     assert result['intent'] == intent and result['geometryOnly'] and result['zoom'] == 6
     assert not hybrid.calls
     emitter._inflight.clear(); emitter.stop()

@@ -84,7 +84,7 @@ def test_multisite_alignment_stacking_dark_and_identity(make_emitter, hybrid, mu
     assert [s['id'] for s in r['sites']] == ['KFAR', 'KMID', 'KNEA']
     assert not r['sites'][0]['contributing'] and r['sites'][0]['reason']=='not reporting'
     assert r['sites'][-1]['primary']
-    assert [c for c in multisite.calls if c[0]=='list'] == [('list', 'KNEA'), ('list', 'KMID'), ('list', 'KFAR')]
+    assert sorted(c for c in multisite.calls if c[0]=='list') == sorted([('list', 'KNEA'), ('list', 'KMID'), ('list', 'KFAR')])
     assert [f['ts'] for f in r['frames']] == multisite.scans['KNEA']
     assert [f['siteScans'] for f in r['frames']] == [
         [dict(id='KMID', ts=hybrid.latest-720), dict(id='KNEA', ts=hybrid.latest-600)],
@@ -129,7 +129,7 @@ def test_cap_limits_scan_requests_in_real_adapter(make_emitter, hybrid, multisit
     emitter = make_emitter(); emitter._do_radar()
     r = emitter._build_payload()['radar']
     assert r['sourceMode'] == 'site' and r['sitesConsidered'] == 9 and r['sitesDrawn'] == 4
-    assert [c[1] for c in multisite.calls if c[0] == 'list'] == [f'K{i:03}' for i in range(4)]
+    assert sorted(c[1] for c in multisite.calls if c[0] == 'list') == [f'K{i:03}' for i in range(4)]
     assert len(emitter._radar_request_times) <= ae.RADAR_REQUESTS_PER_MIN
     latest = next(f for f in r['frames'] if f['id'] == r['latest'])
     assert [s['id'] for s in latest['siteScans']] == [f'K{i:03}' for i in reversed(range(4))]

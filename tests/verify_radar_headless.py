@@ -1491,13 +1491,21 @@ def check_radar_fast(browser, html, theme):
     page.evaluate("testPayload=Object.assign({},testPayload,{radar:Object.assign({},testPayload.radar,{intent:Object.assign({},testPayload.radar.intent,{seq:radarIntent.targetSeq})})})")
     page.clock.run_for(400);page.wait_for_function('!polling');count=page.evaluate('pollTimes.length')
     assert page.evaluate('radarFastUntil')==0
-    page.clock.run_for(1999);assert page.evaluate('pollTimes.length')==count
+    # Align to the last poll, since run_for may finish between timer firings.
+    remaining=page.evaluate('pollTimes.at(-1)+2000-Date.now()')
+    assert 0 < remaining <= 2000
+    page.clock.run_for(remaining-1);assert page.evaluate('pollTimes.length')==count
     page.clock.run_for(1);page.wait_for_function('!polling');assert page.evaluate('pollTimes.length')==count+1
+    assert page.evaluate('pollTimes.at(-1)-pollTimes.at(-2)')==2000
     page.evaluate('()=>{clearTimeout(pollTimer);pollTimes=[];radarZoomChange(-1)}')
     page.clock.run_for(120);page.wait_for_function('!polling')
     page.clock.run_for(20000);page.wait_for_function('!polling');count=page.evaluate('pollTimes.length')
-    page.clock.run_for(1999);assert page.evaluate('pollTimes.length')==count
+    # Align to the last poll, since run_for may finish between timer firings.
+    remaining=page.evaluate('pollTimes.at(-1)+2000-Date.now()')
+    assert 0 < remaining <= 2000
+    page.clock.run_for(remaining-1);assert page.evaluate('pollTimes.length')==count
     page.clock.run_for(1);page.wait_for_function('!polling');assert page.evaluate('pollTimes.length')==count+1
+    assert page.evaluate('pollTimes.at(-1)-pollTimes.at(-2)')==2000
     assert not errors,errors
     print('RADAR FAST PASS:',theme,'; geometry-only map/overlay untransformed, old echo reprojection/stale opacity, second zoom, matching decode hard cut,',len(samples),'nonblank paints, 400ms/2s polling and 20s cap',flush=True)
     context.close()

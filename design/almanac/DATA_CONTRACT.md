@@ -220,7 +220,9 @@ zoom, centre, source changes and supersede restarts reuse this knowledge only
 while monotonic age is strictly below the source cadence: MRMS 120 s, site 300 s,
 RainViewer 600 s. Reuse does not reset that clock. Scheduled/retry passes, first
 passes and sources/sites whose acquisition failed validate again; expiry cannot
-be extended by repeated interaction. Newly encountered sites list independently.
+be extended by repeated interaction. Newly encountered sites list independently. Selected viewport and primary-timeline
+sites list concurrently in a four-worker pool; nearest reporting primary and
+per-frame scan alignment are independent of response arrival order.
 
 A pass reusing MRMS knowledge goes straight to tiles for newest and history,
 without metadata or archive requests. Full validation caches each positive HEAD
@@ -230,8 +232,10 @@ same PNG validation and complete-crop rules. Failure of remembered newest tiles
 (including a purged scan's 404 or failed site layer) discards knowledge and runs
 one full source validation in the same pass, sharing its original deadline,
 build limit, cooldown and request budget. Supersession is not a provider failure.
-Idle prefetch uses only still-valid remembered stamps/listings and never performs
-control requests. No background metadata worker is added; provider cadence,
+Idle prefetch reuses still-valid remembered stamps/listings. It may discover the
+other mode: cached per-site listings for N0B, or MRMS metadata plus archive
+readiness when no valid MRMS stamp exists. These requests share the background
+reserve and cancellation checkpoints. No separate background worker is added; provider cadence,
 readiness lag, observed timestamps, retained-failure handling and stale thresholds
 are unchanged.
 
@@ -270,16 +274,23 @@ scheduled cadence and budget-resume passes:
 1. Build the newest eight loop slots (`RADAR_LOOP_FRAMES=8`), newest first. Reuse
    complete cached crops immediately. Multi-site retains its existing eight-slot
    cap; single-site/MRMS can still expose the full hour (up to 31 slots).
-2. Publish `idle` and admit adjacent-zoom newest-tile prefetch **before** attempting
-   any deeper history. A fresh `radar_viewed` demand hint and at least 60 free
-   requests above the 34-request interaction reserve admit Z−1 then Z+1, within
-   source bounds. Warm only native tiles at the same centre, using validated
-   stamps/listings without extra metadata. Admission is once per source/newest
-   stamp **at each zoom/centre**; repeat passes at that geometry do not rewarm.
-   A changed geometry may warm its own next neighbours at the same stamp. Old
-   stamp admission records are discarded when the source advances. Interrupted
-   rounds also count once. Errors do not invalidate the published crop or cause
-   provider fallback, negative caching or a prefetch-specific retry.
+2. Publish `idle` and warm newest native tiles **before** deeper history.
+   A fresh `radar_viewed` demand hint and at least 60 free requests above the
+   34-request interaction reserve admit each source round (as for the original
+   two-neighbour tier); every request in that round still preserves 34. Mosaic warms its own Z−1
+   and Z+1 first. At Z≥7 with `sources[1].available`, it then discovers the sites
+   selected at the same centre and warms their aligned newest scan set at Z,
+   then Z−1/Z+1 within 7…10. Site mode warms mosaic newest at Z, then site
+   Z−1/Z+1 within 7…10, then mosaic neighbours (within its source bounds), covering
+   combined mode/zoom presses in both directions. No background history crops
+   or publications are created. All targets use exactly the foreground LRU keys.
+   Admission is once per target source/zoom/centre and site-scan set, including
+   the actual aligned contributors and empty/non-reporting sites. Records are
+   bounded to 400; interrupted rounds count once. Successful in-flight tiles
+   remain cached when any intent cancels at tile boundaries. Acquisition failures
+   discard affected discovery knowledge but do not change the published crop,
+   trigger fallback or negatively cache it. Insufficient admission headroom
+   schedules the next budget opportunity through the existing retry mechanism.
 3. Build slots 9…31 only after at least 20 seconds of continuous live viewing at
    this geometry/intent. A frame starts only when its estimated requests fit
    above **both** the interaction reserve and 60 spare requests. The atomic
@@ -303,8 +314,8 @@ retry cadence instead of polling the view gate in a tight loop.
 All tiers check intent at tile boundaries; active requests drain into the LRU.
 Deep history also rechecks continuous viewing there. Prefetch and loop requests
 preserve the interaction reserve; deep history preserves another 60 slots. Before
-each deep frame, newest native entries (including warmed neighbours) are touched
-in the existing LRU so least-urgent history cannot evict the next press's tiles.
+each loop or deep frame, newest native entries (including warmed neighbours and
+the other mode) are touched in the existing LRU so least-urgent history cannot evict the next press's tiles.
 The cache size and compressed-byte representation are unchanged.
 
 The existing 400-entry limit already fits three zooms × 15 tiles × two stamps

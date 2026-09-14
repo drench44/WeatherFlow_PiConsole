@@ -204,6 +204,8 @@ def test_cache_identity_source_viewport_and_total_outage(make_emitter, hybrid):
 
 
 def test_cold_warm_unviewed_counts_history_limit_and_atomic(make_emitter, hybrid, monkeypatch, tmp_path):
+    # Isolate mosaic history/cache accounting from cross-mode discovery.
+    monkeypatch.setattr(ae, '_NEXRAD_SITES', {})
     monkeypatch.setattr(ae, 'RADAR_REQUESTS_PER_MIN', 90)  # the counts below are budget-relative
     monkeypatch.setattr(ae, 'RADAR_HISTORY_RESERVE', 17)
     hybrid.view()
@@ -263,6 +265,8 @@ def test_unviewed_counts_and_open_warms_unchanged(make_emitter, hybrid, monkeypa
 
 
 def test_build_limit_and_real_gap_spacing(make_emitter, hybrid, monkeypatch):
+    # Isolate mosaic history/cache accounting from cross-mode discovery.
+    monkeypatch.setattr(ae, '_NEXRAD_SITES', {})
     monkeypatch.setattr(ae, 'RADAR_REQUESTS_PER_MIN', 1000)
     monkeypatch.setattr(ae, 'RADAR_MAX_FRAME_BUILDS_PER_PASS', 3)
     hybrid.view()

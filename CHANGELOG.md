@@ -7,6 +7,13 @@ to shared upstream code that the classic console benefits from too.
 ## 2026-09-14
 
 ### Radar
+- **Site mode joins the lazy local radar cache.** Site listings run concurrently
+  and retain each site's scan slots for 300 seconds on intent passes. Idle mosaic
+  viewing warms selected site newest tiles after its loop and adjacent zooms;
+  idle site viewing warms the mosaic and neighbouring zooms. Warm mode/zoom
+  presses reuse discovery and native tiles with zero newest network requests.
+  The eight-frame multi-site identity, 240/minute cap, 34-request reserve,
+  60-slot admission headroom and 20-second deep-history view gate are unchanged.
 - **Faint returns in site mode, from 5 dBZ.** Single and neighbouring NEXRAD
   sites gain one flat slate band at 5–10 dBZ, with alpha 180/255 multiplied by
   native coverage. The nine rain bands keep their exact pixels; MRMS and the
