@@ -601,7 +601,7 @@ manifest mask suppresses requests for known unavailable newest positions.
 
 The only status corner is `#rad-note`, a fixed 14px box at top418/right12 with
 `role=status`, `aria-live=polite`, `pointer-events:none`. For 600ms after a local
-report it stays suppressed. Priority is newest/history refresh, failure naming
+report it stays suppressed. Priority is refused-source copy (v4.3b), newest/history refresh, failure naming
 the visible scan, upper zoom-cap copy, then `KATX resumes at zoom 7`. Copy remains
 `Refreshing · newest frame`, `Refreshing · frame 4 of 8`, and
 `Couldn't refresh · showing 17:12`. Only a 120ms opacity transition is used,
@@ -613,9 +613,13 @@ or `aria-busy` write on the interactive plate.
 `#rad-src` and the requested segment carry `data-state="pending"`; the group
 carries `aria-busy="true"`. The requested segment has a static dotted underline,
 while `aria-pressed` continues to identify the displayed source. The caption
-immediately reads `NEXRAD · KATX · fetching` (using the available site ID) or
-`MRMS mosaic · fetching`. A matching payload starts tile acquisition; the real
-caption and confirmed state replace pending when a tile is available to draw.
+continues describing that displayed source. After the note's same 600ms grace
+(`radarIntent.postedAt`), it appends `· switching`, including when no new frame
+or poll arrives. A matching payload starts tile acquisition; the new caption
+and confirmed state replace pending when a tile is available to draw.
+An acknowledged preference that cannot be displayed clears pending and shows
+`Couldn't switch · showing <subject>` in the existing 14px note. A preference
+ack during newest/history acquisition alone does not claim a refused switch.
 A decoded tile can complete the transition without another fetch. Repeated
 payloads for the same transition retain its in-flight work; a newer choice
 invalidates the old transition. Refresh progress remains in the existing note.
@@ -633,7 +637,7 @@ opposite-mode work on the next 100ms watcher tick in the same radar flight lane.
 current-source metadata prevents warming its own neighbours, but does not prevent
 discovery of the opposite source. Warm intent passes reuse fresh listings; no
 listing request is needed until their existing cadence expires. Cold passes
-retain the fetching caption while discovery/acquisition runs. First-tile
+retain the displayed-source caption plus `· switching` after the grace while discovery/acquisition runs. First-tile
 publication orders timestamps within source/primary identity, so a site volume
 older than the displayed mosaic can still publish immediately.
 
@@ -693,14 +697,17 @@ and a 372px ramp. Band widths are proportional to `(hi−lo)` across that full
 width. Site has ten segments (5 dBZ spans 26.571px, 10 spans 53.143px), mosaic
 nine. Ticks are de-duplicated `[floorDbz,10,20,30,40,50,60,70]`, positioned at
 `(dBZ−floorDbz)/(75−floorDbz)*372`, each with a 1×3px hairline. The 10 tick
-also divides clear air from the rain scale; there is no extra rule or word row.
+also divides clear air from the rain scale; there is no extra rule.
 The legend rebuild key includes the floor even when source and legend id agree.
 Clear-air swatches use opaque `--rad-clear-air` composites (`#9F9FAA` paper,
 `#5D606E` explicit or system night), because translucent paint over the legend
 scrim would differ from the plate. Other segments keep their payload gradients.
 
-Site captions append `· from 5 dBZ` before a dark-site `· KATX not reporting`
-tail, inside the existing 544px maximum; mosaic captions gain nothing. The ramp
+When `legend.floorDbz===5`, `.rad-clear-note` adds one right-aligned line under
+the ticks: `Grey band: clear air, not rain`. It uses 11.5px Source Sans and the
+caption's existing `--ink-soft`, on the legend's existing `--plate-scrim`.
+It is absent at every other floor. Outer legend width stays 414px, unit 34px,
+ramp 372px; the extra line remains within the top y0–72 control zone. The ramp
 has `role="img"` and `aria-label="Reflectivity scale, 5 to 75 dBZ. Below 10 dBZ in grey: clear-air return, not precipitation."`
 in site mode, or `aria-label="Reflectivity scale, 10 to 75 dBZ."` for mosaic.
 
@@ -734,8 +741,39 @@ aligned site tiles using one 256px scratch, never four viewport layers.
 The site picker names an actual contributor plus the number of other actual
 contributors (`KATX +2`), using the displayed frame's `siteScans`. A non-contributing
 primary is identified separately as `timeline KATX`.
-The caption is `NEXRAD · KATX +2 · ~5 min volumes · IEM / NOAA`, appending
-`· KATX not reporting` when a selected site is dark. The plate's accessible name
+The visible segments are `Region` and the live callsign (`KATX`, `KATX +2`).
+The region segment has `aria-label="Region: many radars blended"`; the site
+segment expands to `KATX: Camano Island radar, 39 mi NE` or
+`KATX and 2 nearby: Camano Island radar, 39 mi NE`. Distance is omitted from
+both accessible and visible copy when that drawn primary is not `nexrad.id`.
+
+Caption copy (v4.3b) names the subject, arrival cadence, and provider:
+- MRMS: `Many radars blended · new image every 2 min · IEM / NOAA`.
+- RainViewer: `Worldwide blend · new image every 10 min · RainViewer · reflectivity only`.
+- Nearest single site: `Camano Island radar · 39 mi NE · new scan every ~5 min · IEM / NOAA`.
+- Neighbours: `Camano Island radar + 2 nearby · new scan every ~5 min · IEM / NOAA`.
+- Non-nearest primary: `KLGX radar · new scan every ~5 min · IEM / NOAA`.
+
+For the nearest primary, its site-table name wins over `nexrad.name`, then its
+callsign; a non-nearest primary uses its callsign, even if the table names it.
+Only `nexrad.distanceDisp` plus `bearing` supplies the station-relative distance.
+Visible distance yields to the neighbour count; the accessible name retains
+it when valid. Mosaic cadence stays derived from `cadenceSec/60`; the site's
+approximate volume cadence keeps its tilde. `#rad-status` alone states freshness.
+No caption contains NEXRAD, MRMS, mosaic, volumes, or dBZ. Provider remains a
+visible `#rad-attrib` text-only anchor without href, including during switching.
+
+Exception wording and ordering after attribution remain as before (including
+`reflectivity only`, `latest only`, `scanning slowly`, `timeline KXXX`,
+`scan unavailable`, `deferred`, `out of view`, `not reporting`,
+`palette incomplete`, `wider than KXXX reaches`). This follows Fable's exact
+RainViewer and dark-neighbour assertions; `· switching` is always last.
+Rendered overflow drops distance, then shortens `new scan every ~5 min` to
+`every ~5 min`, then drops `+ n nearby`. Provider and exception text is never
+removed. The caption uses `overflow:hidden; text-overflow:ellipsis; white-space:nowrap`
+for any remaining overflow. Its outer maximum is 530px (516px text plus the
+existing 14px padding), satisfying Fable's explicit bounding-box gate; this is
+stricter than the spec's 530px content / 544px outer prose budget. The plate's accessible name
 lists contributing IDs. With at least two contributors, `#rad-over` draws their
 geodesic 230 km arcs in `--rule-faint` (1px, dash 2 3), clipped to the plate.
 Site centres inside the viewport have 2px `--ink-soft` dots and 11.5px labels
@@ -819,7 +857,13 @@ byte-for-byte with remapping of their native provider responses.
 It measures 200px pans, focal pinch/snap, tile request/decode activity, cached
 first paint, ancestor identity, graticule/hatch pixels, real capture/cancellation,
 source transitions, failed-report recovery, overlay mutations, palette/legend
-purity, playback and 60-second memory sessions. Independent instrumentation
+purity, playback and 60-second memory sessions. Its `chrome` checks cover all
+27 Fable v4.3b copy/accessibility/geometry assertions in paper and night, plus
+font-measured overflow drop order, name fallbacks, shared-timer delivery,
+acquisition acknowledgement and stale-versus-new refresh failures.
+`tests/verify_radar_picker.py` preserves the real touch, click, keyboard, immediate
+intent, 20-second polling-bound and integrated warm emitter-to-canvas checks;
+first-frame captions describe the old source and acquire `switching` after 600ms. Independent instrumentation
 tracks canvas/bitmap allocation and draw calls. Headless wall times are reported,
 not treated as Pi acceptance. The cold-outage fixture has no measurement frames.
 Stills and timing logs default to `/tmp/wfp-radar-v41/`.

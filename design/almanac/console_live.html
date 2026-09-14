@@ -645,8 +645,8 @@
   .rad-seg[data-state="pending"] { color:var(--ink); text-decoration:underline dotted; text-underline-offset:5px; }
   .rad-src[hidden] { display:none; }
   /* One 13px line ends at y72; the longer site caption has the full left half. */
-  .rad-src-cap { position:absolute; left:12px; top:58px; z-index:4; max-width:544px;
-    padding:1px 7px; white-space:nowrap; background:var(--plate-scrim);
+  .rad-src-cap { position:absolute; left:12px; top:58px; z-index:4; max-width:530px;
+    padding:1px 7px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; background:var(--plate-scrim);
     font:11.5px/11px var(--sans); letter-spacing:.02em; color:var(--ink-soft); }
   .rad-src-cap a { color:inherit; text-decoration:none; }
   .rad-attrib { position:static; font:inherit; }
@@ -662,6 +662,8 @@
   .rad-ramp { flex:0 0 372px; }
   .rad-ramp i { flex-basis:0; }
   .rad-ticks { position:relative; width:372px; height:14px; margin:1px 0 0 34px; }
+  .rad-clear-note { margin:2px 0 0 34px; text-align:right; white-space:nowrap;
+    font:11.5px/13px var(--sans); letter-spacing:.02em; color:var(--ink-soft); }
   .rad-tick { position:absolute; top:4px; transform:translateX(-50%);
     font:11.5px/13px var(--sans); color:var(--ink-soft); font-variant-numeric:tabular-nums; }
   .rad-tick::before { content:""; position:absolute; left:50%; top:-4px;
@@ -1164,8 +1166,8 @@
         </div>
         <button class="rad-step rad-recenter" id="rad-recenter" type="button" aria-label="Recenter on station" hidden>↩</button>
         <div class="rad-src" id="rad-src" data-mode="mosaic" data-state="confirmed" role="group" aria-label="Radar source">
-          <button class="rad-seg" id="rad-src-mosaic" type="button" aria-pressed="true">Mosaic</button>
-          <button class="rad-seg" id="rad-src-site" type="button" aria-pressed="false" disabled>No site</button>
+          <button class="rad-seg" id="rad-src-mosaic" type="button" aria-pressed="true" aria-label="Region: many radars blended">Region</button>
+          <button class="rad-seg" id="rad-src-site" type="button" aria-pressed="false" aria-label="No site: radar unavailable" disabled>No site</button>
         </div>
         <figcaption class="rad-src-cap" id="rad-src-cap"></figcaption>
         <div class="rad-zoom" id="rad-zoom" data-mode="auto" hidden>
@@ -3035,14 +3037,17 @@
   window.matchMedia('(prefers-reduced-motion: reduce)').addEventListener('change',()=>{radarView.singleSweep=false;radarView.current=radarView.good;radarEchoDirty=true;if(radarGesture.inertia)radarSettle();radarLoopSync();});
   function radarPostIntent(immediate=false){clearTimeout(radarIntent.timer);radarIntent.postedAt=Date.now();radarIntent.timer=setTimeout(()=>{if(radarGesture.state==='idle'){radarIntent.generation=(radarIntent.generation||0)+1;radarIntent.ready=true;poll(immediate);}},immediate?0:120);}
   function radarZoomRender(){var r=radarView.data,rail=$('rad-zoom');rail.hidden=!r;if(!r||!radarCamera)return;var z=Math.round(radarCamera.zoom);rail.dataset.mode=radarZoom.auto?'auto':'manual';rail.dataset.state='confirmed';rail.setAttribute('aria-busy','false');$('rad-zoom-mode').textContent=radarZoom.auto?'Auto':String(z);$('rad-zoom-reset').hidden=radarZoom.auto;$('rad-zoom-out').disabled=z<=r.zoomMin;$('rad-zoom-in').disabled=z>=r.zoomMax;radarView.zoomNote=r.zoomCapped&&r.zoomDesired>r.zoomMax?'Set closer than '+r.zoomSource+' reaches — showing its closest.':z>=r.zoomMax?'Closest view for '+r.zoomSource:'';radarNoteRender();}
-  function radarNoteRender(){var r=radarView.data,f=radarView.refresh,note=$('rad-note'),copy='';clearTimeout(radarIntent.noteTimer);if(!r)return;var elapsed=Date.now()-radarIntent.postedAt;if(elapsed<600){note.dataset.shown='false';radarIntent.noteTimer=setTimeout(radarNoteRender,601-elapsed);return;}if(f.state==='newest')copy='Refreshing · newest frame';else if(f.state==='history')copy='Refreshing · frame '+f.frameIndex+' of '+f.frameTotal;else if(f.state==='failed')copy="Couldn't refresh · showing "+radarFrameLabel(radarView.current||{});if(!copy)copy=radarView.zoomNote||'';if(!copy&&r.sourceFallback==='site-zoom-floor'&&radarSource.desired!=='mosaic'){var site=(r.sources||[]).find(s=>s.mode==='site');if(site&&site.siteId)copy=site.siteId+' resumes at zoom '+r.siteResumeZoom;}note.textContent=copy;note.dataset.shown=String(!!copy);}
+  function radarNoteRender(){var r=radarView.data,f=radarView.refresh,note=$('rad-note'),copy='';clearTimeout(radarIntent.noteTimer);if(!r)return;var elapsed=Date.now()-radarIntent.postedAt;if(elapsed<600){note.dataset.shown='false';radarIntent.noteTimer=setTimeout(radarSourceRender,601-elapsed);return;}if(radarSource.refused)copy="Couldn't switch · showing "+radarSourceSubject(r).subject;else if(f.state==='newest')copy='Refreshing · newest frame';else if(f.state==='history')copy='Refreshing · frame '+f.frameIndex+' of '+f.frameTotal;else if(f.state==='failed')copy="Couldn't refresh · showing "+radarFrameLabel(radarView.current||{});if(!copy)copy=radarView.zoomNote||'';if(!copy&&r.sourceFallback==='site-zoom-floor'&&radarSource.desired!=='mosaic'){var site=(r.sources||[]).find(s=>s.mode==='site');if(site&&site.siteId)copy=site.siteId+' resumes at zoom '+r.siteResumeZoom;}note.textContent=copy;note.dataset.shown=String(!!copy);}
   function radarState(){var r=radarView.data;if(!r)return;var f=radarView.current,state=r.stale||r.refresh&&r.refresh.state==='failed'?'stale':radarView.clear?'clear':'current';$('rad-status').dataset.state=state;$('rad-plate').dataset.state=state;var status=$('rad-status');status.replaceChildren(document.createTextNode('As of '));var at=document.createElement('span');at.id='rad-asof';at.textContent=r.observedAt||'—';status.append(at);var age=r.ageSec||0;if(age>=.8*r.staleSec)status.append(document.createTextNode(' · '+Math.floor(age/60)+' min old'));}
   function radarActivate(){if(!radarView.data)return;radarMetrics.activationAt=performance.now();radarMetrics.firstPaintMs=null;if(!radarCamera){var r=radarView.data,saved=null;try{saved=JSON.parse(sessionStorage.getItem('radarCamera'));}catch(e){}radarCamera=saved&&isNum(saved.lat)&&isNum(saved.lon)&&isNum(saved.zoom)?{lat:clamp(saved.lat,-RAD_MAX_LAT,RAD_MAX_LAT),lon:clamp(saved.lon,-180,180),zoom:clamp(saved.zoom,r.zoomMin,r.zoomMax)}:{...r.center,zoom:clamp(r.zoomAuto?r.zoomAutoLevel:r.zoomDesired,r.zoomMin,r.zoomMax)};radarZoom.auto=saved&&typeof saved.auto==='boolean'?saved.auto:r.zoomAuto;radarZoom.requested=radarZoom.auto?null:(saved?.requested??r.zoomDesired??radarCamera.zoom);radarCamera=radarClampCamera(radarCamera);}
     if(!Object.keys(radarBaseStyle).length)radarResolveStyle();radarCameraDirty=true;radarOverlayBuild();radarGeoRequest();radarPreload(radarView.data);radarZoomRender();radarPostIntent();radarWake();
-    if(!radarSiteTable.length)fetch(radarView.data.geo.sites).then(r=>r.ok?r.json():[]).then(s=>{radarSiteTable=s.filter(p=>/^[A-Z0-9]{4}$/.test(p.id)&&isNum(p.lat)&&isNum(p.lon));if(radarGesture.state==='idle')radarOverlayBuild();}).catch(()=>{});
+    if(!radarSiteTable.length)fetch(radarView.data.geo.sites).then(r=>r.ok?r.json():[]).then(s=>{radarSiteTable=s.filter(p=>/^[A-Z0-9]{4}$/.test(p.id)&&isNum(p.lat)&&isNum(p.lon));if(radarGesture.state==='idle')radarOverlayBuild();radarSourceRender();}).catch(()=>{});
   }
   function renderRadar(d){var r=d.radar,tab=document.querySelector('.tab[data-screen="s-radar"]');tab.hidden=!(r&&r.available);document.querySelector('.page').dataset.radarAlerts=d.alerts&&d.alerts.length?'on':'off';if(tab.hidden){radarRelease();radarView.data=null;if($('s-radar').classList.contains('active'))activate('s-obs');return;}
     if(radarSource.desired&&(r.sourcePref||r.sourceMode)===radarSource.desired)radarSource.fastUntil=0;
+    var switchFailed=radarSource.desired&&r.refresh?.state==='failed'&&radarSource.lastRefresh!=='failed';
+    radarSource.lastRefresh=r.refresh?.state;
+    if(radarSource.refused===r.sourceMode)radarSource.refused=false;
     var old=radarView.data,changed=old&&(old.sourceId!==r.sourceId||old.siteId!==r.siteId||JSON.stringify(old.center)!==JSON.stringify(r.center));
     if(old&&!changed&&r.observedTs&&old.observedTs>r.observedTs){old.ageSec=Math.max(old.ageSec||0,d.ts-old.observedTs);old.stale=old.ageSec>=old.staleSec;radarState();return;}
     if(changed&&radarSource.desired&&(r.sourcePref||r.sourceMode)!==radarSource.desired){radarView.refresh=r.refresh||{state:'idle'};radarNoteRender();return;}
@@ -3054,7 +3059,12 @@
     if(changed&&!radarView.acceptingSource){radarRelease();if(JSON.stringify(old.center)!==JSON.stringify(r.center)){radarCamera=null;try{sessionStorage.removeItem('radarCamera');}catch(e){}}}
     if(old&&old.geo&&r.geo&&old.geo.version!==r.geo.version){radarGeoClear();radarBaseDirty=true;}
     radarView.data=r;if(radarCamera&&radarGesture.state==='idle'&&old&&(old.zoomMax!==r.zoomMax||old.sourceId!==r.sourceId)){var effective=clamp(radarZoom.auto?r.zoomAutoLevel:radarZoom.requested??radarCamera.zoom,r.zoomMin,r.zoomMax);if(effective!==radarCamera.zoom){radarCamera.zoom=effective;radarSettle();}}radarView.refresh=r.refresh||{state:'idle'};
-    if(radarSource.desired&&(r.sourcePref||r.sourceMode)===radarSource.desired)radarSource.desired=null;
+    if(radarSource.desired&&(r.sourcePref||r.sourceMode)===radarSource.desired){
+      var showing=r.sourceMode===radarSource.desired,busy=['newest','history'].includes(radarView.refresh.state);
+      if(showing||!busy){radarSource.refused=showing?false:radarSource.desired;radarSource.desired=null;}
+    }else if(switchFailed){
+      radarSource.refused=radarSource.desired;radarSource.desired=null;radarSource.fastUntil=0;
+    }
     radarLegendRender();radarSourceRender();radarState();
     if(radarView.active){if(!radarCamera)radarActivate();else{if(radarGesture.state==='idle'){radarGeoRequest();var overlayKey=JSON.stringify([r.center,r.rings,(r.sites||[]).map(s=>[s.id,s.lat,s.lon,s.contributing])]);if(overlayKey!==radarView.overlayKey){radarView.overlayKey=overlayKey;radarOverlayBuild();}}radarPreload(r);radarLoopSync();}}
     radarZoomRender();radarNoteRender();
@@ -3064,7 +3074,7 @@
     // Native click covers keyboard/assistive activation; pointerdown responds on
     // contact. Its subsequent compatibility click is idempotent.
     if(!radarSource.desired&&radarView.data.sourceMode===mode)return;
-    radarGestureCancel();radarSource.desired=mode;radarSource.fastUntil=Date.now()+20000;
+    radarGestureCancel();radarSource.refused=false;radarSource.lastRefresh=radarView.refresh.state;radarSource.desired=mode;radarSource.fastUntil=Date.now()+20000;
     if(radarView.pendingSource){radarView.pendingSource=null;radarView.transition=(radarView.transition||0)+1;}
     if(mode==='site'&&radarCamera.zoom<7){radarZoom.auto=false;radarZoom.requested=7;radarCameraSet({...radarCamera,zoom:7});radarSettle();}
     radarPostIntent(true);radarSourceRender();radarNoteRender();
@@ -3093,6 +3103,21 @@
     if(gesture&&painted){radarMetrics.drawMs.push(performance.now()-started);if(radarMetrics.drawMs.length>1800)radarMetrics.drawMs.shift();}
     radarWake();
   }
+  // Names and station-relative distance always belong to the drawn primary.
+  // A viewport-selected neighbour keeps its callsign; nearest-site metadata
+  // must never migrate with it. The inactive segment names the available site.
+  function radarSourceSubject(r,siteChoice=false){
+    var mode=r.sourceMode||'mosaic',site=(r.sources||[]).find(s=>s.mode==='site');
+    var frame=radarView.current,contributors=frame&&frame.drawnSites?frame.drawnSites:
+      frame&&frame.siteScans?frame.siteScans:(r.sites||[]).filter(s=>s.contributing);
+    var id=(mode==='site'?(contributors.some(s=>s.id===r.siteId)?r.siteId:contributors[0]?.id):
+      site&&site.reason!=='no site in range'&&site.siteId)||null;
+    var extra=mode==='site'?Math.max(0,contributors.length-1):0,nearest=id&&id===r.nexrad?.id;
+    var name=nearest?(radarSiteTable.find(s=>s.id===id)?.name||r.nexrad.name||id):id;
+    var distance=nearest&&r.nexrad.distanceDisp&&r.nexrad.bearing?r.nexrad.distanceDisp+' '+r.nexrad.bearing:'';
+    return {id,extra,contributors,distance,subject:mode==='site'||siteChoice?(name?name+' radar':'No site'):
+      (r.sourceId||'rainviewer')==='rainviewer'?'Worldwide blend':'Many radars blended'};
+  }
   function radarSourceRender() {
     var r=radarView.data; if (!r) return;
     var site=(r.sources || []).find(s => s.mode==='site');
@@ -3104,41 +3129,45 @@
     $('rad-src-mosaic').setAttribute('aria-pressed',String(mode==='mosaic'));
     button.setAttribute('aria-pressed',String(mode==='site'));
     button.dataset.preferred=String(radarSource.desired!==null ? radarSource.desired==='site' : r.sitePreferred===true);
-    var currentFrame=radarView.current;
-    var contributors=currentFrame && currentFrame.drawnSites ? currentFrame.drawnSites : currentFrame && currentFrame.siteScans ? currentFrame.siteScans : (r.sites || []).filter(s => s.contributing);
-    var extra=Math.max(0,contributors.length-1);
-    var name=(mode==='site' ? (contributors.some(s => s.id===r.siteId) ? r.siteId : contributors[0] && contributors[0].id) : site && site.reason!=='no site in range' && site.siteId) || 'No site';
-    if (mode==='site' && extra) name+=' +'+extra;
-    button.textContent=name; button.disabled=!(site && site.available);
-    var cap=$('rad-src-cap');
-    if(radarSource.desired){cap.textContent=radarSource.desired==='site'?'NEXRAD · '+(site&&site.siteId||'Local site')+' · fetching':'MRMS mosaic · fetching';return;}
-    cap.replaceChildren(document.createTextNode(mode==='site' ? 'NEXRAD · '+name+' · ~5 min volumes · ' :
-      (r.sourceId || 'rainviewer')==='rainviewer' ? 'Global mosaic · ' : 'MRMS mosaic · '));
-    var credit=document.createElement('a'); credit.id='rad-attrib'; credit.className='rad-attrib';
-    credit.textContent=(r.sourceId || 'rainviewer')==='rainviewer' ? 'RainViewer' : 'IEM / NOAA';
-    // Attribution is text, never a link: a kiosk has no way back from another site
-    // (a pan that ended on this credit once stranded the panel on the provider's page).
-    credit.removeAttribute('href');
-    cap.append(credit);
-    if (mode!=='site') cap.append(document.createTextNode(' · '+(r.cadenceSec || 600)/60+' min'));
-    if (r.sourceId==='rainviewer') cap.append(document.createTextNode(' · reflectivity only'));
-    if (r.latestOnly) cap.append(document.createTextNode(' · latest only'));
-    if (r.scanningSlowly) cap.append(document.createTextNode(' · scanning slowly'));
-    if (mode==='site' && r.siteId && !contributors.some(s => s.id===r.siteId))
-      cap.append(document.createTextNode(' · timeline '+r.siteId));
+    var info=radarSourceSubject(r),choice=radarSourceSubject(r,true),contributors=info.contributors;
+    button.textContent=(info.id||'No site')+(info.extra?' +'+info.extra:'');
+    button.disabled=!(site && site.available);
+    button.setAttribute('aria-label',(info.id||'No site')+(info.extra?' and '+info.extra+' nearby':'')+
+      ': '+choice.subject+(choice.distance?', '+choice.distance:''));
+    var cap=$('rad-src-cap'),rainviewer=(r.sourceId||'rainviewer')==='rainviewer';
+    var distance=mode==='site'&&!info.extra?info.distance:'',nearby=info.extra?' + '+info.extra+' nearby':'';
+    var cadence=mode==='site'?'new scan every ~5 min':'new image every '+(r.cadenceSec||600)/60+' min';
+    var exceptions=[];
+    if (rainviewer) exceptions.push('reflectivity only');
+    if (r.latestOnly) exceptions.push('latest only');
+    if (r.scanningSlowly) exceptions.push('scanning slowly');
+    if (mode==='site' && r.siteId && !contributors.some(s => s.id===r.siteId)) exceptions.push('timeline '+r.siteId);
     ['scan unavailable','deferred','out of view'].forEach(reason => {
       var affected=(r.sites || []).filter(s => s.reason===reason);
-      if (mode==='site' && affected.length) cap.append(document.createTextNode(' · '+affected.map(s => s.id).join(', ')+' '+reason));
-      else if (site && site.reason===reason) cap.append(document.createTextNode(' · '+site.siteId+' '+reason));
+      if (mode==='site' && affected.length) exceptions.push(affected.map(s => s.id).join(', ')+' '+reason);
+      else if (site && site.reason===reason) exceptions.push(site.siteId+' '+reason);
     });
-    if (mode==='site' && r.legend && r.legend.floorDbz===5) cap.append(document.createTextNode(' · from 5 dBZ'));
     var dark=(r.sites || []).filter(s => s.reason==='not reporting');
-    if (mode==='site' && dark.length) cap.append(document.createTextNode(' · '+dark.map(s => s.id).join(', ')+' not reporting'));
-    else if (site && site.reason==='not reporting') cap.append(document.createTextNode(' · '+site.siteId+' not reporting'));
-    var current=radarView.current, frame=current;
-    if ((frame && frame.legend ? frame.legend : r.legend || {}).remapped===false)
-      cap.append(document.createTextNode(' · palette incomplete'));
-    if (r.sourceFallback==='site-zoom-floor' && site && radarSource.desired!=='mosaic') cap.append(document.createTextNode(' · wider than '+site.siteId+' reaches'));
+    if (mode==='site' && dark.length) exceptions.push(dark.map(s => s.id).join(', ')+' not reporting');
+    else if (site && site.reason==='not reporting') exceptions.push(site.siteId+' not reporting');
+    var frame=radarView.current;
+    if ((frame && frame.legend ? frame.legend : r.legend || {}).remapped===false) exceptions.push('palette incomplete');
+    if (r.sourceFallback==='site-zoom-floor' && site && radarSource.desired!=='mosaic') exceptions.push('wider than '+site.siteId+' reaches');
+    var switching=radarSource.desired&&Date.now()-radarIntent.postedAt>=600;
+    function write(){
+      cap.replaceChildren(document.createTextNode(info.subject+nearby+(distance?' · '+distance:'')+' · '+cadence+' · '));
+      // Keep attribution visible and text-only: the kiosk has no way back.
+      var credit=document.createElement('a');credit.id='rad-attrib';credit.className='rad-attrib';
+      credit.textContent=rainviewer?'RainViewer':'IEM / NOAA';credit.removeAttribute('href');cap.append(credit);
+      if(exceptions.length)cap.append(document.createTextNode(' · '+exceptions.join(' · ')));
+      if(switching)cap.append(document.createTextNode(' · switching'));
+    }
+    write();
+    // Fit the rendered font, not a character estimate. Preserve every exception
+    // and the provider; the final CSS ellipsis bounds any future longer flags.
+    if(cap.scrollWidth>cap.clientWidth&&distance){distance='';write();}
+    if(cap.scrollWidth>cap.clientWidth&&mode==='site'){cadence='every ~5 min';write();}
+    if(cap.scrollWidth>cap.clientWidth&&nearby){nearby='';write();}
     radarNoteRender();
   }
   function radarLegendRender(){var r=radarView.data;
@@ -3154,6 +3183,8 @@
       ramp.setAttribute('aria-label','Reflectivity scale, '+floorDbz+' to 75 dBZ.'+
         (floorDbz===5 ? ' Below 10 dBZ in grey: clear-air return, not precipitation.' : ''));
       var ticks=document.createElement('div'); ticks.className='rad-ticks'; ticks.id='rad-ticks'; legend.append(ticks);
+      if(floorDbz===5){var clear=document.createElement('div');clear.className='rad-clear-note';
+        clear.textContent='Grey band: clear air, not rain';legend.append(clear);}
       (r.legend.bands || []).forEach(function(band) {
         var swatch=document.createElement('i'); swatch.style.flex=String(band.hi-band.lo)+' 1 0px';
         swatch.style.background=band.kind==='clear-air' ? 'var(--rad-clear-air)' : 'linear-gradient(90deg,'+band.start+','+band.end+')'; ramp.append(swatch);

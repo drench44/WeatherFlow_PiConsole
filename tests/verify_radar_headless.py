@@ -67,7 +67,7 @@ def payload():
         center=dict(lat=47.61,lon=-122.33),zoom=8,zoom_auto_level=8,max_zoom=9,source_id='iem-mrms-lcref',
         provider='iem',cadence=120,stale_sec=600,legend=ae._RADAR_RAMP,ts_frame=now,ts_fetch=now+300,
         sources=(dict(mode='mosaic',available=True),dict(mode='site',siteId='KATX',available=True))),time.time(),timezone.utc)
-    r.update(geo=dict(version=bm.version(),base='radar/geo/',sites='radar/sites-'+ae._radar_sites_revision()+'.json'),
+    r.update(nexrad=dict(id='KATX',name='Camano Island',distanceDisp='39 mi',bearing='NE'),geo=dict(version=bm.version(),base='radar/geo/',sites='radar/sites-'+ae._radar_sites_revision()+'.json'),
         rings=[dict(meters=40233.6,label='25 mi'),dict(meters=80467.2,label='50 mi')])
     frames=[dict(ts=now-offset,at=datetime.fromtimestamp(now-offset,timezone.utc).strftime('%H:%M'),
                  stamp=datetime.fromtimestamp(now-offset,timezone.utc).strftime('%Y%m%d%H%M'),siteScans=[],levels={'7':True,'8':True,'9':True}) for offset in range(840,-1,-120)]
@@ -94,7 +94,7 @@ def radar_server():
         (radar/'.geo-revision').write_text(bm.version())
         (radar/'.tile-revision').write_text(ae._radar_render_revision())
         (radar/'.sites-revision').write_text(ae._radar_sites_revision())
-        (radar/('sites-'+ae._radar_sites_revision()+'.json')).write_text(json.dumps([dict(id=i,lat=a,lon=b) for i,(a,b,_) in ae._NEXRAD_SITES.items()]))
+        (radar/('sites-'+ae._radar_sites_revision()+'.json')).write_text(json.dumps([dict(id=i,lat=a,lon=b,name=name) for i,(a,b,name) in ae._NEXRAD_SITES.items()]))
         # All fixture tiles are genuine 256-pixel immutable PNGs, not fetch shims.
         for z in (6,7,8,9,10):
             center=ae.world_point(47.61,-122.33,z);cx,cy=int(center[0]//256),int(center[1]//256)
@@ -315,10 +315,10 @@ def extended(page,server,theme,output):
     (output/f'memory-{theme}.json').write_text(json.dumps(memory,indent=2))
     (server.root/'wx.json').write_text(json.dumps(initial));page.evaluate('d=>renderRadar(d)',initial)
     page.wait_for_function("radarView.data.sourceId==='iem-mrms-lcref' && radarReady().length===8")
-    chrome(page,theme,initial)
+    chrome(page,theme,initial,output)
 
 
-def chrome(page,theme,data):
+def chrome(page,theme,data,output):
     """Surviving G2.18–38/K7–17 assertions; crop/ack/fence cases retired."""
     page.wait_for_function('!polling');page.evaluate('clearTimeout(pollTimer);radarView.paused=true;radarView.current=radarView.good;radarLoopSync()')
     box=page.locator('#rad-plate').bounding_box();assert box==dict(x=34,y=76,width=956,height=490),box
@@ -386,10 +386,64 @@ def chrome(page,theme,data):
     page.emulate_media(reduced_motion='no-preference')
     for target in page.locator('.rad-play,.rad-step,.rad-reset,.rad-seg').all():
         if target.is_visible():b=target.bounding_box();assert b['height']>=44 and b['width']>=44
-    colors=[b[k] for b in ae._RADAR_RAMP['bands'] for k in ('start','end')]
-    purity=page.evaluate('''colors=>{const rgb=colors.map(c=>{let e=document.createElement('i');e.style.color=c;document.body.append(e);let v=getComputedStyle(e).color;e.remove();return v});return [...document.querySelectorAll(RAD_CONTROLS+',.rad-tick,.rad-legend-unit,#rad-src-cap,#rad-note')].every(e=>!rgb.includes(getComputedStyle(e).color));}''',colors);assert purity
-    contrast=page.evaluate('''()=>{function rgba(s){let c=document.createElement('canvas'),x=c.getContext('2d');x.fillStyle=s;x.fillRect(0,0,1,1);let a=Array.from(x.getImageData(0,0,1,1).data);a[3]/=255;return a}function lum(c){let a=c.slice(0,3).map(v=>v/255<=.04045?v/255/12.92:((v/255+.055)/1.055)**2.4);return a[0]*.2126+a[1]*.7152+a[2]*.0722}let ground=document.documentElement.dataset.theme==='night'?[255,255,255]:[0,0,0];return ['#rad-note','#rad-src-cap','.rad-loop-read','.rad-zoom-read'].map(sel=>{let style=getComputedStyle(document.querySelector(sel)),fg=rgba(style.color),bg=rgba(style.backgroundColor),a=bg[3]??1,mixed=bg.slice(0,3).map((v,i)=>v*a+ground[i]*(1-a)),x=lum(fg),y=lum(mixed);return (Math.max(x,y)+.05)/(Math.min(x,y)+.05);});}''')
-    assert min(contrast)>=4.5,contrast
+    # Fable v4.3b assertions 1–27 run here in both themes, using actual layout.
+    copy_cases=[]
+    def caption(expected=None):
+        text=page.locator('#rad-src-cap').inner_text()
+        if expected is not None:assert text==expected,(text,expected)
+        assert all(word not in text for word in ('NEXRAD','MRMS','mosaic','volumes','dBZ')),text
+        width=page.locator('#rad-src-cap').bounding_box()['width']
+        assert width<=530,(text,width)
+        assert page.locator('#rad-src-cap').evaluate("e=>[getComputedStyle(e).overflow,getComputedStyle(e).whiteSpace,getComputedStyle(e).textOverflow]")==['hidden','nowrap','ellipsis']
+        assert page.locator('#rad-attrib').count()==1 and page.locator('#rad-attrib').get_attribute('href') is None
+        copy_cases.append(dict(text=text,width=width))
+        return text
+
+    page.evaluate("radarIntent.postedAt=0;radarSource.refused=false;radarView.refresh={state:'idle'};radarSourceRender()")
+    mosaic='Many radars blended · new image every 2 min · IEM / NOAA'
+    assert page.locator('#rad-src-mosaic').inner_text()=='REGION'
+    assert page.locator('#rad-src-mosaic').text_content()=='Region'
+    assert page.locator('#rad-src-mosaic').bounding_box()['width']>=84
+    assert page.locator('#rad-src-site').inner_text()=='KATX'
+    assert page.locator('#rad-src-mosaic').get_attribute('aria-label')=='Region: many radars blended'
+    assert page.locator('#rad-src-site').get_attribute('aria-label')=='KATX: Camano Island radar, 39 mi NE'
+    caption(mosaic)
+    assert page.locator('.rad-clear-note').count()==0
+    page.screenshot(path=str(output/f'radar-v43b-mosaic-{theme}.png'))
+    page.evaluate("radarView.data.sourceId='rainviewer';radarView.data.cadenceSec=600;radarSourceRender()")
+    caption('Worldwide blend · new image every 10 min · RainViewer · reflectivity only')
+    page.evaluate("radarView.data.sourceId='iem-mrms-lcref';radarView.data.cadenceSec=120;radarSource.desired='site';radarIntent.postedAt=Date.now()-400;radarSourceRender()")
+    caption(mosaic)
+    assert page.locator('#rad-src').get_attribute('data-state')=='pending'
+    # Let the shared grace timer fire by itself; no polling/frame change needed.
+    page.wait_for_function("document.getElementById('rad-src-cap').textContent.endsWith(' · switching')")
+    caption(mosaic+' · switching')
+    page.evaluate('radarIntent.postedAt=Date.now()-800;radarSourceRender()')
+    caption(mosaic+' · switching')
+    assert page.locator('#rad-src').get_attribute('data-state')=='pending'
+    page.screenshot(path=str(output/f'radar-v43b-switching-{theme}.png'))
+    page.evaluate('radarSource.desired=null;radarSourceRender()')
+    caption(mosaic)
+    # An ack while acquisition is active keeps the old picture pending.
+    page.evaluate("d=>{radarSource.desired='site';radarIntent.postedAt=Date.now()-800;renderRadar({...d,radar:{...d.radar,sourcePref:'site',refresh:{state:'newest'}}})}",data)
+    caption(mosaic+' · switching')
+    assert page.locator('#rad-src').get_attribute('data-state')=='pending'
+    # A preference ack with the old source still displayed is a refusal, not a
+    # successful switch; unrelated stale payloads above never clear the intent.
+    page.evaluate("d=>{radarSource.desired='site';radarIntent.postedAt=Date.now()-800;renderRadar({...d,radar:{...d.radar,sourcePref:'site',refresh:{state:'idle'},sources:[{mode:'mosaic',available:true},{mode:'site',siteId:'KATX',available:false,reason:'not reporting'}]}})}",data)
+    assert page.locator('#rad-note').inner_text()=="Couldn't switch · showing Many radars blended"
+    assert page.locator('#rad-note').bounding_box()['height']==14
+    assert page.evaluate('radarSource.desired===null')
+    assert 'switching' not in caption()
+    page.evaluate("d=>{radarSource.refused=false;renderRadar(d)}",data)
+    # A failure already present before a tap is stale evidence, not its refusal.
+    page.evaluate("d=>{radarSource.desired='site';radarSource.lastRefresh='failed';renderRadar({...d,radar:{...d.radar,refresh:{state:'failed'}}})}",data)
+    assert page.evaluate("radarSource.desired==='site'")
+    caption(mosaic+' · switching')
+    page.evaluate("d=>{renderRadar({...d,radar:{...d.radar,refresh:{state:'newest'}}});renderRadar({...d,radar:{...d.radar,refresh:{state:'failed'}}})}",data)
+    assert page.evaluate('radarSource.desired===null')
+    assert page.locator('#rad-note').inner_text()=="Couldn't switch · showing Many radars blended"
+    page.evaluate("d=>{radarSource.refused=false;renderRadar(d)}",data)
     # Site legend keeps exactly the same outer and unit geometry.
     page.evaluate('r=>{radarView.data={...radarView.data,...r};radarView.current=null;radarLegendRender();radarSourceRender()}',dict(sourceId='iem-nexrad-n0b',sourceMode='site',siteId='KATX',legend=dict(ae._RADAR_SITE_RAMP,remapped=True),sites=[dict(id='KATX',contributing=True)]))
     widths=page.locator('#rad-ramp i').evaluate_all('es=>es.map(e=>e.getBoundingClientRect().width)')
@@ -398,17 +452,73 @@ def chrome(page,theme,data):
     assert swatch==dict(color='rgb(159, 159, 170)' if theme=='paper' else 'rgb(93, 96, 110)',image='none'),swatch
     assert page.locator('#rad-legend').bounding_box()['width']==414 and page.locator('.rad-legend-unit').bounding_box()['width']==34
     assert page.locator('#rad-ramp').get_attribute('aria-label')=='Reflectivity scale, 5 to 75 dBZ. Below 10 dBZ in grey: clear-air return, not precipitation.'
-    assert page.locator('#rad-src-cap').inner_text().endswith('· from 5 dBZ')
+    caption('Camano Island radar · 39 mi NE · new scan every ~5 min · IEM / NOAA')
+    assert page.locator('.rad-clear-note').inner_text()=='Grey band: clear air, not rain'
+    assert page.locator('#rad-ramp').bounding_box()['width']==372
+    legend=page.locator('#rad-legend').bounding_box();clear=page.locator('.rad-clear-note').bounding_box()
+    assert clear['x']+clear['width']<=legend['x']+legend['width']
+    assert legend['y']-box['y']+legend['height']<=73
+    assert page.locator('.rad-clear-note').evaluate("e=>getComputedStyle(e).color===getComputedStyle(document.getElementById('rad-src-cap')).color")
+    page.screenshot(path=str(output/f'radar-v43b-site-{theme}.png'))
+    colors=[b[k] for b in ae._RADAR_RAMP['bands'] for k in ('start','end')]
+    purity=page.evaluate('''colors=>{const rgb=colors.map(c=>{let e=document.createElement('i');e.style.color=c;document.body.append(e);let v=getComputedStyle(e).color;e.remove();return v});return [...document.querySelectorAll(RAD_CONTROLS+',.rad-tick,.rad-legend-unit,#rad-src-cap,#rad-note,.rad-clear-note')].every(e=>!rgb.includes(getComputedStyle(e).color));}''',colors);assert purity
+    contrast=page.evaluate('''()=>{function rgba(s){let c=document.createElement('canvas'),x=c.getContext('2d');x.fillStyle=s;x.fillRect(0,0,1,1);let a=Array.from(x.getImageData(0,0,1,1).data);a[3]/=255;return a}function lum(c){let a=c.slice(0,3).map(v=>v/255<=.04045?v/255/12.92:((v/255+.055)/1.055)**2.4);return a[0]*.2126+a[1]*.7152+a[2]*.0722}let ground=document.documentElement.dataset.theme==='night'?[255,255,255]:[0,0,0];return ['#rad-note','#rad-src-cap','.rad-clear-note','.rad-loop-read','.rad-zoom-read'].map(sel=>{let style=getComputedStyle(document.querySelector(sel)),fg=rgba(style.color),bg=rgba(style.backgroundColor);if(sel==='.rad-clear-note')bg=rgba(getComputedStyle(document.querySelector('#rad-legend')).backgroundColor);let a=bg[3]??1,mixed=bg.slice(0,3).map((v,i)=>v*a+ground[i]*(1-a)),x=lum(fg),y=lum(mixed);return (Math.max(x,y)+.05)/(Math.min(x,y)+.05);});}''')
+    assert min(contrast)>=4.5,contrast
+
     # Independent layer count and label-zone assertions, including dark sites.
     site_rows=[dict(id=i,lat=lat,lon=lon,primary=n==0,contributing=True,reason=None) for n,(i,lat,lon) in enumerate([('KATX',47.65,-122.33),('KLGX',46.98,-123.82),('KRTX',49.2,-122.33)])]
     page.evaluate('sites=>{radarView.active=false;radarCamera={...radarView.data.center,zoom:7};radarView.data.sites=sites;radarOverlayBuild();radarSourceRender()}',site_rows)
     assert page.locator('.rad-site-edge').count()==3
-    assert page.locator('#rad-src-cap').inner_text()=='NEXRAD · KATX +2 · ~5 min volumes · IEM / NOAA · from 5 dBZ'
+    caption('Camano Island radar + 2 nearby · new scan every ~5 min · IEM / NOAA')
+    assert page.locator('#rad-src-site').inner_text()=='KATX +2'
+    assert page.locator('#rad-src-site').get_attribute('aria-label')=='KATX and 2 nearby: Camano Island radar, 39 mi NE'
+    page.evaluate("radarView.data.siteId='KLGX';radarView.data.sites=[{id:'KLGX',contributing:true}];radarSourceRender()")
+    neighbour=caption('KLGX radar · new scan every ~5 min · IEM / NOAA')
+    # 'min' necessarily contains 'mi'; test the forbidden distance clause itself.
+    assert '39 mi' not in neighbour and ' NE' not in neighbour
+    assert page.locator('#rad-src-site').get_attribute('aria-label')=='KLGX: KLGX radar'
+    page.evaluate('sites=>{radarView.data.sites=sites;radarView.data.siteId="KATX";radarSourceRender()}',site_rows)
     for label in page.locator('.rad-site-label').all():assert 88<=float(label.get_attribute('y'))<=412
     assert 'KRTX' not in page.locator('.rad-site-label').all_text_contents()
     site_rows[0].update(contributing=False,reason='not reporting',primary=False);site_rows[1]['primary']=True
     page.evaluate('sites=>{radarView.data.sites=sites;radarView.data.siteId="KLGX";radarSourceRender()}',site_rows)
-    assert page.locator('#rad-src-cap').inner_text().endswith('· KATX not reporting')
+    assert caption().endswith('· KATX not reporting')
+    # Names come from the table first, then nexrad.name, then the callsign.
+    page.evaluate("window.savedSiteTable=radarSiteTable;radarSiteTable=[];radarView.data.siteId='KATX';radarView.data.sites=[{id:'KATX',contributing:true}];radarSourceRender()")
+    caption('Camano Island radar · 39 mi NE · new scan every ~5 min · IEM / NOAA')
+    page.evaluate("radarView.data.nexrad.name='';radarSourceRender()")
+    caption('KATX radar · 39 mi NE · new scan every ~5 min · IEM / NOAA')
+    page.evaluate("radarSiteTable=[{id:'KATX',name:'Langley Hill Nw Washington'}];radarView.data.nexrad.name='Ignored fallback';radarView.data.sites=['KATX','KLGX','KOTX','KMAX'].map(id=>({id,contributing:true})).concat([{id:'KRTX',contributing:false,reason:'not reporting'}]);radarSourceRender()")
+    worst=caption('Langley Hill Nw Washington radar + 3 nearby · new scan every ~5 min · IEM / NOAA · KRTX not reporting')
+    # Exercise each overflow reduction independently at a measured box budget.
+    # Select widths from the actual embedded font so the tests also catch order.
+    fitting=page.evaluate('''()=>{
+      const cap=document.getElementById('rad-src-cap'),width=text=>{cap.textContent=text;return cap.scrollWidth;};
+      cap.style.maxWidth='none';
+      const base='Langley Hill Nw Washington radar',tail=' · IEM / NOAA · KRTX not reporting';
+      const single=base+' · new scan every ~5 min'+tail;
+      const full=base+' + 3 nearby · new scan every ~5 min'+tail;
+      const short=base+' + 3 nearby · every ~5 min'+tail;
+      const bare=base+' · every ~5 min'+tail;
+      return {single:width(single),full:width(full),short:width(short),bare:width(bare)};
+    }''')
+    page.evaluate("w=>{radarView.data.sites=[{id:'KATX',contributing:true},{id:'KRTX',reason:'not reporting'}];document.getElementById('rad-src-cap').style.maxWidth=w+'px';radarSourceRender()}",fitting['single']+1)
+    assert '39 mi' not in caption() and 'new scan every ~5 min' in caption()
+    page.evaluate("w=>{radarView.data.sites=['KATX','KLGX','KOTX','KMAX'].map(id=>({id,contributing:true})).concat([{id:'KRTX',reason:'not reporting'}]);document.getElementById('rad-src-cap').style.maxWidth=w+'px';radarSourceRender()}",fitting['short']+1)
+    assert '+ 3 nearby · every ~5 min' in caption()
+    page.evaluate("w=>{document.getElementById('rad-src-cap').style.maxWidth=w+'px';radarSourceRender()}",fitting['bare']+1)
+    assert '+ 3 nearby' not in caption() and ' · every ~5 min' in caption()
+    page.evaluate("document.getElementById('rad-src-cap').style.maxWidth='200px';radarView.data.latestOnly=true;radarView.data.scanningSlowly=true;radarView.data.legend.remapped=false;radarSourceRender()")
+    tail=caption()
+    assert all(flag in tail for flag in ('IEM / NOAA','latest only','scanning slowly','KRTX not reporting','palette incomplete'))
+    assert page.locator('#rad-src-cap').evaluate('e=>e.scrollWidth>e.clientWidth')
+    page.evaluate("radarView.data.siteId='KATX';radarView.data.sites=[{id:'KLGX',contributing:true},{id:'KATX',reason:'not reporting'},{id:'KRTX',reason:'scan unavailable'},{id:'KOTX',reason:'deferred'},{id:'KMAX',reason:'out of view'}];radarView.data.sourceFallback='site-zoom-floor';radarSourceRender()")
+    assert caption()=='KLGX radar · every ~5 min · IEM / NOAA · latest only · scanning slowly · timeline KATX · KRTX scan unavailable · KOTX deferred · KMAX out of view · KATX not reporting · palette incomplete · wider than KATX reaches'
+    page.evaluate('radarView.data.legend.floorDbz=10;radarLegendRender()')
+    assert page.locator('.rad-clear-note').count()==0
+    page.evaluate("document.getElementById('rad-src-cap').style.maxWidth='';radarSiteTable=savedSiteTable")
+    print('FABLE V4.3B',theme,json.dumps(dict(cases=copy_cases,contrast=contrast,legend=legend)),flush=True)
+    (output/f'radar-v43b-copy-{theme}.json').write_text(json.dumps(dict(cases=copy_cases,contrast=contrast,legend=legend),indent=2))
     # Actual raster channels stay on the same 26-entry LUT after browser blits.
     lut=page.evaluate('''async colors=>{radarRelease();radarView.active=false;radarCamera={...radarView.data.center,zoom:8};radarView.data.sourceId='iem-mrms-lcref';
       const f={ts:0,stamp:'197001010000',siteScans:[]},c=new OffscreenCanvas(256,256),x=c.getContext('2d'),t=radarTileSet(radarCamera,8)[0];

@@ -7,8 +7,18 @@ to shared upstream code that the classic console benefits from too.
 ## 2026-09-14
 
 ### Radar
+- **Radar v4.3b explains the source choice.** Region replaces Mosaic; the live
+  callsign keeps its nearby count, with descriptive accessible names on both
+  segments. Captions name the radar and new-image cadence, keep visible provider
+  credit, and attach station distance only to the nearest drawn primary. The
+  grey-band explanation now sits under the legend. Overflow drops optional
+  detail in order and clips within the caption's box.
+- **Switch copy follows the picture.** The displayed source stays named while
+  pending; `switching` appears after the existing 600ms grace. A refused choice
+  uses `Couldn't switch · showing …` in the existing note. Immediate intent,
+  pending treatment, bounded fast polling and warm-cache behavior remain.
 - **Radar v4.3 immediate source choice.** Touch contact, click and keyboard show
-  a dotted pending choice and honest fetching caption immediately. The displayed
+  a dotted pending choice immediately (caption copy refined in v4.3b above). The displayed
   source retains `aria-pressed`; the group exposes busy state. Intent uses the
   existing loopback GET immediately, coalesces bursts and supersedes a stalled
   poll. Follow-up polling is 300ms until source acknowledgement, capped at 20s.

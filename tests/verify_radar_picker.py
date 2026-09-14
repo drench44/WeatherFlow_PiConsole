@@ -53,7 +53,7 @@ def write(server, data):
 
 def site_payload(original):
     data=copy.deepcopy(original);r=data['radar'];r.update(sourceId='iem-nexrad-n0b',sourceMode='site',sourcePref='site',siteId='KATX',sitePreferred=True,
-        sites=[dict(id='KATX',lat=48.1947,lon=-122.4957,contributing=True,reporting=True)],zoomMin=7,zoomMax=10)
+        legend=dict(ae._RADAR_SITE_RAMP,remapped=True),cadenceSec=300,sites=[dict(id='KATX',lat=48.1947,lon=-122.4957,contributing=True,reporting=True)],zoomMin=7,zoomMax=10)
     r['tiles'].update(source=r['sourceId'],site='KATX')
     for f in r['tiles']['frames']:f['siteScans']=[dict(id='KATX',ts=f['ts'])]
     return data
@@ -64,7 +64,7 @@ def wait_ack(page, mode):
     assert page.locator('#rad-src').get_attribute('aria-busy')=='false'
     assert page.locator('#rad-src-'+mode).get_attribute('aria-pressed')=='true'
     assert page.locator('#rad-src-'+mode).get_attribute('data-state')=='confirmed'
-    assert 'fetching' not in page.locator('#rad-src-cap').inner_text()
+    assert 'switching' not in page.locator('#rad-src-cap').inner_text()
 
 
 def controls(browser,server,theme,output):
@@ -79,7 +79,7 @@ def controls(browser,server,theme,output):
         page.wait_for_function('pickerAudit.samples.length && pickerAudit.posts.length')
         sample=page.evaluate('pickerAudit.samples[0]');post=page.evaluate('pickerAudit.posts[0].at-pickerAudit.start')
         assert sample['state']=='pending' and sample['busy']=='true' and sample['pressed']=='false',sample
-        assert sample['cap']==('NEXRAD · KATX · fetching' if mode=='site' else 'MRMS mosaic · fetching'),sample
+        assert sample['cap']==('Many radars blended · new image every 2 min · IEM / NOAA' if mode=='site' else 'Camano Island radar · 39 mi NE · new scan every ~5 min · IEM / NOAA'),sample
         assert post<100,post
         epoch=page.evaluate('performance.timeOrigin+pickerAudit.start')
         received=next(t['at']-epoch for t in server.request_times[received_at:] if 'radarSource='+mode in t['path'])
@@ -89,8 +89,12 @@ def controls(browser,server,theme,output):
         page.wait_for_timeout(650)  # old payload must not erase intent/caption
         assert page.locator('#rad-src-'+mode).get_attribute('data-state')=='pending'
         assert page.locator('#rad-note').inner_text()=='Refreshing · newest frame'
+        assert page.locator('#rad-src-cap').inner_text()==sample['cap']+' · switching'
         assert len(page.evaluate('pickerAudit.posts'))==1  # pointer + compatibility click
+        if mode=='site':page.screenshot(path=str(output/f'radar-v43b-switching-{theme}.png'))
         write(server,data);wait_ack(page,mode)
+        page.wait_for_timeout(120)
+        page.screenshot(path=str(output/f'radar-v43b-{mode}-{theme}.png'))
         timings.append(dict(mode=mode,postMs=post,serverReceiptMs=received,firstFrame=sample))
     for mode,action,key in [('site','click',None),('mosaic','keyboard','Enter'),('site','keyboard',' '),('mosaic','mouse',None)]:
         button=page.locator('#rad-src-'+mode)
