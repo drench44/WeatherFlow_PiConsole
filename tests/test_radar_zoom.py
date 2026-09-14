@@ -103,7 +103,7 @@ def test_zoom_cache_identity_rebuild_and_retirement(make_emitter, hybrid, tmp_pa
     assert not list(Path(ae.RADAR_DIR).rglob('*.tmp.*'))
 
 
-def test_unused_history_expires_and_zoom_only_builds_latest(make_emitter, radar_net, radar_dir, tmp_path, monkeypatch):
+def test_unused_history_retained_and_zoom_only_builds_latest(make_emitter, radar_net, radar_dir, tmp_path, monkeypatch):
     # RainViewer remains fresh beyond the view TTL; exercise its actual expiry boundary.
     now = [radar_net['times'][-1] + 1]
     monkeypatch.setattr(ae.time, 'time', lambda: now[0])
@@ -116,7 +116,7 @@ def test_unused_history_expires_and_zoom_only_builds_latest(make_emitter, radar_
     radar_net['calls'].clear(); emitter._do_radar()
     assert sum(f['complete'] for f in emitter._radar_frames) == 1 and not tile_calls(radar_net)
     now[0] += ae.RADAR_CACHE_GRACE_SEC; emitter._do_radar()
-    assert not retired.exists()
+    assert retired.exists()  # current geometry retains the scan hour off-tab
     (tmp_path / 'radar_zoom').write_text('6')
     radar_net['calls'].clear(); emitter._do_radar()
     r = emitter._build_payload()['radar']

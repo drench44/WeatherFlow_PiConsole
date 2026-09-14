@@ -771,10 +771,9 @@ no `src`; a tick neither fetches nor decodes. A monotonic requestAnimationFrame
 clock uses 110ms steps and an 1100ms newest hold. RainViewer short loops use
 `clamp(2400/frameCount,110,180)` ms (the design's explicit formula). A 120ms
 opacity dip marks rewind; no crossfade blends scans. A contiguous ready suffix
-ending at newest starts when four frames are ready (or a smaller supplied
-history finishes decoding), then extends as older frames become ready — a
-loop that waited for eight left the panel on "Buffering" for 30–45 s after
-every new zoom while frames were visibly arriving.
+ending at newest starts as soon as two frames are decoded and extends as older
+frames arrive. Play intent survives all acquisition/buffering fences; the second
+frame starts playback without another press.
 The loop cluster at left:12px/bottom:12px keeps its box through play, clear,
 buffering, zoom, source swaps and frame staging; only an inactive radar tab or
 no radar hides it. The 220×1px rail is permanent. Its 2px marker has `display:none`
@@ -782,16 +781,21 @@ with zero ready frames, appears at left:218px with one, and tracks frame index
 with two or more. The existing .11s left transition remains the entire marker
 animation, suppressed for reduced motion.
 
-Play stays visible and is disabled only for clear content or fewer than two
-ready frames, independent of gesture/fetch/staleness loop fences. Disabled Play
-keeps its 44×44px box, opacity:1, `--ink-soft`, `--rule-faint` border and default
-cursor; source segments retain disabled opacity .38. A stopped or buffering
-loop shows ▶ with `aria-label="Play radar loop"`, never a pause glyph.
-The read evaluates zero ready frames → clear → buffering → frame label:
-`—` with `aria-label="No radar frames decoded yet"`, `No echoes · clear`,
-`Buffering · 1 of 4`, or `17:12 · newest` / `17:02 · −10 min`. A real label
-removes the empty-inventory aria-label. The read has neither status role nor
-aria-live; only the corner note describes refresh progress and owns that live
+Play stays visible and **never disabled while the cluster is shown**. This
+2026-09-14 user direction explicitly overrides Fable v3.2 K13/K14/K16's
+content-based disabled-control rules. The 44×44px control uses ▶ and
+`aria-label="Play radar loop"` for paused intent, or ❙❙ and
+`aria-label="Pause radar loop"` for play intent, including buffering/fetching.
+Every press changes the glyph and read immediately and gives a 120ms button
+opacity dip (suppressed for reduced motion). Transport, gesture, stale and
+visibility fences still control actual animation, independently of intent.
+
+With fewer than two ready frames the read is `Buffering · N of 8` for play
+intent or `Paused · N of 8` for paused intent, including zero frames. With two
+or more it follows the drawn `HH:MM · newest` / `HH:MM · −N min`, prefixed by
+`Paused · ` when paused. Clear history reads `No echoes · clear`, likewise
+prefixed when paused. The read has neither status role nor aria-live; only the
+corner note describes pass progress and owns that live
 region and its 600ms suppression. Partial history
 reports its actual oldest time; no duplicate/padded scans. The browser retains
 at most **16 956×490 bitmaps (~29 MiB)** plus its static newest image/canvas.
@@ -799,7 +803,7 @@ Leaving the tab closes all history bitmaps; returning decodes the active history
 
 Play/Pause and station-local `HH:MM · −N min` / `HH:MM · newest` follow the drawn
 scan, with a hairline progress track. One supplied frame is static; clear data
-reads `No echoes · clear` with track/play hidden. Hidden pages idle. Reduced
+keeps the cluster visible and enabled. Hidden pages idle. Reduced
 motion shows newest with a Play button; a tap runs one complete sweep and stops
 on newest, with wrap dip and track transition disabled. The loop never changes
 `#rad-base`, whose SVG is fetched once per hash into a bounded 16-viewport cache.
@@ -813,8 +817,27 @@ supply all pigment, including system dark mode. Missing/malformed artifacts
 retain the graticule without changing radar availability. Generation is lazy
 while `radar_viewed` is in `[0,900)` seconds, and warm files are reused off-tab.
 
-PNG and SVG writes are atomic. Retired generations receive 120 seconds of decode
-grace, then owned namespaces are pruned; unrelated files are untouched. Full
+Tab activation immediately posts `view=radar` on its wx.json request, aborting
+an older in-flight poll if necessary. While waiting for at least eight complete
+payload frames, polls run every 100ms, capped at 20 seconds independently of
+geometry acknowledgement. The usual intent fast-poll cadence remains 400ms.
+
+The 100ms intent watcher treats stale→fresh `radar_viewed` as a view-start
+edge. A new `radar_viewing.since` session also wakes a return inside the
+15-minute demand TTL. Repeated polls in one session do not schedule more passes;
+a view event during a worker queues one single-flight pass. For unchanged,
+fresh geometry, that pass restores validated cached frame descriptors and emits
+history immediately with zero provider HTTP when eight crops exist. Cold or
+stale caches use the existing acquisition path and shared budgets. Scheduled
+provider validation remains unchanged; cached publication does not refresh the
+observed or fetched timestamps.
+
+PNG and SVG writes are atomic. The current source/geometry/legend revision keeps
+all crop stamps within `RADAR_HISTORY_SEC` (3600 seconds, inclusive) of its newest
+scan, viewed or unviewed. Off-tab cadence passes still fetch only newest and add
+that crop to the retained hour (31 two-minute scans); older stamps and other
+geometries/revisions retire. Abandoned generations retain the existing 120-second
+decode grace. Pruning remains restricted to owned namespaces. Full
 hour history follows the loop and neighbour priorities and the continuous-view
 gate above. At the wider crop, a frame commonly needs 12–15 tiles, so deep history
 spans several paced passes. Scheduled checks remain 180s and failure retries 120s;

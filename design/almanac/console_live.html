@@ -1266,12 +1266,17 @@
     });
     /* the radar loop runs only while its tab is open (idle off-tab, Pi-friendly) */
     if (typeof radarLoopSync === "function" && radarView) {
+      var enteringRadar = id === "s-radar" && !radarView.active;
       radarView.active = (id === "s-radar");
-      if (!radarView.active) { radarGestureCancel(); radarRelease(); }
+      if (!radarView.active) { radarHistoryUntil=0; radarGestureCancel(); radarRelease(); }
       else if (radarView.data) radarPreload(radarView.data);
       radarBasemapSync();
       radarIdleSync(false);
       radarLoopSync();
+      if (enteringRadar) {
+        radarHistoryUntil=Date.now()+20000;
+        poll(true);
+      }
     }
   }
   document.querySelectorAll(".tab[data-screen]").forEach(function (b) {
@@ -3186,30 +3191,30 @@
   function radarLoopSync() {
     var loop=$("rad-loop"), play=$("rad-play"), r=radarView.data, ready=radarReady();
     if (!radarView.active || !r) { radarStopLoop(false); loop.hidden=true; return; }
-    // Start looping as soon as four scans are decoded and grow as the rest stream in:
-    // waiting for eight left the panel on "Buffering" for 30-45 s after every new zoom.
-    var buffering=!radarView.bufferDone && ready.length < Math.min(4,radarView.loaded.length);
-    var clear=radarView.clear && !ready.some(f => f.hasEcho || f.legend && f.legend.remapped===false) &&
+    var intentPlay=!radarView.paused && (!radarReduced() || radarView.singleSweep);
+    var clear=ready.length && radarView.clear && !ready.some(f => f.hasEcho || f.legend && f.legend.remapped===false) &&
       !(r.sites || []).some(s => s.reason);
     loop.hidden=false;
     $("rad-track").dataset.frames=ready.length ? "1" : "0";
-    play.hidden=false; play.disabled=clear || ready.length < 2;
-    play.textContent="▶"; play.setAttribute("aria-label","Play radar loop");
+    play.hidden=false; play.disabled=false;
+    play.textContent=intentPlay ? "❙❙" : "▶";
+    play.setAttribute("aria-label",intentPlay ? "Pause radar loop" : "Play radar loop");
     var read=$("rad-frame-time");
-    if (!ready.length) {
-      radarStopLoop(false); read.textContent="—"; read.setAttribute("aria-label","No radar frames decoded yet"); return;
-    }
     read.removeAttribute("aria-label");
-    if (clear) { radarStopLoop(true); $("rad-frame-time").textContent="No echoes · clear"; return; }
+    if (ready.length < 2) {
+      radarStopLoop(ready.length > 0);
+      read.textContent=(intentPlay ? "Buffering" : "Paused")+" · "+ready.length+" of 8";
+      return;
+    }
+    if (clear) {
+      radarStopLoop(true); read.textContent=(intentPlay ? "" : "Paused · ")+"No echoes · clear"; return;
+    }
     if (radarView.current) {
       var fr=radarView.current;
-      $("rad-frame-time").textContent=radarFrameLabel(fr)+" · "+(fr.ts===r.observedTs ? "newest" : "−"+Math.round((r.observedTs-fr.ts)/60)+" min");
+      read.textContent=(intentPlay ? "" : "Paused · ")+radarFrameLabel(fr)+" · "+
+        (fr.ts===r.observedTs ? "newest" : "−"+Math.round((r.observedTs-fr.ts)/60)+" min");
     }
-    if (buffering) {
-      radarStopLoop(true); $("rad-frame-time").textContent="Buffering · " + ready.length + " of " + radarView.loaded.length; return;
-    }
-    var run=radarCouldLoop() && !radarView.paused && (!radarReduced() || radarView.singleSweep);
-    play.textContent=run ? "❙❙" : "▶"; play.setAttribute("aria-label",run ? "Pause radar loop" : "Play radar loop");
+    var run=radarCouldLoop() && intentPlay;
     if (!run) { radarStopLoop(false); return; }
     if (!radarView.timer) {
       radarView.nextAt=performance.now()+RAD_HOLD_MS;
@@ -3217,9 +3222,10 @@
     }
   }
   $("rad-play").addEventListener("click",function() {
-    if (radarReduced()) { radarView.singleSweep=true; radarView.paused=false; radarDraw(radarView.good); }
+    if (radarReduced()) { radarView.singleSweep=!radarView.singleSweep; radarView.paused=!radarView.singleSweep; if (radarView.singleSweep) radarDraw(radarView.good); }
     else radarView.paused=!radarView.paused;
     radarLoopSync();
+    if (!radarReduced()) $("rad-play").animate([{opacity:.5},{opacity:1}],{duration:120});
   });
   document.addEventListener("visibilitychange",function() {
     if (document.hidden) radarGestureCancel();
@@ -3290,6 +3296,7 @@
     if (r && r.intent && radarIntent.targetSeq && r.intent.seq>=radarIntent.targetSeq &&
         !r.geometryOnly && r.latest) radarFastUntil=0;
     if (r && r.intent) radarIntent.localSeq=Math.max(radarIntent.localSeq,r.intent.seq || 0, radarView.refresh.forSeq || 0);
+    if (r && !r.geometryOnly && (r.frames || []).filter(f=>f.complete).length>=8) radarHistoryUntil=0;
     var refresh=radarView.refresh;
     if (refresh.state==='failed' && radarView.good) radarView.refreshFailure=true;
     else if (refresh.state==='idle' || refresh.frameIndex>0 && ['newest','history'].includes(refresh.state)) radarView.refreshFailure=false;
@@ -3544,10 +3551,10 @@
   }
 
   var POLL_MS      = 2000;
-  var radarFastUntil = 0, pollTimer = null;
+  var radarFastUntil = 0, radarHistoryUntil = 0, pollTimer = null, pollController = null;
   function schedulePoll() {
     clearTimeout(pollTimer);
-    pollTimer=setTimeout(poll, Date.now()<radarFastUntil ? 400 : POLL_MS);
+    pollTimer=setTimeout(poll, Date.now()<radarHistoryUntil ? 100 : Date.now()<radarFastUntil ? 400 : POLL_MS);
   }
   var FETCH_MS     = 4000;   /* deadline for one request; past it we abandon it */
   var failCount    = 0;
@@ -3562,9 +3569,13 @@
     return !!d && typeof d === "object" && !Array.isArray(d) && isNum(d.ts);
   }
 
-  function poll() {
+  function poll(viewStart) {
     var started = Date.now();
     clearTimeout(pollTimer); schedulePoll();
+    if (polling && viewStart === true) {
+      if (pollController) pollController.abort();
+      polling=false;
+    }
     if (polling) {
       if (started - pollStart < FETCH_MS) return;   /* single flight: never overlap */
       failCount++;              /* never answered, never aborted — that is a miss */
@@ -3573,6 +3584,7 @@
     var gen = ++pollGen;
     polling = true; pollStart = started;
     var ctl  = (typeof AbortController === "function") ? new AbortController() : null;
+    pollController=ctl;
     var kill = setTimeout(function () { if (ctl) ctl.abort(); }, FETCH_MS);
     var opts = { cache: "no-store" };
     if (ctl) opts.signal = ctl.signal;

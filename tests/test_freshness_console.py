@@ -32,7 +32,7 @@ def test_poll_is_bounded_and_single_flight(page):
 
 def test_an_unanswered_request_counts_as_a_miss(page):
     # A promise that neither resolves nor aborts must not read as success.
-    body = page.split('function poll()', 1)[1]
+    body = page.split('function poll(viewStart)', 1)[1]
     abandon = body.split('var gen = ++pollGen;', 1)[0]
     assert 'failCount++;' in abandon
 

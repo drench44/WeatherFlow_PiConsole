@@ -826,12 +826,16 @@ class AlmanacEmitter:
         self.interval    = interval
         self._event      = None
         self._radar_result = _RADAR_NONE
+        self._radar_result_stamp = None
         self._radar_request_times = []  # ALL attempts, shared across sources and retries
         self._radar_negative = {}
         self._radar_newest = {}  # (source, site) -> (validated monotonic, knowledge)
         self._radar_archive_positive = set()  # immutable successful archive URLs
         self._radar_tiles = OrderedDict()
         self._radar_prefetched = {}  # (source, zoom, centre) -> attempted scan set
+        self._radar_was_viewed = False
+        self._radar_view_pending = False
+        self._radar_view_session = None
         self._radar_view_geometry = None
         self._radar_geometry_since = 0.
         self._radar_lock = _RLock()
@@ -1061,14 +1065,33 @@ class AlmanacEmitter:
         # Geometry can publish while the single-flight transport worker drains.
         # Keep only the newest intent for network work; share all request budgets.
         stamp = self._radar_preference_stamp()
-        if self._running and stamp != self._radar_zoom_stamp:
+        viewed = self._radar_is_viewed()
+        # The demand hint lasts 15 minutes; the live session also catches a
+        # return inside that window, without making every poll a new event.
+        session = None
+        try:
+            record = json.loads(Path(self.output_path).with_name('radar_viewing').read_text())
+            if 0 <= time.time()-record['last'] < RADAR_VIEW_POLL_GAP_SEC:
+                session = record['since']
+        except (OSError, ValueError, TypeError, KeyError):
+            pass
+        if viewed and (not self._radar_was_viewed or
+                       session is not None and session != self._radar_view_session):
+            self._radar_view_pending = True
+        self._radar_was_viewed = viewed
+        self._radar_view_session = session
+        if not viewed:
+            self._radar_view_pending = False
+        if self._running and (stamp != self._radar_zoom_stamp or self._radar_view_pending):
             if 'radar' in self._inflight:
                 if stamp != self._radar_geometry_stamp:
                     # Map feedback is independent of a draining network worker.
                     self._do_radar(geometry_only=True)
             else:
+                view_started = self._radar_view_pending
+                self._radar_view_pending = False
                 self._radar_zoom_stamp = stamp
-                self._spawn('radar', lambda: self._do_radar(intent_triggered=True))
+                self._spawn('radar', lambda: self._do_radar(intent_triggered=True, view_started=view_started))
 
     def _radar_checkpoint(self, ctx):
         if 'preference_stamp' in ctx and ctx['preference_stamp'] != self._radar_preference_stamp(ctx.get('stamp_names')):
@@ -1710,6 +1733,7 @@ class AlmanacEmitter:
                 partial_coverage=source == 'iem-mrms-lcref' and any(
                     ctx['bounds'][k] < _RADAR_IEM_DOMAIN[k] if k in ('w', 's') else
                     ctx['bounds'][k] > _RADAR_IEM_DOMAIN[k] for k in ('w', 'e', 's', 'n')))
+            self._radar_result_stamp = ctx.get('preference_stamp')
             self._radar_transport_failures.pop(source, None)
             ctx.pop('geometry_result', None)
             self._radar_publish_refresh(ctx, frameIndex=sum(f['complete'] for f in frames.values()))
@@ -1899,12 +1923,29 @@ class AlmanacEmitter:
     def _radar_prune(self, previous):
         """Prune only owned namespaces; give abandoned generations decode grace."""
         keep = {f['id'] for f in self._radar_result.frames if f['complete']}
-        # Touch the previous generation at retirement, not at its original build.
-        for f in previous.frames:
-            if f['complete'] and f['id'] not in keep:
-                path = os.path.join(RADAR_DIR, f['id'] + '.png')
-                if os.path.isfile(path):
-                    os.utime(path, (time.time(), time.time()))
+        # Crops accumulate for an hour even when only newest is published.
+        # Include the palette revision; site scan-set hashes are below this root.
+        latest = self._radar_result.latest
+        prefix = '/'.join(latest.split('/')[:4]) + '/' if latest else None
+        newest = self._radar_result.ts_frame
+        if prefix and newest is not None:
+            for directory, _, names in os.walk(os.path.join(RADAR_DIR, prefix)):
+                for name in names:
+                    if re.fullmatch(r'[0-9]+\.png', name) and newest-RADAR_HISTORY_SEC <= int(name[:-4]) <= newest:
+                        keep.add(os.path.relpath(os.path.join(directory, name), RADAR_DIR)[:-4])
+        # Touch the whole retained generation at retirement, not at build
+        # time. An off-tab payload marked its historical crops incomplete.
+        retired = {f['id'] for f in previous.frames if f['complete']} - keep
+        old_prefix = '/'.join(previous.latest.split('/')[:4]) + '/' if previous.latest else None
+        if old_prefix and old_prefix != prefix:
+            for directory, _, names in os.walk(os.path.join(RADAR_DIR, old_prefix)):
+                for name in names:
+                    if re.fullmatch(r'[0-9]+\.png', name) and previous.ts_frame-RADAR_HISTORY_SEC <= int(name[:-4]) <= previous.ts_frame:
+                        retired.add(os.path.relpath(os.path.join(directory, name), RADAR_DIR)[:-4])
+        for ident in retired:
+            path = os.path.join(RADAR_DIR, ident + '.png')
+            if os.path.isfile(path):
+                os.utime(path, (time.time(), time.time()))
         current_map = self._radar_result.basemap
         old_map = previous.basemap
         map_root = os.path.join(RADAR_DIR, 'basemap')
@@ -1931,7 +1972,7 @@ class AlmanacEmitter:
                     if ident not in keep and time.time() - os.path.getmtime(path) >= RADAR_CACHE_GRACE_SEC:
                         os.unlink(path)
 
-    def _do_radar(self, geometry_only=False, intent_triggered=None):
+    def _do_radar(self, geometry_only=False, intent_triggered=None, view_started=False):
         """Primary-first orchestration; radar failures never alter engine health."""
         stamp_names = self._radar_stamp_names()
         stamp = self._radar_preference_stamp(stamp_names)
@@ -1939,6 +1980,21 @@ class AlmanacEmitter:
             # Direct callers follow changed markers; scheduled/retry callbacks
             # explicitly force validation even if an intent arrived meanwhile.
             intent_triggered = stamp != self._radar_zoom_stamp or self._radar_restart
+        if (view_started and not geometry_only and stamp == self._radar_result_stamp
+                and self._radar_geometry_result is None):
+            # Publish the same cached history used by the adapter's initial
+            # publication before discovery/prefetch. A warm tab needs no HTTP,
+            # even if provider knowledge expired while it was closed.
+            previous = self._radar_result
+            if previous.available and 0 <= time.time()-previous.ts_frame < previous.stale_sec:
+                frames = tuple(_radar_cached_frame(dict(f, complete=False), os.path.join(RADAR_DIR, f['id']+'.png'))
+                               for f in previous.frames)
+                if (sum(f['complete'] for f in frames) >= RADAR_LOOP_FRAMES
+                        and any(f['id'] == previous.latest and f['complete'] for f in frames)
+                        and stamp == self._radar_preference_stamp()):
+                    self._radar_result = previous._replace(frames=frames)
+                    self._radar_retained_refresh('idle')
+                    return
         if not geometry_only:
             self._radar_restart = False
             self._radar_zoom_stamp = stamp

@@ -7,6 +7,16 @@ to shared upstream code that the classic console benefits from too.
 ## 2026-09-14
 
 ### Radar
+- **Tab-to-loop uses the warm hour immediately.** Entering Radar posts its view
+  marker immediately and polls at 100ms until history arrives (20-second cap).
+  The intent watcher schedules one view-start pass; an unchanged warm cache
+  publishes history with zero provider HTTP. Off-tab passes retain the current
+  geometry's hour of crops while fetching only newest, with the existing grace
+  for abandoned generations and unchanged request budgets.
+- **Play reflects intent while buffering.** The always-enabled button flips
+  immediately between Play and Pause, with inventory feedback and a 120ms dip.
+  Playback starts automatically at two decoded frames; pausing during buffering
+  prevents a later automatic start. Reduced-motion single sweeps are preserved.
 - **Site mode joins the lazy local radar cache.** Site listings run concurrently
   and retain each site's scan slots for 300 seconds on intent passes. Idle mosaic
   viewing warms selected site newest tiles after its loop and adjacent zooms;
@@ -22,10 +32,9 @@ to shared upstream code that the classic console benefits from too.
   caption tail and an accessible explanation. Reflectivity only, never a
   precipitation-type inference.
 - **The loop controls stay while frames arrive.** Zoom staging no longer hides
-  Play, the rail or the read. Play steps down to secondary ink until there are
-  two decoded frames, or when there is nothing to animate. With no frames the
-  read is “—” and the marker is absent; the single corner note owns refresh
-  progress. One frame pins the marker at newest. Every phase keeps the same box
+  Play, the rail or the read. Play remains enabled during buffering and clear
+  content. With no frames the read shows the play/pause inventory and the marker
+  is absent; the single corner note owns refresh progress. One frame pins the marker at newest. Every phase keeps the same box
   on paper and night.
 - **Loop first, next zoom second, deep history last.** After the newest scan,
   acquire eight loop frames and warm adjacent zooms before spending requests on
