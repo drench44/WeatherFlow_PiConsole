@@ -64,6 +64,30 @@ The classic six-panel console (the upstream default) for comparison:
 
 ![The classic six-panel console](design/almanac/screenshots/classic.png)
 
+A **Radar** tab puts a live reflectivity mosaic under the same discipline. It is
+centered on the station and works anywhere on Earth: in the US it leads with
+NOAA's MRMS composite at two-minute frames, and everywhere else — or whenever
+that feed can't be reached — it falls back to a global ten-minute mosaic, always
+trying the finer source first and saying which one is on screen. The echoes keep
+their true reflectivity colours with a real dBZ scale (snow drawn distinctly from
+rain), over real geography — coastline and water, state and country lines, major
+roads — drawn from bundled public-domain map data, so the basemap needs no key
+and works offline. The radar takes the whole plate: 956 × 490 pixels, two thirds
+of the screen, with the controls kept to quiet overlays along the top and bottom
+edges and nothing within 150 pixels of the station. Recent frames play as a
+smooth loop while the tab is open — pre-decoded so a Pi never stutters, about
+nine a second with a hold on the newest — whose scan time is printed beside the
+clock and is never dressed up as "live". A quiet +/− sets the zoom and remembers
+it across reboots; the default is tightened to about 200 km across the plate's
+height. On the touchscreen the map drags and pinches by hand, the station glyph
+showing where home is while you're away and the view drifting back to it after a
+minute and a half untouched. Where a NEXRAD site is in range, one tap switches from the mosaic to that
+single radar's own super-resolution scans, animated over its real scan times.
+
+![The Radar tab: MRMS reflectivity over the Puget Sound coastline, roads and county lines](design/almanac/screenshots/radar.png)
+
+![The recent frames looping on the Radar tab](design/almanac/screenshots/radar.gif)
+
 What it changes:
 
 - One dominant temperature and a plain-language forecast line, in place of six equal-weight panels.
@@ -72,14 +96,15 @@ What it changes:
 - Air quality (AQI) by the station's own latitude and longitude, with a short forecast so a rising smoke event shows before the number climbs.
 - A 7-day outlook band: each day's low–high drawn as a bar on ONE shared axis for the week (so a cool-down is visibly a shorter, lower bar), condition glyphs beside the highs — sun, cloud, fog, rain, snow, thunderstorm, wind, and the compound marks wind-driven rain and blowing snow (a gusty wet day keeps its water but the drops slant to the engraver's driving-rain angle behind a wind curl) — precipitation probability only when it matters, the day's expected amount beside it in the station's own unit (dry days print nothing), and today's bar carrying a dot at the observed temperature.
 - A one-line hint about tomorrow under the conditions headline ("Rain tomorrow", "Wind-driven rain tomorrow", "Freezing rain tomorrow", "Blowing snow tomorrow"…), led by tomorrow's own band glyph, that appears only when tomorrow is a story — its absence is the fair-weather signal.
+- A Radar tab (above): two-minute NOAA MRMS frames in the US, a ten-minute global mosaic elsewhere, true-colour echoes with a dBZ scale over bundled real geography, a smooth pre-decoded loop, a remembered zoom, and a single-site NEXRAD view where a radar is in range.
 - A rainfall rate gauge scaled by intensity rather than linearly — the five named bands (Very Light through Very Heavy) each take an equal fifth of the tube, so drizzle registers and a downpour doesn't pin the needle. Light rain never reads as dry: the Tempest's haptic sensor logs drizzle as an occasional trace minute with zeros between, so the rate carries a 10-minute window that bridges those gaps. Rain arrives and leaves like weather, not like a switch — the volume of falling drops counts up quickly and down slowly, column by column, toward the measured rate (so the sensor's wet/dry flip between minutes reads as a swell and a settle), the drops shorten and slow as it eases, and the last column leaves through a fade.
 - A wind panel that resolves to one current reading, with a bolder compass.
 - Animated updates: values count up, the vane swings — and while rain falls, etched rain falls through the gauge into a waving water surface, with fall speed, density, swell, and drift all tracking the measured rate.
 - Snow-aware: in freezing weather with snow in the forecast, a dry rain sensor reads "Snow Likely" rather than "Currently Dry" (the Tempest's haptic sensor cannot register snowfall).
 - Day/night aware. After sunset the Sun & Sky panel becomes Moon & Sky (phase, illumination, moonrise/set).
 - Storm-aware layout: while lightning is being detected, the Lightning tile takes the Sun & Sky slot so rain and strikes stay on screen together.
-- The forecast-today curve continues past the current reading along real hourly forecast temperatures, with the day's high and low labelled at the hours they occur; with no hourly data it draws nothing forward rather than guess.
-- Honest about silence: the masthead reads STALE when nothing new is reaching the screen and SILENT when the engine is fine but the station itself has stopped reporting - a fresh file is never mistaken for a live sensor. `/health` reports the same distinction for monitoring.
+- The forecast-today curve begins at the current reading and blends onto the real hourly forecast over the next few hours — the sensor is the better guide for the next hour or two, the model for the rest of the day — arriving exactly at the model's own peak, which is labelled at the hour it occurs and always agrees with the printed HIGH. With no hourly data it draws nothing forward rather than guess.
+- Honest about silence: the masthead reads STALE when nothing new is reaching the screen and SILENT when the engine is fine but the station itself has stopped reporting - a fresh file is never mistaken for a live sensor. `/health` reports the same distinction for monitoring. Before the first frame ever arrives — a cold boot, or the engine down — every value reads "—" rather than a sample number, so an empty console can never be mistaken for a forecast.
 
 Both extra data sources degrade quietly. Weather alerts come from the US National
 Weather Service, so outside the US the strip simply stays hidden. Air quality is
