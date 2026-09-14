@@ -27,8 +27,9 @@ def origin(tmp_path, monkeypatch):
                    check=True, capture_output=True)
     state = SimpleNamespace(connections=0, requests=[], closed=0, idle=2,
                             close_after=0, alternate=False, fail_fresh=False,
-                            headers={}, second=None, delay=0, active=0, peak=0, body=png())
+                            headers={}, second=None, delay=0, active=0, peak=0, hold=0, body=png())
     lock = threading.Lock()
+    gate = threading.Condition(lock)  # hold: tile requests wait until `hold` are in flight (deterministic peak)
     class Handler(BaseHTTPRequestHandler):
         protocol_version = 'HTTP/1.1'
         def setup(self):
@@ -57,9 +58,16 @@ def origin(tmp_path, monkeypatch):
                 time.sleep(.2)
                 self.close_connection = True
                 return
-            with lock:
+            with gate:
                 state.active += 1
                 state.peak = max(state.peak, state.active)
+                if state.hold and self.path.startswith('/tile'):
+                    # A barrier, not a sleep: concurrency is asserted by construction, so a slow
+                    # CI runner cannot turn "six workers" into a wall-clock coincidence.
+                    deadline = time.monotonic() + 5
+                    while state.active < state.hold and time.monotonic() < deadline:
+                        gate.wait(timeout=.05)
+                    gate.notify_all()
             time.sleep(state.delay)
             with lock: state.active -= 1
             raw = state.body
@@ -202,6 +210,7 @@ def test_six_workers_complete_frame_with_closing_connections(make_emitter, origi
     origin.close_after = 1
     origin.alternate = True
     origin.delay = .02
+    origin.hold = 6      # tile requests are released only once six are in flight
     monkeypatch.setattr(ae, 'RADAR_DIR', str(tmp_path/'radar'))
     monkeypatch.setattr(ae, 'RADAR_IEM_METADATA_URL', origin.url+'/metadata')
     monkeypatch.setattr(ae, 'RADAR_IEM_ARCHIVE_TEMPLATE', origin.url+'/archive/%Y%m%d%H%M')

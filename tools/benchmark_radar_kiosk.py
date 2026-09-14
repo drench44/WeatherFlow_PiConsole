@@ -12,7 +12,11 @@ import json
 import os
 from pathlib import Path
 import urllib.request
-import websocket
+
+try:
+    import websocket  # websocket-client: needed only to talk to the kiosk; the summary code is importable without it
+except ImportError:  # pragma: no cover - exercised in CI without the optional dependency
+    websocket = None
 
 BENCH = r"""(async()=>{
  if(typeof radarGeoTiles==='undefined'||typeof radarBacking!=='undefined')throw Error('Page is not radar v4.1');
@@ -100,6 +104,8 @@ def benchmark_output(value,radar_dir,verbose=False):
 
 
 def main():
+    if websocket is None:
+        raise SystemExit('websocket-client is required to drive the kiosk: pip install websocket-client')
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--port',type=int,default=9222)
     parser.add_argument('--url-contains',default='')
