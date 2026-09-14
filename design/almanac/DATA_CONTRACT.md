@@ -211,22 +211,33 @@ Tiles use
 UTC rollover applies to both paths. MRMS's native raster covers longitude
 −130…−60, latitude 20…55; crossing that domain sets `partialCoverage:true`.
 
-The transport uses standard-library `http.client.HTTPSConnection`, with one
-persistent connection per host per worker pass. Each host is resolved once
-with `AF_INET`; successful addresses and resolver exceptions are cached for that
-pass. Connections use the resolved IP while retaining the original TLS SNI,
-certificate hostname verification, and HTTP Host. Reconnects reuse cached DNS.
-Connections close in the worker's `finally` block. A synchronous system DNS
-lookup itself cannot be interrupted by socket timeout; an over-budget lookup
-is rejected when it returns and is never repeated within the pass.
+The transport uses standard-library `http.client.HTTPSConnection`, with at most
+four leased connections per host. A connection stays leased until the response
+body has been consumed or closed; four tile workers fetch each frame incrementally.
+Sessions and successful IPv4 DNS results survive worker passes. Each host is
+resolved with `AF_INET`; the resolved IP retains the original TLS SNI, certificate
+hostname verification and HTTP Host. Errors discard the affected connection;
+provider changes and shutdown close the session. Idle connections older than 60 s
+are discarded before reuse. Resolver exceptions are cached only through the current
+pass. A synchronous system DNS lookup cannot be interrupted by socket timeout;
+an over-budget lookup is rejected on return.
+
+Validated native PNG bytes enter a 400-tile in-memory LRU before cancellation is
+checked. Keys include source, site when applicable, scan timestamp, zoom and tile
+X/Y. IEM native bytes do not depend on the console palette revision; RainViewer
+keys also include its server-side colour scheme and options. A pan or restarted
+crop reuses overlapping tiles without HTTP, even if the earlier crop never finished.
+Truncated, oversized, placeholder and invalid tiles never enter this cache.
 
 All metadata, HEAD, tile, conditional and failing requests share a rolling
-90-request/minute monotonic limiter across adapters. Per-source 429 cooldowns
+90-request/minute monotonic limiter across adapters. Reservation is locked across
+tile threads, so concurrent starts cannot overspend it. Per-source 429 cooldowns
 honor numeric or HTTP-date `Retry-After`. Maximum request timeout is 10 s,
 primary acquisition budget 25 s, full build budget 150 s, maximum 20 uncached
 frame attempts per pass. No deadline was raised for v3. An HTTP error, invalid
 PNG, incorrect dimensions, oversized body (>2 MiB), or solid opaque red IEM
-placeholder stops that mosaic candidate (or individual site layer) immediately. Transparent data is a valid
+placeholder stops new submissions for that mosaic candidate (or individual site layer).
+Already-active requests drain, retaining their valid tiles; at most four are in flight. Transparent data is a valid
 clear frame. Negative cache TTL is 120 s; only complete 256×256 tiles contribute
 to an atomically published crop. Native alpha is preserved within each tile
 layer. Site layers use RGBA alpha compositing, with the site nearest the viewport
@@ -408,9 +419,18 @@ source caption; scan age belongs only beside AS OF. Never label data LIVE.
 
 ### Intent and refresh
 
-An immutable record pairs the pass-start intent with acquisition state. The emit
-tick reads it separately from the last complete crop, so progress remains visible
-while old pixels are held. No `progress` field is published.
+An immutable record pairs the pass-start intent with acquisition state. Before any
+network request, each adapter computes the new viewport/bounds/marker/rings/scale,
+ensures its basemap, and publishes `geometryOnly:true`, `frames:[]`, `latest:null`
+with `refresh.state:"newest"`. This available payload describes the NEW geometry;
+it does not relabel old frame pixels. `observedTs` and `observedAt` are null until
+newest is ready. The last complete result is retained separately for recovery.
+Every subsequent newest/history publication carries `geometryOnly:false`.
+
+Every publication schedules `Clock.schedule_once(self._emit, 0)`, coalescing to
+one pending immediate callback. Only the Kivy thread builds/writes the payload;
+worker threads never read Kivy properties. The regular two-second emit remains.
+No `progress` field is published.
 
 ```jsonc
 "intent": {"seq":41, "zoom":7, "center":"station", "source":"site"},
@@ -425,15 +445,18 @@ then 1…N); warm history can advance it by several. `frameTotal` is the planned
 work (1 before listing or when not viewed; otherwise the adapter's capped slots).
 Success ends at `idle`; external newest failures end at `failed`. Local limiter
 or cooldown deferrals remain `idle` when retaining a fresh previous result.
-Before publishing any newest intent/progress, require metadata plus a complete
-frame's tile headroom. Retry at the necessary request-window expiry or cooldown
-expiry, not the blanket external-error delay. Retained refresh records describe
-the retained intent and frame counts. Mid-newest budget exhaustion without any
-fresh retained result remains failed; history budget yields remain idle.
-History starts a frame only if it can leave at least 12 requests (or the current
-viewport's newest cost, if larger) for the next interaction. Supersession queues one `superseded`
-record for the next emit, even if the replacement worker has already started.
-Neither failure nor cancellation changes the last successfully published crop.
+Geometry publication needs no request headroom. Before network acquisition,
+require metadata plus a complete frame's tile headroom. If the limiter/cooldown
+blocks it, retain the geometry-only view, publish idle, and retry at the necessary
+request-window or cooldown expiry. Retained failure records describe the retained
+intent and frame counts. Mid-newest budget exhaustion without any fresh retained
+result remains failed; history budget yields remain idle.
+History starts a frame only if it leaves at least 17 requests: the widest mosaic's
+5×3 tiles plus metadata and archive HEAD (or the current newest cost, if larger).
+This preserves the interactive reserve even when the next zoom needs more tiles.
+Supersession queues one notice, but a newer intent's acknowledgement takes priority
+over an older queued notice. Neither failure nor cancellation changes the last
+successfully published crop.
 
 The only status corner is `#rad-note`, a fixed 14px box at top418/right12 with
 `role=status`, `aria-live=polite`, `pointer-events:none`. Priority: refresh,
@@ -528,19 +551,24 @@ retries are idempotent. `X-Radar-Intent-Seq` on loopback wx.json responses gives
 the browser the current authoritative marker even when emitted pixels are older.
 The browser allocates above the maximum server/payload/superseded sequence,
 retains a failed delivery's exact sequence and desired values for retry, and
-flushes queued input as soon as an outstanding poll finishes. A decoded matching
-generation acknowledges presentation; geometry alone is insufficient.
+flushes queued input as soon as an outstanding poll finishes. After posting, the
+page polls every 400 ms until the payload acknowledges the target sequence, then
+returns to two seconds; the fast window expires after 20 s. The delivery header
+alone never ends this window. Geometry acknowledgement updates the map and controls;
+only a decoded matching frame settles the echoes.
 
 Every tile boundary,
 between history frames, before replacing a temporary crop, and before snapshot
-publication checks the stamp again. `_RadarSuperseded` closes the session, removes
-the in-progress temporary file, publishes superseded once, and leaves the last published
+publication checks the stamp again. `_RadarSuperseded` cancels pending tile work,
+drains active requests into the LRU, removes the in-progress temporary file,
+publishes superseded once, and leaves the last published
 result untouched (including a newest frame already published before history).
 Negative entries for an aborted frame are not committed. The single-flight worker
 releases its guard before scheduling an immediate preference check; the normal
-2-second watcher also observes the unserved stamp. This wakeup replaces any
+100 ms watcher also observes the unserved stamp. This wakeup replaces any
 120-second retry and shares all existing rate/cooldown budgets. A request
-is acknowledged only by the decoded authoritative payload, never by an old poll.
+is acknowledged only by its authoritative payload, never by an old poll; its
+echo transform clears only after matching-frame decode.
 
 Loopback polls also accept `&radarCenter=<lat>,<lon>` or
 `&radarCenter=station`. The strict decimal grammar is
@@ -558,8 +586,9 @@ zoom. Bounds, scale and rings are recomputed using that authoritative geometry.
 Zoom persists across reboot; pan is transient.
 
 Pointer Events on the plate share a captured pointer Map: one finger pans, two
-pinch. The three image layers share a transformed wrapper; controls/caption are
-target-gated and remain fixed. Only the plate uses `touch-action:none`. Pan uses
+pinch. The echo canvas and map/overlay layers have independent transforms;
+`#rad-stack` itself never transforms. Controls/caption are target-gated and remain
+fixed. Only the plate uses `touch-action:none`. Pan uses
 independent CSS X/Y scales and the exact Mercator forward/inverse; no
 meters-per-pixel approximation. World edges and a 1.5 viewport-diagonal station
 radius resist at 0.3 and clamp on release. Pinch snaps to integer source limits
@@ -570,10 +599,14 @@ Playback freezes on the currently drawn image through gesture and commit.
 The fence never clears or redraws the echo canvas. Each new gesture starts from
 the held transform, including a fetch already in flight. Steppers, source taps,
 recenter and gesture commits share a 120ms trailing intent debounce. A payload
-arriving under pointers is evaluated once on release: only matching geometry
-can commit and clear the transform, without a spring. Older geometry is discarded. Existing
-generation guards invalidate abandoned decodes; superseded intents cannot replace
-the frozen presentation. Only matching decoded geometry clears the transform.
+arriving under pointers is evaluated once on release. Matching geometry-only
+payloads immediately redraw basemap/graticule, rings, marker, scale and site arcs
+without a map transform. The echo canvas keeps the currently drawn scan, reprojected
+from its own original Mercator geometry at stale opacity (.66). A second gesture
+composes independently from the new map and that held echo. The canvas is never
+cleared for a geometry change. Only matching-frame decode replaces its pixels and
+clears its transform, without a spring. Existing generation guards reject abandoned
+decodes and older intents. History resumes playback as matching frames stream in.
 Reduced motion removes the 160 ms commit spring.
 When displaced, the station/rings travel together, the crosshair disappears, and
 an accent outer ring identifies the station. A bottom-center `Recenter on station`

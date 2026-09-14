@@ -23,10 +23,12 @@ def test_session_reuses_one_connection_and_ipv4_dns(monkeypatch):
     lookup=Mock(return_value=[(socket.AF_INET,socket.SOCK_STREAM,6,'',('192.0.2.1',443))])
     monkeypatch.setattr(transport.socket,'getaddrinfo',lookup)
     conn=Mock(sock=None)
-    conn.getresponse.side_effect=lambda: SimpleNamespace(status=200)
+    conn.getresponse.side_effect=lambda: SimpleNamespace(status=200, length=0, close=lambda:None)
     factory=Mock(return_value=conn); monkeypatch.setattr(transport,'_Connection',factory)
     session=transport.RadarSession()
-    for n in range(9): session.open(urllib.request.Request(f'https://radar.example/{n}'),10)
+    for n in range(9):
+        with session.open(urllib.request.Request(f'https://radar.example/{n}'),10): pass
+        session.begin_pass()
     assert lookup.call_count==factory.call_count==1
     assert lookup.call_args.args==('radar.example',443,socket.AF_INET,socket.SOCK_STREAM)
     assert conn.request.call_count==9
@@ -35,7 +37,7 @@ def test_session_reuses_one_connection_and_ipv4_dns(monkeypatch):
 
 def test_oversized_response_discards_socket(make_emitter, monkeypatch):
     emitter=make_emitter(); emitter._radar_session=transport.RadarSession()
-    conn=Mock(); emitter._radar_session.connections[('radar.example',443)]=conn
+    conn=Mock(); emitter._radar_session.connections[('radar.example',443)]=[conn]
     monkeypatch.setattr(emitter._radar_session,'open',lambda *a,**k:io.BytesIO(b'x'*(2*1024*1024+1)))
     with pytest.raises(ValueError,match='oversized'):
         emitter._radar_request('iem-mrms-lcref','https://radar.example/tile',ae.time.monotonic()+10)
@@ -76,7 +78,7 @@ def test_readiness_lag_and_fail_fast(make_emitter,hybrid):
     assert gets
     stamps=[datetime.strptime(u.split('lcref-')[1].split('/')[0],'%Y%m%d%H%M').replace(tzinfo=timezone.utc).timestamp() for u in gets]
     assert all(hybrid.now-ts>=300 for ts in stamps)
-    assert len(stamps)==len(set(stamps))  # exactly one tile per failed candidate
+    assert all(stamps.count(t)<=4 for t in set(stamps))  # only the initial in-flight batch
     assert emitter._radar_result.source_id=='rainviewer'
 
 
@@ -84,7 +86,7 @@ def test_placeholder_fail_fast(make_emitter,hybrid):
     hybrid.tile=png((255,0,0,255))
     emitter=make_emitter(); emitter._do_radar()
     gets=[c[2].split('lcref-')[1].split('/')[0] for c in hybrid.calls if 'mrms::' in c[2]]
-    assert gets and len(gets)==len(set(gets))
+    assert gets and all(gets.count(t)<=4 for t in set(gets))
 
 
 def test_stickiness_logs_failure_then_switch_and_recovery(make_emitter,hybrid,monkeypatch):

@@ -224,7 +224,7 @@ def test_supersede_tile_boundary_immediate_new_pass(make_emitter, hybrid, monkey
     assert emitter._radar_result is old and emitter._radar_restart
     assert emitter._radar_refresh['state'] == 'superseded' and not emitter._radar_negative
     assert not list(Path(ae.RADAR_DIR).rglob('*.tmp.*'))
-    assert len(closed)==1 and not emitter._inflight
+    assert not closed and not emitter._inflight
     assert 'radar' not in emitter._retries
     assert any(e.timeout==0 for e in clock.events)
     intents = []
@@ -234,7 +234,9 @@ def test_supersede_tile_boundary_immediate_new_pass(make_emitter, hybrid, monkey
         intents.append(emitter._radar_refresh['intent'])
     monkeypatch.setattr(emitter, '_radar_publish_refresh', record)
     clock.advance(ae.EMIT_INTERVAL)
-    assert len(closed)==2 and not emitter._radar_restart and intents
+    assert not emitter._radar_restart and intents
+    # Provider fallback may drop IEM, but normal same-provider passes keep it.
+    if preference != 'radar_source': assert not closed
     expect = {'radar_zoom': ('zoom',9), 'radar_source': ('source','site'),
               'radar_center': ('center',dict(lat=47.8, lon=-122.3)), 'radar_intent': ('seq',41)}[preference]
     assert all(intent[expect[0]]==expect[1] for intent in intents)
@@ -459,7 +461,7 @@ def test_superseded_notice_survives_replacement_pass_once(make_emitter,hybrid,tm
     hybrid.failure=None;emitter._do_radar()
     assert emitter._radar_refresh['state']=='idle'
     first=emitter._build_payload()['radar'];second=emitter._build_payload()['radar']
-    assert first['refresh']['state']=='superseded' and first['intent']['seq']==0
+    assert first['refresh']['state']=='idle' and first['intent']['seq']==42  # current acknowledgement wins
     assert second['refresh']['state']=='idle' and second['intent']['seq']==42
 
 
@@ -509,10 +511,11 @@ def test_back_to_back_budget_defers_before_progress(make_emitter,hybrid,monkeypa
     monkeypatch.setattr(emitter,'_radar_publish_refresh',publish)
     before=len(hybrid.calls);emitter._do_radar()
     assert emitter._radar_result is previous and emitter._radar_refresh['state']=='idle'
-    assert not phases and len(hybrid.calls)==before
+    assert phases==['newest','idle'] and len(hybrid.calls)==before
+    assert emitter._build_payload()['radar']['geometryOnly']
     assert delays==[65 if cooldown else 50]
-    assert emitter._radar_refresh['frameTotal']==len(previous.frames)
-    assert emitter._radar_refresh['frameIndex']==sum(f['complete'] for f in previous.frames)
+    assert emitter._radar_refresh['frameTotal']==1
+    assert emitter._radar_refresh['frameIndex']==0
 
 
 @pytest.mark.parametrize('previous,external',[(True,False),(False,False),(True,True)])
@@ -559,7 +562,7 @@ def test_corrupt_warm_cache_rebuilt(make_emitter,hybrid,bad):
     info=PngInfo();info.add_text('radarRemap','broken' if bad=='json' else json.dumps(meta));image.save(path,pnginfo=info)
     if bad=='truncated':path.write_bytes(path.read_bytes()[:80])
     hybrid.calls.clear();emitter._do_radar()
-    assert any('mrms::' in c[2] for c in hybrid.calls)
+    assert not any('mrms::' in c[2] for c in hybrid.calls)  # rebuild from native LRU
     with Image.open(path) as im:im.load();assert im.size==(956,490)
     assert emitter._radar_refresh['state']=='idle'
 
@@ -609,7 +612,8 @@ def test_real_worker_supersede_at_network_barrier(make_emitter,hybrid,tmp_path):
     try:
         assert entered.wait(10)
         (tmp_path/'radar_intent').write_text(json.dumps(dict(seq=42,zoom=9,source='mosaic',center='station')))
-        assert emitter._build_payload()['radar']['latest']==old.latest
+        assert emitter._build_payload()['radar']['geometryOnly']
+        assert emitter._radar_result is old
     finally:release.set();worker.join(10)
     assert not worker.is_alive() and emitter._radar_restart and emitter._radar_result is old
     assert not emitter._radar_negative and not list(Path(ae.RADAR_DIR).rglob('*.tmp.*'))

@@ -4,6 +4,21 @@ Changes in this fork's Almanac work, newest first. The upstream WeatherFlow
 PiConsole keeps its own release notes; entries under **Core** below are fixes
 to shared upstream code that the classic console benefits from too.
 
+## 2026-09-14
+
+### Radar
+- **Map first, echoes follow.** Zoom and pan publish the new geography before any
+  radar request. The map, station, rings and scale settle immediately; the drawn
+  scan keeps its own reprojection at stale opacity until matching echoes decode.
+  A second press continues from that held scan. The plate stays painted throughout.
+- **Stop paying twice for the same tiles.** A bounded native-tile cache keeps valid
+  downloads from superseded passes. Four concurrent tile fetches share persistent
+  IPv4/SNI connections across passes; failures and idle sockets are discarded.
+  The 90/minute limiter remains shared, with enough history reserve for the next
+  widest mosaic. Worker publications emit immediately, intent checks run at 100 ms,
+  and the page polls at 400 ms until acknowledged, capped at 20 seconds. The single
+  refresh note keeps its 600 ms suppression and honest restarted/failure copy.
+
 ## 2026-09-13
 
 ### Radar

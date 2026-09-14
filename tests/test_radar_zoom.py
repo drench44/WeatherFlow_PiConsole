@@ -133,7 +133,9 @@ def test_zoom_during_429_obeys_source_cooldown(make_emitter, hybrid, tmp_path, r
     (tmp_path / 'radar_zoom').write_text('8')
     hybrid.failure = None; hybrid.calls.clear(); emitter._do_radar()
     assert all(c[0] == 'rainviewer' for c in hybrid.calls)
-    assert emitter._build_payload()['radar']['zoomCapped']
+    r = emitter._build_payload()['radar']
+    assert r['geometryOnly'] and r['zoom']==8 and r['refresh']['state']=='idle'
+    assert not hybrid.calls  # map geometry needs no capacity or provider request
     hybrid.mono = 179; hybrid.calls.clear(); emitter._do_radar()
     assert all(c[0] == 'rainviewer' for c in hybrid.calls)
     hybrid.mono = 180; emitter._do_radar()

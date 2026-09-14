@@ -581,7 +581,7 @@
   .rad-recenter { position:absolute; left:calc(50% + 38px); bottom:12px; z-index:4; transform:translateX(-50%); }
   .rad-recenter[hidden] { display:none; }
   .rad-over .rad-station-accent { fill:none; stroke:var(--accent); stroke-width:1.5; }
-  .rad-base, .rad-echo, .rad-over { position: absolute; inset: 0; width: 100%; height: 100%; }
+  .rad-base, .rad-echo, .rad-over { transform-origin:0 0; position: absolute; inset: 0; width: 100%; height: 100%; }
   .rad-base { z-index: 0; }
   .rad-echo { z-index: 1; }
   .rad-over { z-index: 2; }
@@ -2752,7 +2752,9 @@
       (r.sourceId || 'rainviewer')==='rainviewer' ? 'Global mosaic · ' : 'MRMS mosaic · '));
     var credit=document.createElement('a'); credit.id='rad-attrib'; credit.className='rad-attrib';
     credit.textContent=(r.sourceId || 'rainviewer')==='rainviewer' ? 'RainViewer' : 'IEM / NOAA';
-    if (/^https:\/\//.test(r.attributionUrl || '')) credit.href=r.attributionUrl;
+    // Attribution is text, never a link: a kiosk has no way back from another site
+    // (a pan that ended on this credit once stranded the panel on the provider's page).
+    credit.removeAttribute('href');
     cap.append(credit);
     if (mode!=='site') cap.append(document.createTextNode(' · '+(r.cadenceSec || 600)/60+' min'));
     if (r.sourceId==='rainviewer') cap.append(document.createTextNode(' · reflectivity only'));
@@ -2830,7 +2832,7 @@
       var mx=$('rad-plate').clientWidth/2,my=$('rad-plate').clientHeight/2;
       radarTransform(g.scale*factor,mx+(g.x-mx)*factor,my+(g.y-my)*factor,true);
       radarGesturePending();
-    }
+    } else if (!radarView.good) radarGesturePending();
     radarZoomRender();
     // Post soon, not on the next 2 s tick — but debounced so a burst of presses
     // still coalesces into ONE server re-composite at the final level.
@@ -2893,13 +2895,20 @@
     radarIdleSync(false);
   }
   function radarTransform(s,x,y,spring) {
-    var g=radarGesture, stack=$('rad-stack');
+    var g=radarGesture, stack=$('rad-echo');
     clearTimeout(g.springTimer); g.springTimer=null;
     stack.style.transition=spring && !radarReduced() ? 'transform 160ms ease-out' : '';
     g.scale=s; g.x=x; g.y=y;
     stack.style.transform=s===1 && x===0 && y===0 ? '' : 'translate('+x+'px,'+y+'px) scale('+s+')';
+    var map=radarView.mapPreview || {scale:1,x:0,y:0}, ratio=s/map.scale;
+    ['rad-base','rad-over'].forEach(function(id) {
+      var layer=$(id), dx=x-map.x*ratio, dy=y-map.y*ratio;
+      layer.style.transition=stack.style.transition;
+      layer.style.transform=Math.abs(ratio-1)<1e-10 && Math.abs(dx)+Math.abs(dy)<1e-8 ? '' :
+        'translate('+dx+'px,'+dy+'px) scale('+ratio+')';
+    });
     if (stack.style.transition) g.springTimer=setTimeout(function() {
-      stack.style.transition=''; g.springTimer=null;
+      stack.style.transition=''; $('rad-base').style.transition=''; $('rad-over').style.transition=''; g.springTimer=null;
     },170);
   }
   function radarGestureFence() {
@@ -2910,7 +2919,10 @@
   }
   function radarGestureReset(spring) {
     var g=radarGesture;
-    g.state='idle'; radarTransform(1,0,0,spring);
+    g.state='idle';
+    if (radarView.holdingGeometry) {
+      var map=radarView.mapPreview; radarTransform(map.scale,map.x,map.y,false);
+    } else { radarView.mapPreview=null; radarTransform(1,0,0,spring); }
     radarIdleSync(false); radarLoopSync();
   }
   function radarGestureCancel() {
@@ -3134,7 +3146,7 @@
   }
   function radarCouldLoop() {
     var ready=radarReady();
-    return radarGesture.state==='idle' && radarView.active && !radarView.pending && !radarView.failed && !document.hidden &&
+    return !radarView.holdingGeometry && radarGesture.state==='idle' && radarView.active && !radarView.pending && !radarView.failed && !document.hidden &&
       ready.length >= 2 && ready.some(f => f.hasEcho) && !radarView.data.stale;
   }
   function radarStopLoop(showLatest) {
@@ -3207,12 +3219,14 @@
   function radarState() {
     var r = radarView.data;
     if (!r || !r.available) return;
+    var holding=radarView.holdingGeometry && radarView.good;
     var hasFrame = (r.frames || []).some(function(f) { return f.id === r.latest; });
     var decoded = radarView.good && (radarView.good.id === r.latest || radarView.failed);
     var state = !hasFrame || (!decoded && !radarView.failed) ? "loading" :
                 r.stale || radarView.failed ? "stale" : radarView.clear ? "clear" : "live";
-    $("rad-echo").hidden = !hasFrame || !decoded;
-    var stamp = !decoded ? null : radarView.failed && radarView.good ? radarView.good.at : r.observedAt;
+    if (holding) state="stale";
+    $("rad-echo").hidden = !holding && (!hasFrame || !decoded);
+    var stamp = holding ? (radarView.current || radarView.good).at : !decoded ? null : radarView.failed && radarView.good ? radarView.good.at : r.observedAt;
     var age = r.ageSec || 0;
     if (radarView.failed && radarView.good) age += Math.max(0, r.observedTs - radarView.good.ts);
     var status = $("rad-status");
@@ -3235,10 +3249,34 @@
     return JSON.stringify([r.sourceId || "rainviewer", r.legend && (r.legend.id || r.legend.colorId),
                            r.siteId, r.center, r.zoom, r.bounds, r.viewport, r.latest]);
   }
+  function radarEchoSettled(r) {
+    radarView.echoGeometry=r; radarView.holdingGeometry=false; radarView.mapPreview=null;
+    radarTransform(1,0,0,false);
+  }
+  function radarGeometryCommit(d) {
+    var r=d.radar, old=radarView.echoGeometry || radarView.data;
+    if (radarView.good && old) {
+      var scale=2**(r.zoom-old.zoom), p=radarWorldPoint(old.center.lat,old.center.lon,r.zoom);
+      var q=radarWorldPoint(r.center.lat,r.center.lon,r.zoom), world=256*2**r.zoom;
+      var dx=((p[0]-q[0]+world/2)%world+world)%world-world/2;
+      var w=$('rad-plate').clientWidth, h=$('rad-plate').clientHeight;
+      var map={scale:scale,x:w/2*(1-scale)+dx*w/956,y:h/2*(1-scale)+(p[1]-q[1])*h/490};
+      radarView.mapPreview=map; radarView.holdingGeometry=true;
+      radarTransform(map.scale,map.x,map.y,false);
+    } else {
+      radarView.mapPreview=null; radarTransform(1,0,0,false);
+    }
+    radarStopLoop(false);
+    radarCommit(d);
+  }
   function renderRadar(d) {
     var r = d.radar, tab = document.querySelector('.tab[data-screen="s-radar"]');
     // Fetch telemetry is independent of decoded pixels and gesture intent guards.
     radarView.refresh = r && r.refresh || {state:'idle'};
+    // Fast polling ends when the intent is acknowledged WITH a frame, not at the
+    // geometry-only map publish: echoes ready at ~0.7 s must not wait for a 2 s tick.
+    if (r && r.intent && radarIntent.targetSeq && r.intent.seq>=radarIntent.targetSeq &&
+        !r.geometryOnly && r.latest) radarFastUntil=0;
     if (r && r.intent) radarIntent.localSeq=Math.max(radarIntent.localSeq,r.intent.seq || 0, radarView.refresh.forSeq || 0);
     var refresh=radarView.refresh;
     if (refresh.state==='failed' && radarView.good) radarView.refreshFailure=true;
@@ -3260,6 +3298,14 @@
     // Reject superseded centers/zooms before they can change generation or pixels.
     if (radarGesture.state==='gesturing') { radarGesture.frozen=d; return; }
     if (radarGesture.state==='committing' && !radarIntentMatches(r)) return;
+    if (r.geometryOnly) {
+      if (!radarIntentMatches(r)) return;
+      var geometryKey=radarPresentationKey(r);
+      if (radarView.geometryIntent!==geometryKey) {
+        radarGestureFence(); radarView.geometryIntent=geometryKey;
+      }
+      radarGeometryCommit(d); return;
+    }
     var frame = (r.frames || []).find(function (f) { return f.id === r.latest && f.complete && f.url; });
     if (!frame) return;
     if (radarView.data && radarView.good && r.sourceId === radarView.data.sourceId && r.siteId === radarView.data.siteId &&
@@ -3279,6 +3325,7 @@
     if (radarView.good && radarView.good.key === key) {
       radarView.failed = false;
       radarView.good.at = frame.at || r.observedAt;
+      if (radarView.holdingGeometry) { radarEchoSettled(r); radarDraw(radarView.good); }
       radarCommit(d);  // successful same-frame refresh: update metadata without a download
       return;
     }
@@ -3336,6 +3383,7 @@
         if (radarView.active) { radarView.loaded = staged; radarUpdateReady(); }
         else staged.forEach(f => f.bitmap.close());
         image.onload = image.onerror = null;
+        radarEchoSettled(current);
         radarView.data = current; radarDraw(radarView.good);
         radarCommit(pending.data);
       } catch (e) { failed(); }
@@ -3402,7 +3450,7 @@
       radarView.geometry = key;
       var over = $("rad-over"); over.replaceChildren();
       radarGraticule();
-      var contributors=(r.sites || []).filter(s => s.contributing);
+      var contributors=(r.sites || []).filter(s => r.geometryOnly || s.contributing);
       $('rad-plate').setAttribute('aria-label','Reflectivity radar'+(contributors.length ? ' · '+contributors.map(s => s.id).join(', ') : ''));
       if (contributors.length>=2) {
         var center=radarWorldPoint(r.center.lat,r.center.lon,r.zoom);
@@ -3463,7 +3511,7 @@
       }
     }
     radarState();
-    radarPreload(r);      /* load the past-hour frames (when the history is present) */
+    if (!r.geometryOnly) radarPreload(r);      /* load the past-hour frames (when the history is present) */
     radarLoopSync();      /* start/continue/stop the loop for the current state */
   }
 
@@ -3480,6 +3528,11 @@
   }
 
   var POLL_MS      = 2000;
+  var radarFastUntil = 0, pollTimer = null;
+  function schedulePoll() {
+    clearTimeout(pollTimer);
+    pollTimer=setTimeout(poll, Date.now()<radarFastUntil ? 400 : POLL_MS);
+  }
   var FETCH_MS     = 4000;   /* deadline for one request; past it we abandon it */
   var failCount    = 0;
   var lastRenderMs = 0;      /* when a frame last reached the screen (not: settled) */
@@ -3495,6 +3548,7 @@
 
   function poll() {
     var started = Date.now();
+    clearTimeout(pollTimer); schedulePoll();
     if (polling) {
       if (started - pollStart < FETCH_MS) return;   /* single flight: never overlap */
       failCount++;              /* never answered, never aborted — that is a miss */
@@ -3522,7 +3576,7 @@
       radarIntent.targetSeq=seq;
       radarIntent.pending={seq:seq, query:zoomQuery+'&radarSeq='+seq};
       radarZoom.sent=radarZoom.desired!==null; radarCenter.sent=radarCenter.desired!==null; radarSource.sent=radarSource.desired!==null;
-      radarIntent.ready=false; radarIntent.postedAt=Date.now(); radarNoteRender();
+      radarIntent.ready=false; radarIntent.postedAt=Date.now(); radarFastUntil=Date.now()+20000; schedulePoll(); radarNoteRender();
     }
     var sentIntent=radarActive && radarGesture.state!=='gesturing' ? radarIntent.pending : null;
     zoomQuery=sentIntent ? sentIntent.query : '';
@@ -3562,7 +3616,7 @@
       .catch(function () { if (gen === pollGen) failCount++; })
       .then(function () {
         clearTimeout(kill);
-        if (gen === pollGen) { polling = false; updateFreshness();
+        if (gen === pollGen) { polling = false; updateFreshness(); schedulePoll();
           if (radarIntent.ready && radarActive && radarGesture.state!=='gesturing') poll();
         }
       });
@@ -3574,7 +3628,7 @@
      a missing key to DASH, so an empty payload is the honest initial pose. */
   render({});
   poll();
-  setInterval(poll, POLL_MS);
+
   setInterval(updateFreshness, 1000);   /* independent of any fetch ever settling */
 </script>
 </body>
