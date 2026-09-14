@@ -76,7 +76,11 @@ RADAR_RAINVIEWER_STALE_SEC = 1200
 # fraction of what one web-map pan asks of the same cache. The native-tile LRU means
 # re-zooms and pans do not spend it again.
 RADAR_REQUESTS_PER_MIN = 240
-RADAR_HISTORY_RESERVE = 17  # worst-case 5x3 mosaic tiles + metadata and archive probe
+# Two worst-case frames (5x3 mosaic tiles + metadata + archive probe each): history
+# backfill must leave the NEXT interaction's newest frame able to start at once even
+# while the previous zoom's history is still streaming. One frame's worth left a
+# zoom's first echoes waiting 3-4 s for headroom on the Pi.
+RADAR_HISTORY_RESERVE = 34
 RADAR_MAX_FRAME_BUILDS_PER_PASS = 20
 RADAR_BUILD_DEADLINE_SEC = 150
 RADAR_HTTP_TIMEOUT_SEC = 10

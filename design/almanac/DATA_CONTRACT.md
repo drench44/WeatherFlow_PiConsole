@@ -639,8 +639,10 @@ no `src`; a tick neither fetches nor decodes. A monotonic requestAnimationFrame
 clock uses 110ms steps and an 1100ms newest hold. RainViewer short loops use
 `clamp(2400/frameCount,110,180)` ms (the design's explicit formula). A 120ms
 opacity dip marks rewind; no crossfade blends scans. A contiguous ready suffix
-ending at newest starts when eight frames are ready (or a smaller supplied
-history finishes decoding), then extends as older frames become ready.
+ending at newest starts when four frames are ready (or a smaller supplied
+history finishes decoding), then extends as older frames become ready — a
+loop that waited for eight left the panel on "Buffering" for 30–45 s after
+every new zoom while frames were visibly arriving.
 Buffering disables Play and displays `Buffering · N of M`. Partial history
 reports its actual oldest time; no duplicate/padded scans. The browser retains
 at most **16 956×490 bitmaps (~29 MiB)** plus its static newest image/canvas.

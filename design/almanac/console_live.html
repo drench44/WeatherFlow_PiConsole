@@ -3182,7 +3182,9 @@
   function radarLoopSync() {
     var loop=$("rad-loop"), play=$("rad-play"), r=radarView.data, ready=radarReady();
     if (!radarView.active || !r) { radarStopLoop(false); loop.hidden=true; return; }
-    var buffering=!radarView.bufferDone && ready.length < Math.min(8,radarView.loaded.length);
+    // Start looping as soon as four scans are decoded and grow as the rest stream in:
+    // waiting for eight left the panel on "Buffering" for 30-45 s after every new zoom.
+    var buffering=!radarView.bufferDone && ready.length < Math.min(4,radarView.loaded.length);
     var clear=radarView.clear && !ready.some(f => f.hasEcho || f.legend && f.legend.remapped===false) &&
       !(r.sites || []).some(s => s.reason);
     loop.hidden=radarView.loaded.length < 2 && !clear;

@@ -205,6 +205,7 @@ def test_cache_identity_source_viewport_and_total_outage(make_emitter, hybrid):
 
 def test_cold_warm_unviewed_counts_history_limit_and_atomic(make_emitter, hybrid, monkeypatch):
     monkeypatch.setattr(ae, 'RADAR_REQUESTS_PER_MIN', 90)  # the counts below are budget-relative
+    monkeypatch.setattr(ae, 'RADAR_HISTORY_RESERVE', 17)
     hybrid.view()
     emitter = make_emitter()
     snapshots = []
@@ -240,6 +241,7 @@ def test_cold_warm_unviewed_counts_history_limit_and_atomic(make_emitter, hybrid
 
 def test_unviewed_counts_and_open_warms_unchanged(make_emitter, hybrid, monkeypatch):
     monkeypatch.setattr(ae, 'RADAR_REQUESTS_PER_MIN', 90)  # the counts below are budget-relative
+    monkeypatch.setattr(ae, 'RADAR_HISTORY_RESERVE', 17)
     emitter = make_emitter(); emitter._do_radar()
     assert len(hybrid.calls) == 14  # metadata + HEAD + 12 covering tiles
     assert sum(f['complete'] for f in emitter._radar_frames) == 1
