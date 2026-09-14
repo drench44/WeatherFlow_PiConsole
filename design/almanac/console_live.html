@@ -569,7 +569,7 @@
   :root[data-tabs="on"] .page[data-screen="s-radar"] .alert-strip { height:19px; min-height:0; padding:0 5px; margin:0; }
   #s-radar .sc-head { flex-shrink:0; padding-left:13px; padding-right:13px; }
   #s-radar .sc-body { display: block; gap: 0; padding: 0; }
-  .rad-plate { position: relative; width: 956px; height: 490px;
+  .rad-plate { --ink-soft:color-mix(in srgb, var(--ink) 78%, var(--paper)); position: relative; width: 956px; height: 490px;
     margin: 0; border: 1px solid var(--rule); background: var(--paper); touch-action:none; overflow:hidden; }
   .rad-plate::before { content: ""; position: absolute; inset: 4px;
     border: 1px solid var(--rule-faint); pointer-events: none; z-index: 3; }
@@ -579,16 +579,14 @@
   }
   .rad-stack { position:absolute; inset:0; transform-origin:0 0; pointer-events:none; }
   .rad-recenter { position:absolute; left:calc(50% + 38px); bottom:12px; z-index:4; transform:translateX(-50%); }
-  .rad-recenter[hidden], .rad-updating[hidden] { display:none; }
-  .rad-updating { position:absolute; left:50%; top:76px; transform:translateX(-50%); z-index:4;
-    padding:3px 7px; background:var(--plate-scrim); color:var(--ink-soft); font:12px var(--sans); }
+  .rad-recenter[hidden] { display:none; }
   .rad-over .rad-station-accent { fill:none; stroke:var(--accent); stroke-width:1.5; }
   .rad-base, .rad-echo, .rad-over { position: absolute; inset: 0; width: 100%; height: 100%; }
   .rad-base { z-index: 0; }
   .rad-echo { z-index: 1; }
   .rad-over { z-index: 2; }
   .rad-echo[hidden], #rad-nexrad-row[hidden], .tab[hidden] { display: none; }
-  .rad-plate[data-state="stale"] .rad-echo { opacity: .55; }
+  .rad-plate[data-state="stale"] .rad-echo { opacity: .66; }
   #rad-status[data-state="stale"] { color: var(--accent); }
   .rad-attrib { position: absolute; right: 12px; bottom: 9px; z-index: 2;
     font: 11.5px var(--sans); color: var(--ink-soft); }
@@ -633,8 +631,6 @@
   .rad-reset[hidden] { display: none; }
   .rad-reset:active { opacity: .5; }
   .rad-zoom[data-state="pending"] .rad-zoom-read { opacity: .45; }
-  .rad-zoom-note { margin-top: 6px; font: 11.5px var(--sans); color: var(--ink-soft); letter-spacing: .02em; }
-  .rad-zoom-note[hidden] { display: none; }
   #rad-asof { font: 17px var(--serif); font-variant-numeric: tabular-nums; }
   #rad-status { font-size: 11.5px; }
   :root { --plate-scrim: rgba(242,237,226,.82); }
@@ -667,14 +663,20 @@
   .rad-legend-unit { flex:0 0 34px; padding-right:6px; text-align:right; font:11.5px/12px var(--sans);
     letter-spacing:.04em; color:var(--ink-soft); }
   .rad-ramp { display:flex; height:12px; width:372px; border:1px solid var(--rule); }
-  .rad-ramp i, .rad-snow-ramp i { flex:1; }
-  .rad-ticks { display:flex; margin-top:3px; margin-left:34px; font:11.5px/13px var(--sans); color:var(--ink-soft); font-variant-numeric:tabular-nums; }
-  .rad-ticks span { flex:1; text-align:center; }
-  .rad-legend[data-snow="on"] .rad-ramp { width:274px; }
-  .rad-legend[data-snow="on"] .rad-ticks { width:274px; }
-  .rad-snow-ramp { display:none; }
-  .rad-legend[data-snow="on"] .rad-snow-ramp { display:flex; width:88px; height:12px; margin-left:10px; border:1px solid var(--rule); }
-  .rad-snow-label { position:absolute; right:0; bottom:4px; width:88px; text-align:center; font:11.5px/13px var(--sans); color:var(--ink-soft); }
+  .rad-ramp { flex:0 0 372px; }
+  .rad-ramp i { flex-basis:0; }
+  .rad-ticks { position:relative; width:372px; height:14px; margin:1px 0 0 34px; }
+  .rad-tick { position:absolute; top:4px; transform:translateX(-50%);
+    font:11.5px/13px var(--sans); color:var(--ink-soft); font-variant-numeric:tabular-nums; }
+  .rad-tick::before { content:""; position:absolute; left:50%; top:-4px;
+    width:1px; height:3px; background:var(--rule); }
+  .rad-tick:first-child { transform:none; }
+  .rad-tick:first-child::before { left:0; }
+  .rad-seg[data-preferred="true"][aria-pressed="false"] {
+    box-shadow:inset 0 -2px 0 0 transparent; border-bottom:2px dotted var(--rule); color:var(--ink-soft); }
+  .rad-over .rad-site-edge { fill:none; stroke:var(--rule-faint); stroke-width:1; stroke-dasharray:2 3; }
+  .rad-over .rad-site-dot { fill:var(--ink-soft); }
+  .rad-over .rad-site-label { fill:var(--ink-soft); font:11.5px var(--sans); letter-spacing:.04em; }
   .rad-loop { position:absolute; left:12px; bottom:12px; z-index:4; margin:0; }
   .rad-play, .rad-step, .rad-reset { background:var(--plate-scrim); }
   .rad-loop-read { padding:3px 7px; background:var(--plate-scrim); }
@@ -684,8 +686,14 @@
   .rad-loop-cap { font:12px var(--sans); letter-spacing:.02em; color:var(--ink-soft); font-variant-numeric:tabular-nums; }
   .rad-zoom { position:absolute; right:12px; bottom:12px; z-index:4; gap:10px; margin:0; }
   .rad-zoom-read { padding:4px 8px; background:var(--plate-scrim); }
-  .rad-zoom-note { position:absolute; right:12px; top:418px; height:14px; z-index:4; max-width:300px;
-    margin:0; padding:1px 7px; text-align:right; background:var(--plate-scrim); }
+  #rad-note { position:absolute; right:12px; top:418px; z-index:4;
+    width:auto; max-width:300px; height:14px; margin:0; padding:1px 7px; text-align:right;
+    white-space:nowrap; overflow:hidden; background:var(--plate-scrim);
+    font:11.5px/12px var(--sans); color:var(--ink-soft); letter-spacing:.02em;
+    font-variant-numeric:tabular-nums; pointer-events:none; opacity:0; transition:opacity 120ms linear; }
+  #rad-note[data-shown="true"] { opacity:1; }
+  @media (prefers-reduced-motion:reduce) { #rad-note { transition:none; } }
+
   @media (prefers-reduced-motion:reduce) { .rad-track i { transition:none; } }
 
   .sc { flex-direction: column; }
@@ -1159,7 +1167,6 @@
         <svg class="rad-over" id="rad-over" viewBox="0 0 956 490" preserveAspectRatio="none" aria-label="Station, range rings and distance scale"></svg>
         </div>
         <button class="rad-step rad-recenter" id="rad-recenter" type="button" aria-label="Recenter on station" hidden>↩</button>
-        <span class="rad-updating" id="rad-updating" role="status" hidden>Updating</span>
         <div class="rad-src" id="rad-src" data-mode="mosaic" data-state="confirmed" role="group" aria-label="Radar source">
           <button class="rad-seg" id="rad-src-mosaic" type="button" aria-pressed="true">Mosaic</button>
           <button class="rad-seg" id="rad-src-site" type="button" aria-pressed="false" disabled>No site</button>
@@ -1173,7 +1180,7 @@
           <button class="rad-step" id="rad-zoom-in" type="button" aria-label="Zoom in — closer">+</button>
           <button class="rad-reset" id="rad-zoom-reset" type="button" aria-label="Reset zoom to automatic" hidden>&#8635;</button>
         </div>
-        <div class="rad-zoom-note" id="rad-zoom-note" hidden></div>
+        <div id="rad-note" role="status" aria-live="polite" data-shown="false"></div>
         <div class="rad-legend" id="rad-legend"></div>
         <div class="rad-loop" id="rad-loop" hidden>
           <button class="rad-play" id="rad-play" type="button" aria-label="Pause radar loop">&#10073;&#10073;</button>
@@ -2683,56 +2690,107 @@
   /* Atomically stage source pixels, legend, geometry and scan time. */
   var radarView = { geometry: null, legendKey: null, good: null, pending: null,
                     generation: 0, wantedKey: null, current: null,
-                    failed: false, clear: false, retryAt: 0, data: null,
+                    failed: false, clear: false, retryAt: 0, data: null, refresh: {state:'idle'},
                     loaded: [], loadKey: null, idx: 0, timer: null, paused: false, active: false };
 
   // Only unconfirmed input is local. Committed zoom and source range come from
   // the decoded payload; never persist browser state or resize the echo in CSS.
-  var radarSource = {desired:null, sent:false, failedUntil:0, failedSite:null};
+  var radarSource = {desired:null, sent:false};
+  var radarIntent = {localSeq:0, pending:null, targetSeq:0, timer:null, ready:false, postedAt:0, restartUntil:0, restartKey:null};
+  function radarPostIntent() {
+    clearTimeout(radarIntent.timer); radarIntent.ready=false;
+    radarIntent.timer=setTimeout(function() {
+      radarIntent.timer=null; radarIntent.ready=true; poll();
+    },120);
+  }
+  function radarNoteRender() {
+    var r=radarView.data, f=radarView.refresh || {state:'idle'}, note=$('rad-note'), copy='';
+    clearTimeout(radarIntent.noteTimer);
+    if (!r) { note.dataset.shown='false'; return; }
+    var elapsed=Date.now()-radarIntent.postedAt;
+    if (elapsed<600) {
+      radarIntent.noteTimer=setTimeout(radarNoteRender,601-elapsed);
+      note.dataset.shown='false'; return;
+    }
+    if (Date.now()<radarIntent.restartUntil) {
+      copy='Refreshing · restarted';
+      radarIntent.noteTimer=setTimeout(radarNoteRender,radarIntent.restartUntil-Date.now()+1);
+    } else if (f.forSeq<radarIntent.localSeq && ['newest','history','superseded'].includes(f.state)) copy='Refreshing · restarted';
+    else if (radarView.refreshFailure) copy="Couldn't refresh · showing "+radarFrameLabel(radarView.current || radarView.good || {});
+    else if (f.state==='newest') copy='Refreshing · newest frame';
+    else if (f.state==='history') copy='Refreshing · frame '+f.frameIndex+' of '+f.frameTotal;
+    else if (f.state==='failed') copy="Couldn't refresh · showing "+radarFrameLabel(radarView.current || radarView.good || {});
+    if (!copy) copy=radarView.zoomNote || '';
+    if (!copy && r.sourceFallback==='site-zoom-floor' && radarSource.desired!=='mosaic') {
+      var site=(r.sources || []).find(s => s.mode==='site');
+      if (site && site.siteId) copy=site.siteId+' resumes at zoom '+r.siteResumeZoom;
+    }
+    note.textContent=copy; note.dataset.shown=String(!!copy);
+  }
   function radarSourceRender() {
     var r=radarView.data; if (!r) return;
     var site=(r.sources || []).find(s => s.mode==='site');
-    var mode=r.sourceMode || "mosaic", picker=$("rad-src"), button=$("rad-src-site");
-    if (radarSource.desired!==null && radarSource.sent &&
-        (mode===radarSource.desired || (site && !site.available))) {
-      if (mode!==radarSource.desired) {
-        radarSource.failedUntil=Date.now()+8000; radarSource.failedSite=site.siteId;
-        setTimeout(radarSourceRender,8001);
-      }
+    var mode=r.sourceMode || 'mosaic', picker=$('rad-src'), button=$('rad-src-site');
+    if (radarSource.sent && (r.sourcePref || mode)===radarSource.desired) {
       radarSource.desired=null; radarSource.sent=false;
     }
     picker.hidden=(r.sourceId || 'rainviewer')==='rainviewer';
-    picker.dataset.mode=radarSource.desired || mode;
-    picker.dataset.state=radarSource.desired ? "pending" : "confirmed";
-    picker.setAttribute("aria-busy",String(!!radarSource.desired));
-    $("rad-src-mosaic").setAttribute("aria-pressed",String(picker.dataset.mode==='mosaic'));
-    button.setAttribute("aria-pressed",String(picker.dataset.mode==='site'));
-    button.textContent=site && site.reason!=='no site in range' && site.siteId ? site.siteId : "No site";
-    button.disabled=!(site && site.available);
-    var cap=$("rad-src-cap"), n=r.nexrad;
-    cap.replaceChildren(document.createTextNode(mode==='site' && n ?
-      n.id+" "+n.name+" · "+n.distanceDisp+" "+n.bearing+" · ~5 min volume · " :
-      (r.sourceId || 'rainviewer')==='rainviewer' ? "Global mosaic · " : "MRMS mosaic · "));
-    var credit=document.createElement("a"); credit.id="rad-attrib"; credit.className="rad-attrib";
-    credit.textContent=(r.sourceId || 'rainviewer')==='rainviewer' ? "RainViewer" : "IEM / NOAA";
-    if (/^https:\/\//.test(r.attributionUrl || "")) credit.href=r.attributionUrl;
+    picker.dataset.mode=mode; picker.dataset.state=radarSource.desired ? 'pending' : 'confirmed';
+    $('rad-src-mosaic').setAttribute('aria-pressed',String(mode==='mosaic'));
+    button.setAttribute('aria-pressed',String(mode==='site'));
+    button.dataset.preferred=String(radarSource.desired!==null ? radarSource.desired==='site' : r.sitePreferred===true);
+    var currentFrame=(r.frames || []).find(f => radarView.current && f.id===radarView.current.id);
+    var contributors=currentFrame && currentFrame.siteScans ? currentFrame.siteScans : (r.sites || []).filter(s => s.contributing);
+    if (mode==='site' && !Array.isArray(r.sites) && !(currentFrame && Array.isArray(currentFrame.siteScans)) && r.siteId)
+      contributors=[{id:r.siteId}];  // legacy single-site payload has no contributor array
+    var extra=Math.max(0,contributors.length-1);
+    var name=(mode==='site' ? (contributors.some(s => s.id===r.siteId) ? r.siteId : contributors[0] && contributors[0].id) : site && site.reason!=='no site in range' && site.siteId) || 'No site';
+    if (mode==='site' && extra) name+=' +'+extra;
+    button.textContent=name; button.disabled=!(site && site.available);
+    var cap=$('rad-src-cap');
+    cap.replaceChildren(document.createTextNode(mode==='site' ? 'NEXRAD · '+name+' · ~5 min volumes · ' :
+      (r.sourceId || 'rainviewer')==='rainviewer' ? 'Global mosaic · ' : 'MRMS mosaic · '));
+    var credit=document.createElement('a'); credit.id='rad-attrib'; credit.className='rad-attrib';
+    credit.textContent=(r.sourceId || 'rainviewer')==='rainviewer' ? 'RainViewer' : 'IEM / NOAA';
+    if (/^https:\/\//.test(r.attributionUrl || '')) credit.href=r.attributionUrl;
     cap.append(credit);
-    if (mode!=='site') cap.append(document.createTextNode(" · "+(r.cadenceSec || 600)/60+" min"));
-    if (r.latestOnly) cap.append(document.createTextNode(" · latest only"));
-    if (r.scanningSlowly) cap.append(document.createTextNode(" · scanning slowly"));
-    if (Date.now()<radarSource.failedUntil) cap.append(document.createTextNode(" · "+radarSource.failedSite+" unavailable"));
-    else if (site && site.reason==='not reporting') cap.append(document.createTextNode(" · not reporting"));
+    if (mode!=='site') cap.append(document.createTextNode(' · '+(r.cadenceSec || 600)/60+' min'));
+    if (r.sourceId==='rainviewer') cap.append(document.createTextNode(' · reflectivity only'));
+    if (r.latestOnly) cap.append(document.createTextNode(' · latest only'));
+    if (r.scanningSlowly) cap.append(document.createTextNode(' · scanning slowly'));
+    if (mode==='site' && r.siteId && !contributors.some(s => s.id===r.siteId))
+      cap.append(document.createTextNode(' · timeline '+r.siteId));
+    ['scan unavailable','deferred','out of view'].forEach(reason => {
+      var affected=(r.sites || []).filter(s => s.reason===reason);
+      if (mode==='site' && affected.length) cap.append(document.createTextNode(' · '+affected.map(s => s.id).join(', ')+' '+reason));
+      else if (site && site.reason===reason) cap.append(document.createTextNode(' · '+site.siteId+' '+reason));
+    });
+    var dark=(r.sites || []).filter(s => s.reason==='not reporting');
+    if (mode==='site' && dark.length) cap.append(document.createTextNode(' · '+dark.map(s => s.id).join(', ')+' not reporting'));
+    else if (site && site.reason==='not reporting') cap.append(document.createTextNode(' · '+site.siteId+' not reporting'));
+    var current=radarView.current, frame=(r.frames || []).find(f => current && f.id===current.id);
+    if ((frame && frame.legend ? frame.legend : r.legend || {}).remapped===false)
+      cap.append(document.createTextNode(' · palette incomplete'));
+    if (r.sourceFallback==='site-zoom-floor' && site && radarSource.desired!=='mosaic') cap.append(document.createTextNode(' · wider than '+site.siteId+' reaches'));
+    radarNoteRender();
   }
-  ["mosaic","site"].forEach(function(mode) {
-    $("rad-src-"+mode).addEventListener("click",function() {
-      radarSource.desired=mode; radarSource.sent=false; radarSourceRender();
+  ['mosaic','site'].forEach(function(mode) {
+    $('rad-src-'+mode).addEventListener('click',function() {
+      radarSource.desired=mode; radarSource.sent=false;
+      if (mode==='site' && radarEffectiveZoom()<7) {
+        var factor=2**(7-radarEffectiveZoom()), g=radarGesture;
+        radarZoom.desired=7; radarZoom.sent=false;
+        var mx=$('rad-plate').clientWidth/2, my=$('rad-plate').clientHeight/2;
+        radarTransform(g.scale*factor,mx+(g.x-mx)*factor,my+(g.y-my)*factor,true);
+      }
+      radarGesturePending(); radarSourceRender(); radarPostIntent();
     });
   });
   var radarZoom = { desired: null, sent: false };
   function radarZoomRender() {
-    var r = radarView.data, rail = $("rad-zoom"), note = $("rad-zoom-note");
+    var r = radarView.data, rail = $("rad-zoom"), note = $("rad-note");
     rail.hidden = !(r && typeof r.zoomAuto === "boolean" && isNum(r.zoomMin) && isNum(r.zoomMax));
-    if (rail.hidden) { note.hidden = true; return; }
+    if (rail.hidden) { radarView.zoomNote=""; radarNoteRender(); return; }
     var pending = radarZoom.desired !== null;
     if (pending && radarZoom.sent &&
         (radarZoom.desired === "auto" ? r.zoomAuto :
@@ -2749,10 +2807,10 @@
     $("rad-zoom-reset").hidden = auto;
     $("rad-zoom-out").disabled = level <= r.zoomMin;
     $("rad-zoom-in").disabled = level >= r.zoomMax;
-    note.textContent = r.zoomCapped && !r.zoomAuto ? (r.zoomDesired < r.zoomMin ? "Set wider than " + r.zoomSource + " reaches — showing its widest." :
-       "Set closer than " + r.zoomSource + " reaches — showing its closest.") :
+    radarView.zoomNote = r.zoomCapped && !r.zoomAuto && r.zoomDesired > r.zoomMax ?
+      "Set closer than " + r.zoomSource + " reaches — showing its closest." :
       r.zoom >= r.zoomMax ? "Closest view for " + r.zoomSource : "";
-    note.hidden = !note.textContent;
+    radarNoteRender();
   }
   function radarZoomChange(step) {
     var r = radarView.data;
@@ -2768,15 +2826,15 @@
     // frame at the new zoom replaces it when it lands (settle clears the transform).
     // Without this a press showed nothing until the ~2 s poll + re-composite.
     if (radarView.good && radarGesture.state!=='gesturing') {
-      var scale=2**((target==='auto' ? r.zoomAutoLevel : target)-r.zoom);
-      radarTransform(scale,(1-scale)*$('rad-plate').clientWidth/2,(1-scale)*$('rad-plate').clientHeight/2,true);
+      var factor=2**((target==='auto' ? r.zoomAutoLevel : target)-current), g=radarGesture;
+      var mx=$('rad-plate').clientWidth/2,my=$('rad-plate').clientHeight/2;
+      radarTransform(g.scale*factor,mx+(g.x-mx)*factor,my+(g.y-my)*factor,true);
       radarGesturePending();
     }
     radarZoomRender();
     // Post soon, not on the next 2 s tick — but debounced so a burst of presses
     // still coalesces into ONE server re-composite at the final level.
-    clearTimeout(radarZoom.postTimer);
-    radarZoom.postTimer = setTimeout(function () { radarZoom.postTimer = null; poll(); }, 220);
+    radarPostIntent();
   }
   $("rad-zoom-in").addEventListener("click", function () { radarZoomChange(1); });
   $("rad-zoom-out").addEventListener("click", function () { radarZoomChange(-1); });
@@ -2803,7 +2861,7 @@
   }
   var radarCenter = {desired:null, sent:false};
   var radarGesture = {state:'idle', pointers:new Map(), scale:1, x:0, y:0,
-                      idleTimer:null, updateTimer:null, springTimer:null, wheelTimer:null};
+                      idleTimer:null, springTimer:null, wheelTimer:null};
   var RAD_CONTROLS = '.rad-src,.rad-src-cap,.rad-legend,.rad-loop,.rad-zoom,.rad-recenter';
   function radarCenterMatches(r, desired) {
     return desired === null || (desired === 'station' ? r.centered !== false :
@@ -2811,7 +2869,8 @@
   }
   function radarIntentMatches(r) {
     var z=radarZoom.desired;
-    return radarCenterMatches(r,radarCenter.desired) && (z===null ||
+    return (!r.intent || !radarIntent.targetSeq || r.intent.seq===radarIntent.targetSeq) && (radarSource.desired===null || (r.sourcePref || r.sourceMode)===radarSource.desired) &&
+      radarCenterMatches(r,radarCenter.desired) && (z===null ||
       (z==='auto' ? r.zoomAuto : !r.zoomAuto && r.zoomDesired===z && r.zoom===clamp(z,r.zoomMin,r.zoomMax)));
   }
   function radarIdleSync(reset) {
@@ -2847,12 +2906,10 @@
     // Invalidate pending image/history decodes using the existing generation guards.
     ++radarView.generation; radarView.pending=null; radarView.wantedKey=null;
     radarView.loadKey=null; radarView.loadToken=null;
-    radarStopLoop(true);
+    radarStopLoop(false);
   }
   function radarGestureReset(spring) {
     var g=radarGesture;
-    clearTimeout(g.updateTimer); g.updateTimer=null;
-    $('rad-updating').hidden=true; $('rad-plate').setAttribute('aria-busy','false');
     g.state='idle'; radarTransform(1,0,0,spring);
     radarIdleSync(false); radarLoopSync();
   }
@@ -2873,12 +2930,10 @@
   }
   function radarGesturePending() {
     var g=radarGesture;
-    if (radarCenter.desired===null && radarZoom.desired===null) { radarGestureReset(true); return; }
+    if (radarCenter.desired===null && radarZoom.desired===null && radarSource.desired===null) { radarGestureReset(true); return; }
     g.state='committing'; radarGestureFence();
-    $('rad-plate').setAttribute('aria-busy','true');
-    clearTimeout(g.updateTimer);
-    g.updateTimer=setTimeout(function() { $('rad-updating').hidden=false; },2500);
-    radarZoomRender(); radarIdleSync(true);
+    radarZoomRender(); radarIdleSync(true); radarPostIntent();
+    if (g.frozen) { var frozen=g.frozen; g.frozen=null; renderRadar(frozen); }
   }
   function radarRecenter() {
     if (!radarView.active || document.hidden || !radarView.data) return;
@@ -2951,7 +3006,7 @@
     if (g.pointers.size) radarGestureFinishMode();
     else {
       g.before={zoom:Object.assign({},radarZoom),center:Object.assign({},radarCenter)};
-      radarGestureFence(); clearTimeout(g.updateTimer); $('rad-updating').hidden=true;
+      radarGestureFence();
     }
     g.state='gesturing'; g.pointers.set(e.pointerId,{x:e.clientX,y:e.clientY});
     // Synthetic PointerEvents have no UA-active pointer; real touches/mouse capture.
@@ -2993,6 +3048,7 @@
     var step=e.deltaY<0 ? 1 : -1;
     radarGesture.wheelTimer=setTimeout(function() {
       radarGesture.wheelTimer=null; radarZoomChange(step);
+      clearTimeout(radarIntent.timer); radarIntent.timer=null; radarIntent.ready=true; poll();
     },120);
   },{passive:false});
 
@@ -3017,8 +3073,11 @@
     ctx.clearRect(0, 0, echo.width, echo.height);
     ctx.drawImage(fr.bitmap || fr.img, 0, 0, echo.width, echo.height);
     echo.hidden = false; radarView.current = fr;
+    var remapped=fr.legend ? fr.legend.remapped : radarView.data.legend && radarView.data.legend.remapped;
+    if (radarView.shownRemapped!==remapped) { radarView.shownRemapped=remapped; radarSourceRender(); }
     $("rad-frame-time").textContent = radarFrameLabel(fr) + " · " +
       (fr.ts === radarView.data.observedTs ? "newest" : "−" + Math.round((radarView.data.observedTs-fr.ts)/60) + " min");
+    radarNoteRender(); radarSourceRender();
     var ready = radarReady(), index = ready.indexOf(fr);
     $("rad-tick").style.left = (ready.length > 1 ? Math.max(0,index)/(ready.length-1)*218 : 218) + "px";
   }
@@ -3039,7 +3098,10 @@
     var complete = (r.frames || []).filter(f => f.complete && f.url).slice(-RAD_MAX_DECODED);
     var generation = radarView.generation;
     var key = generation + ":" + complete.map(f => f.id + f.url).join(",");
-    if (key === radarView.loadKey) return;
+    if (key === radarView.loadKey) {
+      radarView.loaded.forEach(fr => { var current=complete.find(f => f.id===fr.id); if (current) Object.assign(fr,current); });
+      return;
+    }
     radarView.loadKey = key;
     var token = {}; radarView.loadToken = token;
     var have = new Map(radarView.loaded.map(f => [f.id, f]));
@@ -3109,11 +3171,16 @@
     var loop=$("rad-loop"), play=$("rad-play"), r=radarView.data, ready=radarReady();
     if (!radarView.active || !r) { radarStopLoop(false); loop.hidden=true; return; }
     var buffering=!radarView.bufferDone && ready.length < Math.min(8,radarView.loaded.length);
-    var clear=radarView.clear && !ready.some(f => f.hasEcho);
+    var clear=radarView.clear && !ready.some(f => f.hasEcho || f.legend && f.legend.remapped===false) &&
+      !(r.sites || []).some(s => s.reason);
     loop.hidden=radarView.loaded.length < 2 && !clear;
     $("rad-track").hidden=clear;
     play.hidden=clear; play.disabled=buffering;
     if (clear) { radarStopLoop(true); $("rad-frame-time").textContent="No echoes · clear"; return; }
+    if (radarView.current) {
+      var fr=radarView.current;
+      $("rad-frame-time").textContent=radarFrameLabel(fr)+" · "+(fr.ts===r.observedTs ? "newest" : "−"+Math.round((r.observedTs-fr.ts)/60)+" min");
+    }
     if (buffering) {
       radarStopLoop(true); $("rad-frame-time").textContent="Buffering · " + ready.length + " of " + radarView.loaded.length; return;
     }
@@ -3166,10 +3233,20 @@
   }
   function radarPresentationKey(r) {
     return JSON.stringify([r.sourceId || "rainviewer", r.legend && (r.legend.id || r.legend.colorId),
-                           r.center, r.zoom, r.bounds, r.viewport, r.latest]);
+                           r.siteId, r.center, r.zoom, r.bounds, r.viewport, r.latest]);
   }
   function renderRadar(d) {
     var r = d.radar, tab = document.querySelector('.tab[data-screen="s-radar"]');
+    // Fetch telemetry is independent of decoded pixels and gesture intent guards.
+    radarView.refresh = r && r.refresh || {state:'idle'};
+    if (r && r.intent) radarIntent.localSeq=Math.max(radarIntent.localSeq,r.intent.seq || 0, radarView.refresh.forSeq || 0);
+    var refresh=radarView.refresh;
+    if (refresh.state==='failed' && radarView.good) radarView.refreshFailure=true;
+    else if (refresh.state==='idle' || refresh.frameIndex>0 && ['newest','history'].includes(refresh.state)) radarView.refreshFailure=false;
+    if (refresh.state==='superseded' && radarIntent.restartKey!==refresh.forSeq) {
+      radarIntent.restartKey=refresh.forSeq; radarIntent.restartUntil=Math.max(Date.now(),radarIntent.postedAt+600)+800;
+    }
+    radarNoteRender();
     tab.hidden = !(r && r.available);
     document.querySelector(".page").dataset.radarAlerts = d.alerts && d.alerts.length ? "on" : "off";
     if (tab.hidden) {
@@ -3181,11 +3258,11 @@
     }
     // Freeze the complete presentation, including same-frame polls, under fingers.
     // Reject superseded centers/zooms before they can change generation or pixels.
-    if (radarGesture.state==='gesturing' ||
-        (radarGesture.state==='committing' && !radarIntentMatches(r))) return;
+    if (radarGesture.state==='gesturing') { radarGesture.frozen=d; return; }
+    if (radarGesture.state==='committing' && !radarIntentMatches(r)) return;
     var frame = (r.frames || []).find(function (f) { return f.id === r.latest && f.complete && f.url; });
     if (!frame) return;
-    if (radarView.data && radarView.good && r.sourceId === radarView.data.sourceId &&
+    if (radarView.data && radarView.good && r.sourceId === radarView.data.sourceId && r.siteId === radarView.data.siteId &&
         JSON.stringify(r.center) === JSON.stringify(radarView.data.center) && r.zoom === radarView.data.zoom &&
         r.observedTs < radarView.good.ts) {
       radarView.data.ageSec = Math.max(radarView.data.ageSec || 0, (d.ts || Date.now()/1000)-radarView.good.ts);
@@ -3210,7 +3287,7 @@
     var generation = radarView.generation, image = new Image();
     var pending = { data: d };
     radarView.pending = pending;
-    radarStopLoop(true); $("rad-loop").hidden = true;
+    radarStopLoop(false); $("rad-loop").hidden = true;
     image.decoding = "async";
     function failed() {
       if (generation !== radarView.generation || radarView.pending !== pending) return;
@@ -3252,7 +3329,9 @@
         var current = pending.data.radar;
         radarView.good = {key:key, id:frame.id, url:frame.url, ts:frame.ts, at:frame.at || current.observedAt, img:image};
         radarView.current = radarView.good;
-        radarView.clear = clear; radarView.failed = false; radarView.pending = null; radarView.retryAt = 0;
+        radarView.clearPixels = clear;
+        radarView.clear = clear && (frame.legend || r.legend || {}).remapped!==false &&
+          !(r.sites || []).some(s => s.reason); radarView.failed = false; radarView.pending = null; radarView.retryAt = 0;
         radarRelease(); radarView.idx = 0;
         if (radarView.active) { radarView.loaded = staged; radarUpdateReady(); }
         else staged.forEach(f => f.bitmap.close());
@@ -3312,15 +3391,43 @@
   function radarCommit(d) {
     var r = d.radar;
     radarView.data = r;
+    radarView.clear = radarView.clearPixels && (r.legend || {}).remapped!==false &&
+      (r.frames || []).every(f => !f.complete || !f.legend || f.legend.remapped!==false) && !(r.sites || []).some(s => s.reason);
     var settled=radarGesture.state==='committing' && radarIntentMatches(r) &&
       radarView.good && radarView.good.id===r.latest && !radarView.pending;
     radarZoomRender(); radarCenterRender();
     if (settled) radarGestureReset(false);
-    var key = JSON.stringify([r.centered, r.zoom, r.metersPerPixel, r.bounds, r.marker, r.rings, r.scaleBar, r.basemap && r.basemap.hash]);
+    var key = JSON.stringify([r.centered, r.zoom, r.metersPerPixel, r.bounds, r.marker, r.rings, r.scaleBar, (r.sites || []).map(s => [s.id,s.lat,s.lon,s.contributing]), r.basemap && r.basemap.hash]);
     if (radarView.geometry !== key) {
       radarView.geometry = key;
       var over = $("rad-over"); over.replaceChildren();
       radarGraticule();
+      var contributors=(r.sites || []).filter(s => s.contributing);
+      $('rad-plate').setAttribute('aria-label','Reflectivity radar'+(contributors.length ? ' · '+contributors.map(s => s.id).join(', ') : ''));
+      if (contributors.length>=2) {
+        var center=radarWorldPoint(r.center.lat,r.center.lon,r.zoom);
+        contributors.forEach(function(site) {
+          if (!isNum(site.lat) || !isNum(site.lon)) return;
+          function point(lat,lon) {
+            var p=radarWorldPoint(lat,lon,r.zoom), world=256*2**r.zoom;
+            return [((p[0]-center[0]+world/2)%world+world)%world-world/2+478,p[1]-center[1]+245];
+          }
+          // Geodesic circle, projected into this viewport (Mercator is not equidistant).
+          var path='', a=site.lat*Math.PI/180, l=site.lon*Math.PI/180, d=230000/6371008.8;
+          for (var i=0;i<=120;i++) {
+            var bearing=i/120*2*Math.PI, lat=Math.asin(Math.sin(a)*Math.cos(d)+Math.cos(a)*Math.sin(d)*Math.cos(bearing));
+            var lon=l+Math.atan2(Math.sin(bearing)*Math.sin(d)*Math.cos(a),Math.cos(d)-Math.sin(a)*Math.sin(lat));
+            var p=point(lat*180/Math.PI,lon*180/Math.PI);
+            path+=(i?'L':'M')+p[0].toFixed(1)+','+p[1].toFixed(1);
+          }
+          el('path',{class:'rad-site-edge',d:path+'Z'},over);
+          var p=point(site.lat,site.lon), labelY=p[1]+13;
+          if (p[0]>=0 && p[0]+42<=956 && p[1]>=0 && p[1]<=490 && labelY-12>=76 && labelY<=412) {
+            el('circle',{class:'rad-site-dot',cx:p[0],cy:p[1],r:2},over);
+            el('text',{class:'rad-site-label',x:p[0]+5,y:labelY},over).textContent=site.id;
+          }
+        });
+      }
       var x = r.marker.x * 956, y = r.marker.y * 490;
       (r.rings || []).forEach(function (ring) {
         el("circle", {class:"ring", cx:x, cy:y, r:ring.px}, over);
@@ -3341,21 +3448,18 @@
     var legendKey = (r.sourceId || "rainviewer") + ":" + (r.legend && (r.legend.id || r.legend.colorId));
     if (r.legend && radarView.legendKey !== legendKey) {
       radarView.legendKey=legendKey;
-      var legend=$("rad-legend"); legend.replaceChildren(); legend.dataset.snow=r.legend.snow ? "on" : "off";
-      var ramps=document.createElement("div"); ramps.className="rad-ramps"; legend.append(ramps);
-      var unit=document.createElement("div"); unit.className="rad-legend-unit"; unit.textContent="dBZ"; ramps.append(unit);
-      var ramp=document.createElement("div"); ramp.className="rad-ramp"; ramp.id="rad-ramp"; ramps.append(ramp);
-      var ticks=document.createElement("div"); ticks.className="rad-ticks"; ticks.id="rad-ticks"; legend.append(ticks);
-      r.legend.rain.forEach(function(stop) {
-        var swatch=document.createElement("i"); swatch.style.backgroundColor=stop.hex; ramp.append(swatch);
-        var tick=document.createElement("span"); tick.textContent=stop.dbz; ticks.append(tick);
+      var legend=$('rad-legend'); legend.replaceChildren();
+      var ramps=document.createElement('div'); ramps.className='rad-ramps'; legend.append(ramps);
+      var unit=document.createElement('div'); unit.className='rad-legend-unit'; unit.textContent='dBZ'; ramps.append(unit);
+      var ramp=document.createElement('div'); ramp.className='rad-ramp'; ramp.id='rad-ramp'; ramps.append(ramp);
+      var ticks=document.createElement('div'); ticks.className='rad-ticks'; ticks.id='rad-ticks'; legend.append(ticks);
+      (r.legend.bands || []).forEach(function(band) {
+        var swatch=document.createElement('i'); swatch.style.flex=String(band.hi-band.lo)+' 1 0px';
+        swatch.style.background='linear-gradient(90deg,'+band.start+','+band.end+')'; ramp.append(swatch);
       });
-      if (r.legend.snow) {
-        var snow=document.createElement("div"); snow.className="rad-snow-ramp"; ramps.append(snow);
-        ["#c3ffffbf",r.legend.snow.hex,"#2f6fffff"].forEach(function(color) {
-          var swatch=document.createElement("i"); swatch.style.backgroundColor=color; snow.append(swatch);
-        });
-        var label=document.createElement("div"); label.className="rad-snow-label"; label.textContent="Snow"; legend.append(label);
+      for (var dbz=10;dbz<=70;dbz+=10) {
+        var tick=document.createElement('span'); tick.className='rad-tick'; tick.textContent=dbz;
+        tick.style.left=((dbz-10)/65*372)+'px'; ticks.append(tick);
       }
     }
     radarState();
@@ -3406,23 +3510,37 @@
        failed request after it must not re-send it */
     var ack = reportRender; reportRender = false;
     var radarActive = $("s-radar").classList.contains("active");
-    var zoomQuery = "";
-    if (radarActive && radarGesture.state!=='gesturing' && radarZoom.desired !== null) {
-      zoomQuery = "&radarZoom=" + encodeURIComponent(radarZoom.desired);
-      radarZoom.sent = true;
+    var zoomQuery = "", posting=radarIntent.ready && radarActive && radarGesture.state!=='gesturing';
+    if (posting) {
+      var r=radarView.data, center=radarCenter.desired!==null ? radarCenter.desired :
+        r.centered===false ? r.center : 'station';
+      var desiredZoom=radarZoom.desired!==null ? radarZoom.desired : r.zoomAuto ? 'auto' : r.zoomDesired!==null && r.zoomDesired!==undefined ? r.zoomDesired : r.zoom;
+      var desiredSource=radarSource.desired!==null ? radarSource.desired : r.sourcePref || r.sourceMode || 'mosaic';
+      zoomQuery='&radarZoom='+encodeURIComponent(desiredZoom)+'&radarSource='+desiredSource+
+        '&radarCenter='+encodeURIComponent(center==='station' ? center : center.lat.toFixed(10)+','+center.lon.toFixed(10));
+      var seq=++radarIntent.localSeq;
+      radarIntent.targetSeq=seq;
+      radarIntent.pending={seq:seq, query:zoomQuery+'&radarSeq='+seq};
+      radarZoom.sent=radarZoom.desired!==null; radarCenter.sent=radarCenter.desired!==null; radarSource.sent=radarSource.desired!==null;
+      radarIntent.ready=false; radarIntent.postedAt=Date.now(); radarNoteRender();
     }
-    if (radarActive && radarGesture.state!=='gesturing' && radarCenter.desired !== null) {
-      var center=radarCenter.desired;
-      zoomQuery += "&radarCenter=" + encodeURIComponent(center==='station' ? center :
-        center.lat.toFixed(10)+','+center.lon.toFixed(10));
-      radarCenter.sent=true;
-    }
-    if (radarActive && radarSource.desired !== null) {
-      zoomQuery += "&radarSource=" + radarSource.desired; radarSource.sent=true;
-    }
+    var sentIntent=radarActive && radarGesture.state!=='gesturing' ? radarIntent.pending : null;
+    zoomQuery=sentIntent ? sentIntent.query : '';
     fetch("wx.json?_=" + started + (ack ? "&r=1" : "") + (radarActive ? "&view=radar" + zoomQuery : ""), opts)
       .then(function (r) {
         if (!r.ok) throw new Error("HTTP " + r.status);
+        var marker=r.headers.get('X-Radar-Intent-Seq');
+        if (!/^[0-9]+$/.test(marker || '')) marker=null;
+        if (marker!==null) {
+          var serverSeq=Number(marker);
+          radarIntent.localSeq=Math.max(radarIntent.localSeq,serverSeq);
+          if (sentIntent && radarIntent.pending===sentIntent && serverSeq>sentIntent.seq) {
+            // A reload raced a newer authoritative generation: reissue the
+            // same desired geometry above it, without regressing the marker.
+            radarIntent.pending=null; radarIntent.ready=true;
+          }
+        }
+        if (sentIntent && radarIntent.pending===sentIntent && (marker===null || Number(marker)===sentIntent.seq)) radarIntent.pending=null;
         var srv = Date.parse(r.headers.get("Date") || "");   /* the producer's clock, 1 s resolution */
         return r.json().then(function (d) { return { d: d, srvMs: srv }; });
       })
@@ -3444,7 +3562,9 @@
       .catch(function () { if (gen === pollGen) failCount++; })
       .then(function () {
         clearTimeout(kill);
-        if (gen === pollGen) { polling = false; updateFreshness(); }
+        if (gen === pollGen) { polling = false; updateFreshness();
+          if (radarIntent.ready && radarActive && radarGesture.state!=='gesturing') poll();
+        }
       });
   }
   /* Paint the no-data state BEFORE the first frame. The markup ships with the

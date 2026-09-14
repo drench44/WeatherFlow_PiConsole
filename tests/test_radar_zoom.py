@@ -75,7 +75,7 @@ def test_zoom_cache_identity_rebuild_and_retirement(make_emitter, hybrid, tmp_pa
     hybrid.mono += 60
     (tmp_path / 'radar_zoom').write_text('9')
     emitter._do_radar(); new = emitter._radar_result
-    assert old.latest.split('/')[1] != new.latest.split('/')[1]
+    assert old.latest.split('/')[2] != new.latest.split('/')[2]
     assert new.ts_frame == old.ts_frame and new.mpp == pytest.approx(old.mpp / 2)
     assert new.bounds != old.bounds and new.scalebar != old.scalebar and new.rings != old.rings
     assert all(p.exists() for p in old_files)  # decode grace starts at retirement
@@ -143,11 +143,14 @@ def test_zoom_during_429_obeys_source_cooldown(make_emitter, hybrid, tmp_path, r
 def test_zoom_cannot_reset_shared_rate_limit(make_emitter, hybrid, tmp_path):
     hybrid.view()
     emitter = make_emitter(); emitter._do_radar()
-    assert len(hybrid.calls) == ae.RADAR_REQUESTS_PER_MIN
+    assert len(hybrid.calls) <= ae.RADAR_REQUESTS_PER_MIN-ae.RADAR_HISTORY_RESERVE
+    emitter._radar_request_times = [hybrid.mono]*ae.RADAR_REQUESTS_PER_MIN
+    calls = len(hybrid.calls)
     before = emitter._radar_result
     (tmp_path / 'radar_zoom').write_text('9')
     emitter._do_radar()
-    assert len(hybrid.calls) == ae.RADAR_REQUESTS_PER_MIN and emitter._radar_result is before
+    assert len(hybrid.calls) == calls and emitter._radar_result is before
+    assert emitter._radar_refresh['state']=='idle'
     hybrid.mono = 60; emitter._do_radar()
     assert emitter._radar_zoom == 9
     starts = [c[3] for c in hybrid.calls]

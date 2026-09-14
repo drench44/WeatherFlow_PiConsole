@@ -3,6 +3,34 @@ import math
 import re
 
 MAX_LAT = 85.05112878
+EARTH_RADIUS_METERS = 6371008.8
+
+
+def distance_meters(lat, lon, other_lat, other_lon):
+    a, b = math.radians(lat), math.radians(other_lat)
+    dl = math.radians(other_lon - lon)
+    h = math.sin((b-a)/2)**2 + math.cos(a)*math.cos(b)*math.sin(dl/2)**2
+    return EARTH_RADIUS_METERS * 2 * math.asin(math.sqrt(min(1, h)))
+
+
+def circle_intersects_bounds(lat, lon, radius_meters, bounds):
+    """Minimum spherical distance to a lat/lon rectangle, including wrapped bounds.
+
+    The nearest point on a meridian need not have the site's latitude. Maximize
+    the spherical dot product along that edge; clamping latitude alone misses
+    corner intersections, especially at high latitudes.
+    """
+    width = (bounds['e'] - bounds['w']) % 360
+    offset = (lon - bounds['w']) % 360
+    candidates = [lon] if offset <= width else [bounds['w'], bounds['e']]
+    a = math.radians(lat)
+    for edge_lon in candidates:
+        dl = math.radians((edge_lon-lon+180) % 360-180)
+        optimum = math.degrees(math.atan2(math.sin(a), math.cos(a)*math.cos(dl)))
+        for b in (bounds['s'], bounds['n'], max(bounds['s'], min(bounds['n'], optimum))):
+            if distance_meters(lat, lon, b, edge_lon) <= radius_meters:
+                return True
+    return False
 
 
 def world_point(lat, lon, zoom):

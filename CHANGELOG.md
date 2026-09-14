@@ -7,6 +7,40 @@ to shared upstream code that the classic console benefits from too.
 ## 2026-09-13
 
 ### Radar
+- **Radar refresh recovery and Pi remapping.** Local budget deferrals keep fresh
+  scans idle and retry when capacity returns; history reserves the next newest
+  frame. Whole intents publish atomically, survive failed delivery, and stay
+  monotonic across reloads. Verified lossless palette swaps replace repeated
+  full-tile masks. Crop pixel loss and intensity ambiguity are disclosed; damaged
+  cache entries rebuild. Primary recovery, actual-contributor captions, held
+  historical frames and live failure timestamps now follow their own identities.
+- **Radar v3: one reflectivity scale everywhere.** MRMS, NEXRAD and the global
+  mosaic now share nine measured bands and a true dBZ scale, in the same pixels
+  on paper and night. Returns below 10 dBZ disappear; stale echoes recede to .66.
+  Native colour tables are pinned and remapped once per distinct tile colour,
+  preserving alpha. Unrecognised colours are transparent and counted; an incomplete
+  remap says so on the caption. The separate precipitation-type ramp is retired;
+  RainViewer explicitly reads “reflectivity only.” Old native-colour crops cannot
+  enter the new cache namespace. Secondary radar ink now clears 4.5:1 over the scrim.
+- **Neighbouring radars fill the plate.** Site mode selects up to four intersecting
+  230 km circles nearest the view, fetches only each site's intersecting tiles,
+  and stacks the nearest on top. The nearest reporting site to your station owns
+  the real scan times; neighbours contribute their latest scan within 15 minutes.
+  A dark or failed neighbour does not discard working layers. Multi-site history
+  stops at eight frames, with newest still published first. The picker names
+  “KATX +2”; hairline coverage arcs and site labels explain where returns end,
+  and the caption names a site that is not reporting.
+- **Zoom out without losing your site choice.** Below zoom 7 a saved site choice
+  shows the mosaic, with a dotted underline on the chosen site and an honest
+  “resumes at zoom 7” note. Zooming back restores it; tapping the site while wide
+  sets source and zoom 7 together. The shared zoom-out floor is now 4.
+- **Fetches follow your hands.** A new pan or pinch continues from the held preview,
+  keeping the drawn scan until matching geometry decodes. Every intent carries a
+  sequence; a newer intent abandons the old pass at the next tile boundary without
+  poisoning its retry cache. Rapid controls share a 120 ms trailing debounce.
+  One non-blocking corner line replaces “Updating”: newest/history progress,
+  restarted work, or a failed refresh naming the scan still shown. It waits 600 ms
+  before appearing, and shares its space with zoom-cap and site-resume notes.
 - **Zoom +/− responds instantly.** A stepper press now previews the new level on
   screen at once (the same centre-scale, held-until-the-frame-lands path a pinch
   uses) and posts the intent within a fraction of a second instead of waiting for
@@ -27,7 +61,7 @@ to shared upstream code that the classic console benefits from too.
   (it also auto-recenters after 90 s idle). Pan is deliberately transient — a wall
   display wakes on its own station — while zoom persists. The control clusters never
   start a gesture, the page never scrolls or browser-zooms, the loop freezes on the
-  newest frame during a gesture and resumes when the new frame lands, and
+  drawn frame during a gesture and resumes when the new frame lands, and
   reduced-motion turns the spring-backs into snaps.
 - **Radar top-band cleanup.** The masthead content was overflowing its own 41px
   reservation and landing on the header line below it (the station subtitle and a

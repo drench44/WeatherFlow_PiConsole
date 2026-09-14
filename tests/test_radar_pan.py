@@ -120,7 +120,7 @@ def test_override_crop_identity_marker_and_reset(make_emitter, hybrid, tmp_path,
     assert r['marker'] == (dict(x=.5, y=.5) if centered else dict(x=mx/956, y=my/490))
     if not centered:
         expected = Image.new('RGBA', (956, 490))
-        for _, _, dx, dy in tiles: expected.paste(tile, (dx, dy))
+        for _, _, dx, dy in tiles: expected.paste(ae.remap(tile, 'iem-mrms-lcref', ae._RADAR_LUT), (dx, dy))
         with Image.open(Path(ae.RADAR_DIR) / (after.latest + '.png')) as actual:
             assert actual.tobytes() == expected.tobytes()
     hybrid.mono += 60
@@ -163,30 +163,21 @@ def test_small_decimal_center_survives_writer_and_emitter(make_emitter, hybrid, 
     assert emitter._radar_result.center == dict(lat=1e-10, lon=-1e-9)
 
 
-def test_site_pan_beyond_umbrella_remains_honest_empty_site(make_emitter, hybrid, tmp_path, monkeypatch):
-    import io
-    import json
-    from datetime import datetime, timezone
-    from tests.test_radar_hybrid import png
+def test_site_pan_beyond_all_range_circles_falls_back(make_emitter, hybrid, tmp_path, monkeypatch):
+    # v3 queries only circles intersecting the viewport. Far offshore there is
+    # no reporting site to drive a timeline, so the existing mosaic fallback applies.
     original = ae.RadarSession.open
     def fetch(self, req, timeout):
-        if 'operation=list' in req.full_url:
-            assert 'radar=ATX' in req.full_url
-            scan = datetime.fromtimestamp(hybrid.latest, timezone.utc).strftime('%Y-%m-%dT%H:%MZ')
-            return io.BytesIO(json.dumps(dict(scans=[dict(ts=scan)])).encode())
-        if 'ridge::' in req.full_url:
-            assert 'ridge::ATX-N0B-' in req.full_url
-            return io.BytesIO(png((0, 0, 0, 0)))
+        assert 'operation=list' not in req.full_url and 'ridge::' not in req.full_url
         return original(self, req, timeout)
     monkeypatch.setattr(ae.RadarSession, 'open', fetch)
     (tmp_path / 'radar_source').write_text('site')
     (tmp_path / 'radar_center').write_text('47.61,-130')
     emitter = make_emitter(); emitter._do_radar(); r = emitter._build_payload()['radar']
-    assert r['available'] and r['sourceMode'] == 'site' and r['siteId'] == 'KATX'
+    assert r['available'] and r['sourceMode'] == 'mosaic'
+    assert r['sitesConsidered'] == r['sitesDrawn'] == 0 and r['sites'] == []
+    assert r['sources'][1]['reason'] == 'out of view'
     assert r['center'] == dict(lat=47.61, lon=-130) and not r['centered']
-    with Image.open(Path(ae.RADAR_DIR) / (r['latest'] + '.png')) as image:
-        assert image.getchannel('A').getextrema() == (0, 0)
-    assert not hybrid.calls  # no silent mosaic/RainViewer attempt
 
 
 @pytest.mark.parametrize('failure', ['open', 'replace'])

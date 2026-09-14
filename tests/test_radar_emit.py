@@ -28,7 +28,7 @@ def radar_dir(tmp_path, monkeypatch):
 @pytest.fixture
 def radar_net(monkeypatch):
     tile = io.BytesIO()
-    Image.new('RGBA', (256, 256), (146, 136, 113, 100)).save(tile, format='PNG')
+    Image.new('RGBA', (256, 256), (0, 163, 224, 100)).save(tile, format='PNG')
     state = dict(times=[1800000000, 1800000600], calls=[], fail=None, tile=tile.getvalue())
 
     def fetch(req, timeout):
@@ -44,7 +44,7 @@ def radar_net(monkeypatch):
             return io.BytesIO(json.dumps(dict(host='https://tiles.example', radar=dict(
                 past=[dict(time=t, path=f'/v2/{t}') for t in reversed(state['times'])],
                 nowcast=[dict(time=1999999999, path='/never')]))).encode())
-        assert url.endswith('/2/1_1.png') and int(url.split('/256/')[1].split('/')[0]) in range(4, 8)
+        assert url.endswith('/2/0_0.png') and int(url.split('/256/')[1].split('/')[0]) in range(4, 8)
         return io.BytesIO(state['tile'])
 
     monkeypatch.setattr(ae.RadarSession, 'open', lambda self, *a, **k: fetch(*a, **k))
@@ -120,7 +120,7 @@ def test_viewing_warms_history_then_expiry_prunes_it(make_emitter, radar_net, ra
     marker.write_text(str(ae.time.time()))
     radar_net['calls'].clear(); emitter._radar_request_times.clear(); emitter._do_radar()
     emitter._radar_request_times.clear(); emitter._do_radar()
-    assert len(tile_calls(radar_net)) == 6 * 15 + 13  # partial frame retried atomically
+    assert len(tile_calls(radar_net)) == 6 * 15  # history yields before starting a frame
     assert all(f['complete'] for f in emitter._radar_frames)
     assert len(list(radar_dir.rglob('*.png'))) == 7
     emitter._radar_request_times.clear()
@@ -211,7 +211,7 @@ def test_composite_and_one_snapshot(make_emitter, radar_net, radar_dir, monkeypa
     assert all(f['complete'] and f['url'] == 'radar/' + f['id'] + '.png' for f in result.frames)
     assert len(tile_calls(radar_net)) == 2 * len(ae._radar_viewport(47.61, -122.33, 7, 956, 490)[0])
     with Image.open(radar_dir / (result.latest + '.png')) as image:
-        assert image.getpixel((240, 240)) == (146, 136, 113, 100)  # alpha wasn't squared
+        assert image.getpixel((240, 240)) == (46, 147, 168, 100)  # alpha wasn't squared
     assert not list(radar_dir.rglob('*.tmp.*'))
     payload = emitter._build_payload()['radar']
     assert payload['frameCount'] == 2 and payload['marker'] == dict(x=.5, y=.5)
@@ -329,12 +329,9 @@ _UNIVERSAL_BLUE_RAIN = {5: '#92887164', 20: '#00a3e0ff', 30: '#005588ff',
 _UNIVERSAL_BLUE_SNOW = {20: '#7fbfffff'}
 
 
-def test_legend_matches_published_universal_blue_scale():
-    """Hermetic: every rendered anchor equals RainViewer's published stop."""
-    for dbz, hexa, _label in ae._RADAR_LEGEND['rain']:
-        assert _UNIVERSAL_BLUE_RAIN[dbz] == hexa, f'{dbz} dBZ legend drift: {hexa}'
-    assert set(d for d, *_ in ae._RADAR_LEGEND['rain']) == set(_UNIVERSAL_BLUE_RAIN)
-    assert ae._RADAR_LEGEND['snow'][0] == _UNIVERSAL_BLUE_SNOW[20]
+def test_shared_legend_replaces_native_scales():
+    assert all(source['legend'] is ae._RADAR_RAMP for source in ae._RADAR_SOURCES.values())
+    assert all(source['legend'].get('snow') is None for source in ae._RADAR_SOURCES.values())
 
 
 @pytest.mark.skipif(os.environ.get('RADAR_NET_TEST') != '1',
@@ -373,9 +370,9 @@ def test_legend_fidelity_against_published_colortable():
             target = snow
         target[dbz] = cells[blue]
         prev = dbz
-    for dbz, hexa, _label in ae._RADAR_LEGEND['rain']:
+    for dbz, hexa in _UNIVERSAL_BLUE_RAIN.items():
         assert rain[dbz] == hexa, f'{dbz} dBZ drifted: table {rain[dbz]} vs legend {hexa}'
-    assert snow[20] == ae._RADAR_LEGEND['snow'][0], 'snow stop drifted from the table'
+    assert snow[20] == _UNIVERSAL_BLUE_SNOW[20], 'snow stop drifted from the table'
 
 
 def test_cold_start_rate_limit_covers_all_frames(make_emitter, radar_net, monkeypatch, radar_viewed, radar_dir):
@@ -393,10 +390,10 @@ def test_cold_start_rate_limit_covers_all_frames(make_emitter, radar_net, monkey
     radar_viewed.write_text(str(ae.time.time()))
     emitter = make_emitter(); emitter._do_radar()
     assert len(emitter._radar_frames) == 7
-    assert sum(f['complete'] for f in emitter._radar_frames) == 5
+    assert sum(f['complete'] for f in emitter._radar_frames) == 4
     clock[0] += 60; emitter._do_radar()
     assert all(f['complete'] for f in emitter._radar_frames)
     assert len(list(radar_dir.rglob('*.png'))) == 7
-    assert len(radar_net['calls']) == 120
-    assert len(starts) == 118  # 105 usable tiles plus 13 from the budget-limited attempt
+    assert len(radar_net['calls']) == 107
+    assert len(starts) == 105  # every tile belongs to a complete frame
     assert all(sum(t <= v < t + 60 for v in starts) <= 90 for t in starts)

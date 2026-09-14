@@ -112,6 +112,7 @@ def test_regressed_primary_retains_newest(make_emitter,hybrid):
 
 @pytest.mark.parametrize('mode,expected', [('site','iem-nexrad-n0b'),('mosaic','iem-mrms-lcref')])
 def test_site_actual_scans_and_restart(make_emitter,hybrid,tmp_path,monkeypatch,mode,expected):
+    monkeypatch.setattr(ae, '_NEXRAD_SITES', {'KATX': ae._NEXRAD_SITES['KATX']})
     original=ae.RadarSession.open
     scans=[hybrid.latest-1800,hybrid.latest-1200,hybrid.latest-600,hybrid.latest]
     def fetch(self,req,timeout):
@@ -124,16 +125,16 @@ def test_site_actual_scans_and_restart(make_emitter,hybrid,tmp_path,monkeypatch,
             return io.BytesIO(png())
         return original(self,req,timeout)
     monkeypatch.setattr(ae.RadarSession,'open',fetch)
-    (tmp_path/'radar_source').write_text(mode);(tmp_path/'radar_zoom').write_text('4');hybrid.view()
+    (tmp_path/'radar_source').write_text(mode);(tmp_path/'radar_zoom').write_text('7');hybrid.view()
     for _ in range(2):
         emitter=make_emitter();emitter._do_radar();r=emitter._build_payload()['radar']
         assert r['sourceId']==expected and r['sourceMode']==mode
         if mode=='site':
             assert [f['ts'] for f in r['frames']]==scans
             assert r['completeFrameCount']==4 and r['siteId']=='KATX'
-            assert r['zoom']==r['zoomMin']==7 and r['zoomMax']==10 and r['zoomCapped']
+            assert r['zoom']==7 and r['zoomMin']==4 and r['zoomMax']==10 and not r['zoomCapped']
             assert r['cadenceSec']==300 and r['scanningSlowly'] and not r['latestOnly']
-            assert r['legend']['id']=='iem-nexrad-n0b-v1'
+            assert r['legend']['id']=='almanac-reflectivity-v1'
 
 
 def test_site_failure_reports_disabled_and_falls_back(make_emitter,hybrid,tmp_path,monkeypatch):
@@ -200,7 +201,7 @@ def test_live_n0b_native_palette():
     with urllib.request.urlopen(url,timeout=25,context=context) as response: raw=response.read()
     image=Image.open(io.BytesIO(raw)); assert image.mode=='P'
     palette=image.getpalette()
-    for dbz,color,_ in ae._RADAR_SITE_LEGEND['rain']:
+    for dbz,color in ((5,'#6c7daa'),(20,'#52d6a2'),(30,'#0c9110'),(40,'#d6c704'),(50,'#ff8000'),(60,'#ffffff'),(70,'#b200ff')):
         index=int((dbz+33)*2)
         assert '#'+bytes(palette[index*3:index*3+3]).hex()==color
 
@@ -210,6 +211,6 @@ def test_live_n0b_native_palette():
     curve='https://raw.githubusercontent.com/akrherz/iem/main/scripts/ridge/ReflectivityColorCurveManager.xml'
     with urllib.request.urlopen(curve,timeout=25,context=context) as response:
         levels=ET.fromstring(response.read())
-    for dbz,color,_ in ae._RADAR_SITE_LEGEND['rain']:
+    for dbz,color in ((5,'#6c7daa'),(20,'#52d6a2'),(30,'#0c9110'),(40,'#d6c704'),(50,'#ff8000'),(60,'#ffffff'),(70,'#b200ff')):
         level=next(el for el in levels if float(el.get('lowerValue','-999'))<=dbz<float(el.get('upperValue','999')))
         assert bytes(int(level.findtext(channel)) for channel in ('red','green','blue')).hex()==color[1:]

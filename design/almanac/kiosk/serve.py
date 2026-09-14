@@ -58,7 +58,7 @@ def _write_radar_source(values):
 
 def _write_radar_preference(name, values):
     """Caller holds _count_lock and has checked loopback. Polling cannot fail here."""
-    if len(values) != 1:
+    if name not in ('radar_zoom', 'radar_source', 'radar_center') or len(values) != 1:
         return
     value = values[0]
     if name == 'radar_center':
@@ -112,6 +112,52 @@ def _write_radar_preference(name, values):
             pass
 
 
+def _read_radar_intent():
+    try:
+        with open(os.path.join(os.path.dirname(DATA), 'radar_intent')) as stream:
+            record = json.load(stream)
+        if not isinstance(record, dict): record = {'seq': int(record)}
+        if type(record.get('seq')) is not int or not 0 <= record['seq'] <= 999999999999:
+            return {'seq': 0}
+        return record
+    except (OSError, ValueError, TypeError):
+        return {'seq': 0}
+
+
+def _write_radar_intent(params):
+    """One validated transaction; duplicate generations never mutate preferences."""
+    keys = ('radarSeq','radarZoom','radarSource','radarCenter')
+    if any(len(params.get(k, [])) != 1 for k in keys): return
+    seq, zoom, source, center = (params[k][0] for k in keys)
+    if not re.fullmatch(r'[0-9]{1,12}', seq, re.ASCII): return
+    seq = int(seq)
+    if seq <= _read_radar_intent()['seq']: return
+    if zoom != 'auto':
+        if not re.fullmatch(r'[0-9]{1,2}', zoom, re.ASCII): return
+        zoom = int(zoom)
+        if not RADAR_MIN_ZOOM <= zoom <= RADAR_MAX_DESIRED_ZOOM: return
+    if source not in ('site','mosaic'): return
+    if center != 'station':
+        if not re.fullmatch(r'-?\d{1,3}(\.\d+)?,-?\d{1,3}(\.\d+)?', center, re.ASCII): return
+        lat, lon = map(float, center.split(','))
+        if not (-85.05112878 <= lat <= 85.05112878 and -180 <= lon <= 180): return
+        center = dict(lat=lat, lon=lon)
+    record = dict(seq=seq, zoom=zoom, source=source, center=center)
+    marker = os.path.join(os.path.dirname(DATA), 'radar_intent')
+    tmp = f'{marker}.tmp.{os.getpid()}'
+    try:
+        with open(tmp, 'w') as stream:
+            json.dump(record, stream); stream.flush(); os.fsync(stream.fileno())
+        os.replace(tmp, marker)
+        # Durable preferences are persistence only once a runtime intent exists.
+        _write_radar_zoom([str(zoom)])
+        _write_radar_source([source])
+    except OSError: pass
+    finally:
+        try: os.unlink(tmp)
+        except OSError: pass
+
+
 class Handler(http.server.SimpleHTTPRequestHandler):
     def __init__(self, *a, **k):
         super().__init__(*a, directory=WEB, **k)
@@ -130,9 +176,12 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                     _renders += 1
                 if self.client_address[0] in LOOPBACK:
                     params = parse_qs(query, keep_blank_values=True)
-                    _write_radar_zoom(params.get('radarZoom', []))
-                    _write_radar_center(params.get('radarCenter', []))
-                    _write_radar_source(params.get('radarSource', []))
+                    if 'radarSeq' in params:
+                        _write_radar_intent(params)
+                    elif set(_read_radar_intent()) == {'seq'}:
+                        _write_radar_zoom(params.get('radarZoom', []))
+                        _write_radar_center(params.get('radarCenter', []))
+                        _write_radar_source(params.get('radarSource', []))
                 if viewed_radar:
                     # Share only a timestamp with the emitter. Serialize writers
                     # and replace atomically so it never reads a partial epoch.
@@ -150,6 +199,11 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                         except OSError:
                             pass
         return super().do_GET()
+
+    def end_headers(self):
+        if self.path.split('?')[0] == '/wx.json' and self.client_address[0] in LOOPBACK:
+            self.send_header('X-Radar-Intent-Seq', str(_read_radar_intent()['seq']))
+        super().end_headers()
 
     def log_request(self, code="-", size="-"):
         # drop the ~2s wx.json/index poll churn (it grew the log unbounded on

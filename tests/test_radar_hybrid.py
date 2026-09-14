@@ -121,7 +121,7 @@ def test_partial_iem_history_wins_and_backprobe_rolls_midnight(make_emitter, hyb
     assert all(c[0] == 'iem' for c in hybrid.calls)
     assert r['frameSpacingSec'] == 120 and r['historySpanSec'] < 3600
     assert r['completeFrameCount'] < 31 and r['frameCount'] == 31
-    assert r['legend']['snow'] is None
+    assert r['legend'].get('snow') is None
 
 
 @pytest.mark.parametrize('bad', ['stale', 'future', 'odd', 'schema', 'red', 'corrupt', 'size', 'missing'])
@@ -214,14 +214,14 @@ def test_cold_warm_unviewed_counts_history_limit_and_atomic(make_emitter, hybrid
                 if f['complete']:
                     with Image.open(os.path.join(ae.RADAR_DIR, f['id'] + '.png')) as image:
                         assert image.size == (956, 490)
-            assert value.legend is ae._RADAR_IEM_LEGEND
+            assert value.legend is ae._RADAR_RAMP
             snapshots.append(value)
         original(self, key, value)
     monkeypatch.setattr(ae.AlmanacEmitter, '__setattr__', record)
     emitter._do_radar()
-    assert len(hybrid.calls) == 90  # metadata + HEADs + tile GETs, including partial attempt
+    assert len(hybrid.calls) == 66  # five complete frames; reserve next newest
     assert sum(f['complete'] for f in snapshots[0].frames) == 1  # publish before backfill
-    assert sum(f['complete'] for f in snapshots[-1].frames) == 6
+    assert sum(f['complete'] for f in snapshots[-1].frames) == 5
     for _ in range(6):
         hybrid.now -= 60  # hold wall clock; this test exercises monotonic backfill budgets
         hybrid.mono += 60
@@ -244,7 +244,7 @@ def test_unviewed_counts_and_open_warms_unchanged(make_emitter, hybrid):
     hybrid.calls.clear(); emitter._do_radar()
     assert len(hybrid.calls) == 1
     hybrid.view(); hybrid.mono += 60; hybrid.calls.clear(); emitter._do_radar()
-    assert len(hybrid.calls) == 90 and sum(f['complete'] for f in emitter._radar_frames) > 1
+    assert len(hybrid.calls) == 66 and sum(f['complete'] for f in emitter._radar_frames) > 1
 
 
 def test_build_limit_and_real_gap_spacing(make_emitter, hybrid, monkeypatch):
@@ -342,7 +342,7 @@ def test_legend_fidelity_real_iem_native_colortable():
     except (urllib.error.URLError, TimeoutError, OSError) as error:
         pytest.skip(f'IEM offline: {error}')
     rows = [re.findall(r'<td[^>]*>(.*?)</td>', row, re.S) for row in re.findall(r'<tr[^>]*>(.*?)</tr>', html, re.S)]
-    for dbz, hexa, _ in ae._RADAR_IEM_LEGEND['rain']:
+    for dbz, hexa in ((11, '#a4a4ff'), (25, '#3366cc'), (35, '#00cc00'), (45, '#ffcc00'), (55, '#d90000'), (65, '#cc00cc'), (71, '#ffffff')):
         index = int((dbz + 32) * 2)
         matches = [row for row in rows if len(row) >= 6 and re.sub('<[^>]+>', '', row[0]).strip() == str(index)]
         assert len(matches) == 1, f'index {index} missing from native table'

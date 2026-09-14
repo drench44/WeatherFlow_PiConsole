@@ -168,7 +168,7 @@ its next poll only after `render()` returned, and the server credits that mark o
 from a loopback client. The launcher's watchdog reads `renders`, because a request
 count never proved anything reached the screen.
 
-## Radar v2 — sources, geometry and observed playback
+## Radar v3 — sources, geometry, acquisition intent and observed playback
 
 `radar` is an independent side artifact. It never changes `ts`, `obsAgeSec`, or
 engine `/health`. Missing radar or `available:false` hides the tab. A station
@@ -187,7 +187,7 @@ while respecting the requested restart persistence.
 
 Mosaic tries IEM first for CONUS station centers, then RainViewer. A bundled
 coarse land polygon determines CONUS eligibility. Outside CONUS, RainViewer
-is used directly. Single-site eligibility additionally requires the nearest
+is used directly. Site-mode eligibility additionally requires the nearest
 bundled NEXRAD within 230 km. This is geographic eligibility, not a guarantee
 that a radar sees every point inside that circle. `nexrad` still reports the
 nearest site within 285 miles; `distanceMeters` provides the unrounded value
@@ -224,11 +224,13 @@ All metadata, HEAD, tile, conditional and failing requests share a rolling
 90-request/minute monotonic limiter across adapters. Per-source 429 cooldowns
 honor numeric or HTTP-date `Retry-After`. Maximum request timeout is 10 s,
 primary acquisition budget 25 s, full build budget 150 s, maximum 20 uncached
-frame attempts per pass. No deadline was raised for v2. An HTTP error, invalid
+frame attempts per pass. No deadline was raised for v3. An HTTP error, invalid
 PNG, incorrect dimensions, oversized body (>2 MiB), or solid opaque red IEM
-placeholder stops that candidate immediately. Transparent data is a valid
+placeholder stops that mosaic candidate (or individual site layer) immediately. Transparent data is a valid
 clear frame. Negative cache TTL is 120 s; only complete 256×256 tiles contribute
-to an atomically published crop. Native alpha is preserved without a paste mask.
+to an atomically published crop. Native alpha is preserved within each tile
+layer. Site layers use RGBA alpha compositing, with the site nearest the viewport
+centre on top.
 
 Every adapter failure logs WARNING with source, exception, candidate timestamps
 and elapsed time. A successful source change logs INFO `radar source SWITCH`.
@@ -238,7 +240,7 @@ tries RainViewer. A regressed same-source/station/zoom timestamp is rejected.
 Both adapters failing retains the last complete presentation and retries on the
 existing lifecycle-managed schedule. Radar failures never alter engine health.
 
-### Verified single-site archive
+### Verified NEXRAD archive and multi-site composite
 
 [IEM's RIDGE documentation](https://mesonet.agron.iastate.edu/GIS/ridge.phtml)
 documents real scan listing and immutable timestamped XYZ tiles. Live curl
@@ -254,27 +256,63 @@ and the `202609132140` version both returned real 256×256 PNGs with different
 SHA-256 hashes. The `-0` suffix is a latest alias, **not an animation index**.
 No frame is synthesized from latest aliases or guessed volume intervals.
 
-The adapter requests UTC scans, validates timestamps, tries the newest complete
-scan, and fills only listed history within one hour. History is capped at 31
-source entries; the browser's separate memory cap is 16 decoded frames. A
+At each site-mode pass, select every bundled site's 230 km spherical range circle
+that intersects the viewport bounds (including corners and antimeridian wrapping).
+`RADAR_SITE_MAX_COUNT=4` caps this set by distance from the **viewport centre**. `sitesConsidered` is the pre-cap intersection count; `sitesDrawn` is
+the capped set size, including dark sites. `sites` lists this set in stacking
+order, farthest first and nearest on top. This is geometric coverage, not a
+claim that every site contributes echo pixels.
+
+List the capped viewport sites and up to four station-nearest sites within
+230 km, deduplicating requests. The latter fixed station set chooses the nearest
+reporting timeline primary independently of panning and the viewport cap. Only
+viewport sites supply layers. `siteId` names the timeline primary even if it
+supplies no pixels. Timestamp monotonicity applies within source, primary,
+center and zoom; recovery to a different primary may legitimately move backward.
+
+An empty or stale listing means `not reporting`. Listing transport errors and
+failed tiles mean `scan unavailable`; budget-skipped layers mean `deferred`.
+No intersecting range circle means `out of view`. If no station-timeline site
+reports or no viewport layer completes, mosaic fallback remains available.
+Budget exhaustion before newest retains a fresh previous result as an idle deferral.
+
+For primary slot `t`, each reporting secondary site supplies its newest scan
+`ts <= t`, only when `t-ts <= 900`. No future scan or fabricated timestamp is
+used. Per site, only viewport tiles whose bounding boxes intersect its 230 km
+circle are fetched. Each site builds a complete clipped layer before it is alpha-composited
+onto the 956×490 canvas; a bad tile discards that site's entire layer and logs
+the failure. Other complete site layers remain usable. Reflectivity is remapped before pasting; native alpha and the
+viewport-relative stacking order are preserved. Acquisition fetches nearest first
+and holds at most four layers (about 9 MiB of working RGBA canvases), then pastes
+farthest first. Global budget/deadline exhaustion discards the unfinished layer
+and stops acquisition, retaining any complete layers as a valid degraded frame.
+If no layer completed, the frame is withheld. Budget-skipped layers never enter
+the negative cache. Complete layers survive a shared budget yield without
+raising any limit.
+A per-site negative cache suppresses failed layers for 120 s. Degraded crops
+are keyed by the actual contributing pairs, so recovery cannot reuse a crop
+missing a recovered site. Per-frame `siteScans:[{id,ts}]` records those pairs;
+its IDs are ICAO codes, while provider requests use three-letter IDs.
+
+The adapter validates timestamps, tries the newest usable primary slot, and
+fills only the primary's listed history within one hour. History is capped at 8
+source entries when at least two sites supply the newest slot, otherwise 31; the browser's separate memory cap is 16 decoded frames. A
 nominal ~5 min volume can vary with scan mode; the live example was 6–7 min.
 Two consecutive listed scan gaps over eight minutes set `scanningSlowly:true`.
 `latestOnly:false` is honest here: historical scans were verified tile-fetchable.
-A failed site acquisition publishes a mosaic with the site option disabled and
-`reason:"not reporting"`.
+External site acquisition failure may publish a mosaic with the site option
+disabled and the specific reporting/acquisition reason preserved.
 
-Native indexed source PNG:
-`https://mesonet.agron.iastate.edu/archive/data/2026/09/13/GIS/ridge/ATX/N0B/ATX_N0B_202609132140.png`.
-N0B's two reserved codes give `dBZ=index/2-33`; representative stops at
-5/20/30/40/50/60/70 are `#6c7daa`, `#52d6a2`, `#0c9110`, `#d6c704`,
-`#ff8000`, `#ffffff`, `#b200ff`. These match the native PNG and
-[IEM's reflectivity curve](https://github.com/akrherz/iem/blob/main/scripts/ridge/ReflectivityColorCurveManager.xml).
-The product has its own `legend.id=iem-nexrad-n0b-v1` and `snow:null`.
-
-MRMS retains its seven native representative stops and
-`legend.id=iem-mrms-lcref-v1`. RainViewer retains Universal Blue (`colorId:2`),
-its seven rain stops, and its snow color; native RGBA is unchanged in both themes.
-Opt-in `RADAR_NET_TEST=1` tests verify all three source palettes.
+The site picker names an actual contributor plus the number of other actual
+contributors (`KATX +2`), using the displayed frame's `siteScans`. A non-contributing
+primary is identified separately as `timeline KATX`.
+The caption is `NEXRAD · KATX +2 · ~5 min volumes · IEM / NOAA`, appending
+`· KATX not reporting` when a selected site is dark. The plate's accessible name
+lists contributing IDs. With at least two contributors, `#rad-over` draws their
+geodesic 230 km arcs in `--rule-faint` (1px, dash 2 3), clipped to the plate.
+Site centres inside the viewport have 2px `--ink-soft` dots and 11.5px labels
+(dx5, dy13), omitted unless the complete label fits y76–412 and the viewport.
+Station marker, rings, scale bar and displaced-station treatment retain their meanings.
 
 ### Payload and zoom
 
@@ -289,18 +327,34 @@ Existing snapshot fields remain: `available`, `reason`, `sourceId`, `provider`,
 Additions:
 
 ```jsonc
-"sourceMode": "mosaic", // authoritative selected presentation: mosaic | site
-"siteId": null,         // selected site's ICAO when sourceMode=site
+"sourceMode": "mosaic", // actually drawn: mosaic | site
+"sourcePref": "site",   // durable choice; only a picker tap changes this
+"sourceFallback": "site-zoom-floor", // otherwise null
+"sitePreferred": true,  // sourcePref === site
+"siteResumeZoom": 7,
+"siteId": null,         // nearest reporting primary ICAO when sourceMode=site
 "sources": [
   {"mode":"mosaic", "available":true},
   {"mode":"site", "siteId":"KATX", "available":true, "reason":null}
 ],
+"sites": [],           // capped site set, bottom-to-top; also retained on site fallback
+// Site record: {id, primary, ageSec, contributing, reason, lat, lon,
+//               distanceMeters, viewportDistanceMeters, reporting, newestTs}.
+// contributing describes the newest complete crop; reason is null,
+// "not reporting", "scan unavailable", "deferred", or "out of view".
+// newestTs/ageSec are null when the listing has no valid scan in its query window.
+// reporting is the pass-time health decision; ageSec is recalculated each emit tick.
+"sitesConsidered": 0,  // circles intersecting the viewport before the cap
+"sitesDrawn": 0,       // capped set size (includes sites with reporting:false)
+"intent": {"seq":41, "zoom":5, "center":"station", "source":"site"},
+"refresh": {"state":"idle", "frameIndex":1, "frameTotal":1, "forSeq":41},
 "scanningSlowly": false,
 "latestOnly": false,
 "viewport": {"w":956, "h":490}
 ```
 
-An unavailable site has reason `"no site in range"` or `"not reporting"`.
+Unavailable-site reasons distinguish `"no site in range"`, `"not reporting"`,
+`"scan unavailable"`, `"deferred"`, and `"out of view"`.
 `nexrad` adds numeric `distanceMeters`; `id`, `name`, `distanceDisp`, `bearing`
 are unchanged. `sources` describes selection options, not a network-health probe
 for an unselected site. Actual reporting failure is discovered when selected.
@@ -313,12 +367,22 @@ source's own limits. Seattle (47.6° N) resolves to z8, approximately 393×201 k
 25-mile scale bar. RainViewer clamps auto to z7. Manual desired zoom persists
 independently of effective source bounds, allowing 4–10. `zoomCapped` is true
 when the desired manual or auto level differs from the effective level,
-including clamping to single-site's lower bound. `zoomSource` is MRMS,
+with no lower-bound site clamp: the available mosaic makes `zoomMin:4`
+for both preferences. A site preference below z7 serves the mosaic and publishes
+`sourceFallback:"site-zoom-floor"`, without rewriting the durable source marker.
+Returning to z7 automatically tries the site again. The picker always presses
+the source actually drawn; the standing site preference has a dotted underline
+while the mosaic is showing. The mosaic caption appends `· wider than KATX reaches`.
+Tapping that site at z4–6 posts source=site and zoom=7 together; the site segment
+is disabled when site acquisition is unavailable. `zoomSource` is MRMS,
 NEXRAD, or RainViewer. Captions explain manual clamping and auto source limits.
 
 Both axes, composite center, effective zoom, and tile placements determine crop
-identity. Single-site identity additionally includes ICAO to prevent same-minute
-collisions between nearby radars. XYZ x wraps at the antimeridian and y clamps
+identity. Frame paths begin `almanac-reflectivity-v1/<sourceId>/`, separating
+providers and invalidating all old native-colour crops. Site frame identity additionally hashes the ordered `(site ICAO, scan ts)`
+pairs that actually composed it. Changing any contributing scan or the site set
+changes the identity even when the primary timestamp is unchanged. Fully cached
+identical frames require no tile requests. XYZ x wraps at the antimeridian and y clamps
 at the poles. Bounds are inverse Mercator (`e<w` denotes wrapping). `center` reports the composite center. `centered:true` retains the exact station
 view: `marker:{x:.5,y:.5}` = (478,245). With a center override, `centered:false`
 and `marker{x,y}` report the station's fractional position under that crop,
@@ -342,28 +406,153 @@ a legacy payload falls back to 3×cadence). Header age suffix starts at **80% of
 routinely-delayed feed reads clean and the suffix forecasts the stale flag. Nominal cadence belongs only in the
 source caption; scan age belongs only beside AS OF. Never label data LIVE.
 
+### Intent and refresh
+
+An immutable record pairs the pass-start intent with acquisition state. The emit
+tick reads it separately from the last complete crop, so progress remains visible
+while old pixels are held. No `progress` field is published.
+
+```jsonc
+"intent": {"seq":41, "zoom":7, "center":"station", "source":"site"},
+"refresh": {"state":"history", "frameIndex":4, "frameTotal":8, "forSeq":41}
+```
+
+`zoom` is the requested integer or `"auto"`, before source caps. `center` is
+`"station"` or `{lat,lon}`; `source` is the requested preference. `forSeq` is the
+sequence read at pass start. `state` is `idle | newest | history | superseded | failed`.
+`frameIndex` counts complete frames published in the pass (0 before the first,
+then 1…N); warm history can advance it by several. `frameTotal` is the planned
+work (1 before listing or when not viewed; otherwise the adapter's capped slots).
+Success ends at `idle`; external newest failures end at `failed`. Local limiter
+or cooldown deferrals remain `idle` when retaining a fresh previous result.
+Before publishing any newest intent/progress, require metadata plus a complete
+frame's tile headroom. Retry at the necessary request-window expiry or cooldown
+expiry, not the blanket external-error delay. Retained refresh records describe
+the retained intent and frame counts. Mid-newest budget exhaustion without any
+fresh retained result remains failed; history budget yields remain idle.
+History starts a frame only if it can leave at least 12 requests (or the current
+viewport's newest cost, if larger) for the next interaction. Supersession queues one `superseded`
+record for the next emit, even if the replacement worker has already started.
+Neither failure nor cancellation changes the last successfully published crop.
+
+The only status corner is `#rad-note`, a fixed 14px box at top418/right12 with
+`role=status`, `aria-live=polite`, `pointer-events:none`. Priority: refresh,
+existing upper zoom-cap copy, then `KATX resumes at zoom 7`. For 600ms after a
+local intent post it stays suppressed. Progress reads `Refreshing · newest frame`
+or `Refreshing · frame 4 of 8`; an older `forSeq` reads `Refreshing · restarted`.
+A superseded notice holds restarted for 800ms, then uses the replacement phase.
+Failure reads `Couldn't refresh · showing 17:12`, naming the visible scan and
+persisting until a successful publish. Idle frees the line for the other claimants.
+Only a 120ms opacity transition is used, disabled for reduced motion. There is
+no Updating pill, spinner, second note, or `aria-busy` write on the interactive plate.
+
+### Shared reflectivity palette
+
+`lib/radar_palette.py` pins complete native colour inverses in `lib/data/`, with
+byte-identical provenance fixtures in `tests/fixtures/`. MRMS's indexed formula
+is `i/2−32`, N0B's is `i/2−33` with reserved codes 0/1 transparent. RainViewer
+uses the published Universal Blue table; tiles request scheme 2 with options
+`0_0`. These lookup tables supply intensity only, never precipitation type.
+
+All three sources publish one legend and use one crop raster for both themes:
+
+```jsonc
+"legend": {
+  "id":"almanac-reflectivity-v1", "floorDbz":10, "remapped":true,
+  "bands":[
+    {"lo":10,"hi":20,"start":"#8AA3C6","end":"#4E79B4"},
+    {"lo":20,"hi":25,"start":"#2E93A8","end":"#227F92"},
+    {"lo":25,"hi":35,"start":"#3FA65E","end":"#2A8448"},
+    {"lo":35,"hi":40,"start":"#C79C14","end":"#B0870D"},
+    {"lo":40,"hi":45,"start":"#E5871A","end":"#D2700F"},
+    {"lo":45,"hi":50,"start":"#DE5C17","end":"#C94C0C"},
+    {"lo":50,"hi":60,"start":"#DD4530","end":"#BC2A1A"},
+    {"lo":60,"hi":70,"start":"#CE4E88","end":"#A9389B"},
+    {"lo":70,"hi":75,"start":"#8A46C2","end":"#8A46C2"}
+  ]
+}
+```
+
+There is no precipitation-type key or secondary ramp. RainViewer's caption ends
+`· reflectivity only`. The nine gradients are proportional to their dBZ widths
+on a 372px bar; seven 10…70 ticks lie at `(dBZ−10)/65*372`, with 1×3px hairlines.
+The emitter samples the bands in sRGB every 2.5 dBZ, 10 through 72.5 (26 stops,
+open-ended last stop). Every sampled colour meets ≥2:1 on paper `#F2EDE2` and
+≥3:1 on night `#0B0D11`. Below 10 dBZ is fully transparent. Stale echo opacity
+is .66; the canvas has no CSS filter or theme-dependent recolouring.
+
+IEM XYZ tiles actually arrive as RGBA with antialiased colours. After existing
+PNG/size/placeholder validation, the compositor remaps each distinct colour:
+exact RGBA, then exact RGB, then nearest native RGB within Euclidean distance 3.
+Visible output preserves the original alpha. Repeated and tolerated RGB matches
+retain their candidate dBZ range; crossing a target stop sets `remapped:false`
+and counts `ambiguousPixels`. Verified provider-indexed PNG palettes preserve
+numeric indices rather than losing repeated-colour intensity information.
+Unknown opaque colours become transparent and are counted.
+
+For at most 256 native RGBA colours, verify an adaptive palette's exact RGBA
+round trip before swapping its palette. Pillow's RGBA octree is not always
+lossless even below 256 colours; if verification fails, verified exact RGB
+median-cut and the untouched alpha channel perform the remap in C. More than
+256 colours uses channel masks, bounded at 1024 colours; larger inputs are
+rejected. There are supersede checkpoints before and after every tile.
+
+Complete frames carry `legend:{remapped}`, `remapped`, `unmatchedColors`,
+`opaqueColors`, `unmatchedPixels`, `opaquePixels`, `ambiguousPixels`, and `revision`.
+Counts describe clipped viewport portions of complete layers, excluding discarded
+partial layers. More than 2% discarded opaque pixels or any cross-stop ambiguity
+sets `remapped:false`; the displayed frame caption says `palette incomplete`.
+Incomplete acquisition or remapping cannot assert clear conditions. The counts
+and flag are embedded in the atomic PNG (`radarRemap`) and
+read back on cache hits, including warm history. Cache identity includes the
+native-table/remapper revision. Hits must fully decode a correctly sized PNG
+and satisfy count/flag invariants and single-source LUT pixel validation; invalid
+entries are removed and rebuilt. Spatial overlay keys omit changing ages and
+health text, so routine polls do not rebuild geometry. The top-level legend's flag
+refers to the newest frame. Failed/abandoned layers do not pollute these counts.
+
 ### Input, layout and playback
 
 Loopback `wx.json` polls may send `radarZoom=auto|4..10` and
-`radarSource=mosaic|site`. Duplicate, invalid and non-loopback values are ignored.
-The server writes changed values atomically with fsync, preserving durable
-symlink targets. The launcher links both markers to
-`${XDG_STATE_HOME:-$HOME/.local/state}/wfpiconsole/`, migrating existing runtime
-preferences. A two-second preference stat watcher uses the same single-flight
-worker and existing budgets. Inputs coalesce while a build is active. A request
+`radarSource=mosaic|site` and `radarSeq=<int>`. Sequence values must match
+`^[0-9]{1,12}$` in ASCII. The page increases `intentSeq` for each posted intent
+(held in `radarIntent.localSeq`); the server writes it to runtime `radar_intent`,
+never following a durable symlink. Duplicate, invalid and non-loopback values are ignored.
+The loopback server validates a complete `{seq,zoom,source,center}` intent and
+atomically replaces one runtime `radar_intent` JSON record with fsync. Zoom and
+source are also written through durable symlinks for restart persistence. Once
+present, only the runtime record is consumed and watched by the worker; separate
+legacy files are read only before the first runtime transaction. Pan remains transient.
+The server rejects generations less than or equal to its current marker; exact
+retries are idempotent. `X-Radar-Intent-Seq` on loopback wx.json responses gives
+the browser the current authoritative marker even when emitted pixels are older.
+The browser allocates above the maximum server/payload/superseded sequence,
+retains a failed delivery's exact sequence and desired values for retry, and
+flushes queued input as soon as an outstanding poll finishes. A decoded matching
+generation acknowledges presentation; geometry alone is insufficient.
+
+Every tile boundary,
+between history frames, before replacing a temporary crop, and before snapshot
+publication checks the stamp again. `_RadarSuperseded` closes the session, removes
+the in-progress temporary file, publishes superseded once, and leaves the last published
+result untouched (including a newest frame already published before history).
+Negative entries for an aborted frame are not committed. The single-flight worker
+releases its guard before scheduling an immediate preference check; the normal
+2-second watcher also observes the unserved stamp. This wakeup replaces any
+120-second retry and shares all existing rate/cooldown budgets. A request
 is acknowledged only by the decoded authoritative payload, never by an old poll.
 
 Loopback polls also accept `&radarCenter=<lat>,<lon>` or
 `&radarCenter=station`. The strict decimal grammar is
 `^-?\d{1,3}(\.\d+)?,-?\d{1,3}(\.\d+)?$` (ASCII digits), bounded by
 latitude ±85.05112878 and longitude ±180. Duplicate parameters, invalid and
-non-loopback values are ignored. `radar_center` is an atomic, deduplicated marker
-beside the runtime `wx.json`; **it is never symlinked to durable storage**.
-`station`, absence, unreadable or invalid markers select the station center.
-The preference watcher includes center changes. The emitter uses the override
+non-loopback values are ignored. `radar_intent.center` holds the validated runtime center beside `wx.json`;
+**the runtime intent is never symlinked to durable storage**. Legacy
+`radar_center` is read only before a runtime intent exists. `station` selects
+the station center. The preference watcher observes whole-intent replacements. The emitter uses the override
 for each adapter's viewport, basemap and crop identity, so a new center always
-gets new frame IDs. Source eligibility, site selection and automatic zoom remain
-station-based. `metersPerPixel` still follows the viewport latitude's cosine:
+gets new frame IDs. Source eligibility, primary distance and automatic zoom remain
+station-based; capped site selection follows the viewport centre. `metersPerPixel` still follows the viewport latitude's cosine:
 east/west pan leaves it unchanged; north/south pan changes it slightly at fixed
 zoom. Bounds, scale and rings are recomputed using that authoritative geometry.
 Zoom persists across reboot; pan is transient.
@@ -377,10 +566,15 @@ radius resist at 0.3 and clamp on release. Pinch snaps to integer source limits
 through the same `radarZoom` intent as the stepper; wheel/ctrl-wheel debounce at
 120 ms. No pan inertia or focal-point geographic pinch is applied.
 
-Playback freezes on the newest good image through gesture and commit. Existing
+Playback freezes on the currently drawn image through gesture and commit.
+The fence never clears or redraws the echo canvas. Each new gesture starts from
+the held transform, including a fetch already in flight. Steppers, source taps,
+recenter and gesture commits share a 120ms trailing intent debounce. A payload
+arriving under pointers is evaluated once on release: only matching geometry
+can commit and clear the transform, without a spring. Older geometry is discarded. Existing
 generation guards invalidate abandoned decodes; superseded intents cannot replace
 the frozen presentation. Only matching decoded geometry clears the transform.
-A quiet `Updating` appears after 2.5 s; reduced motion removes the 160 ms spring.
+Reduced motion removes the 160 ms commit spring.
 When displaced, the station/rings travel together, the crosshair disappears, and
 an accent outer ring identifies the station. A bottom-center `Recenter on station`
 button sends `station`; 90 seconds without plate interaction does the same.
@@ -392,10 +586,13 @@ The 25px secondary header and 34px gutters remain. The masthead subtitle is
 restored; alert cases use an inline subtitle and compact masthead/alert band.
 No rail, Range, Updated or Frames rows remain. Source picker/caption live at
 top-left, continuous 372px horizontal legend at top-right, loop/track at
-bottom-left, zoom at bottom-right. Snow uses 274+10+88px. Controls have >=44px
+bottom-left, zoom at bottom-right. The single legend stays 372px for every source. Controls have >=44px
 hit areas. Chrome is confined to y0–72/y418–490, clear of the r150 station disc.
-The zoom note begins at y418 so it obeys the protected-band invariant.
-Scrims use flat paper .82 / night .78 alpha, never filters; chrome has no accent.
+The single note begins at y418 so it obeys the protected-band invariant.
+Scrims use flat paper .82 / night .78 alpha, never filters; chrome has no ramp pigment.
+The plate scopes secondary ink to 78% `--ink` / 22% `--paper`, so note, caption
+and reads meet 4.5:1 even over worst-case echoes in both themes. The displaced
+station accent is unchanged. Ramp colours are confined to echo data and its scale.
 
 A new latest image decodes before committing pixels, geometry, legend and scan
 time together. Active source switches also stage up to eight newest-ending

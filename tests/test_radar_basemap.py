@@ -112,7 +112,7 @@ def test_emitter_gating_zoom_prune_failure(make_emitter,hybrid,tmp_path,monkeypa
     assert 'basemap' not in emitter._build_payload()['radar']
     hybrid.view(); emitter._do_radar()
     old=emitter._radar_result; first=old.basemap
-    assert first and first['hash']==old.latest.split('/')[1]
+    assert first and first['hash']==old.latest.split('/')[2]
     old_path=Path(ae.RADAR_DIR)/'basemap'/(first['hash']+'.svg')
     unrelated=old_path.parent/'unowned.svg'; unrelated.write_text('untouched')
     hybrid.mono+=60; (tmp_path/'radar_zoom').write_text('9'); emitter._do_radar()

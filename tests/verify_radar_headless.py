@@ -121,9 +121,7 @@ def source_payload(source):
              completeFrameCount=3, updatedAt='21:08', observedAt='21:04',
              zoomMax=settings['max_zoom'], zoomSource='MRMS' if source.startswith('iem') else 'RainViewer')
     legend = settings['legend']
-    r['legend'] = dict(id=legend['id'], colorId=legend['colorId'], colorName=legend['colorName'],
-        rain=[dict(dbz=d, hex=h, label=l) for d, h, l in legend['rain']],
-        snow=dict(zip(('hex', 'label'), legend['snow'])) if legend['snow'] else None)
+    r['legend'] = dict(legend, remapped=True)
     for i, frame in enumerate(r['frames']):
         offset = (2 - i) * settings['cadence']
         minutes = 21 * 60 + 4 - offset // 60
@@ -166,7 +164,7 @@ def check_source_switch(browser, html, output_dir, theme):
     assert page.locator('#rad-asof').evaluate('(e) => getComputedStyle(e).fontSize') == '17px'
     assert page.evaluate('radarView.data.updatedAt') == '21:08'
     assert '2 min' in page.locator('#rad-src-cap').inner_text()
-    assert page.locator('#rad-ramp i').count() == 7
+    assert page.locator('#rad-ramp i').count() == 9
     assert page.locator('#rad-attrib').inner_text() == 'IEM / NOAA'
     assert page.locator('#alert-strip').is_visible()
     # The render must never expose a palette/image mismatch, even for one paint.
@@ -178,10 +176,9 @@ def check_source_switch(browser, html, output_dir, theme):
                 const c = document.createElement('canvas'); c.width=1; c.height=1;
                 const x=c.getContext('2d'); x.drawImage(e,0,0,1,1);
                 const red=x.getImageData(0,0,1,1).data[0];
-                const swatch=document.querySelector('#rad-ramp i').style.backgroundColor;
+                const swatch=document.querySelector('#rad-ramp i').style.background;
                 const iem=r.sourceId === 'iem-mrms-lcref';
-                if (red !== (iem ? 51 : 0) || (iem ? swatch !== 'rgb(164, 164, 255)' :
-                    !swatch.startsWith('rgba(146, 136, 113,'))) mismatches.push([r.sourceId, red, swatch]);
+                if (red !== (iem ? 51 : 0) || !swatch.includes('rgb(138, 163, 198)')) mismatches.push([r.sourceId, red, swatch]);
             }
             window.inspectId = requestAnimationFrame(inspect);
         }
@@ -219,7 +216,7 @@ def check_source_switch(browser, html, output_dir, theme):
     page.wait_for_function('radarView.data.sourceId === "rainviewer" && !radarView.pending')
     assert page.locator('#rad-attrib').inner_text() == 'RainViewer'
     assert page.locator('#rad-attrib').get_attribute('href') == 'https://www.rainviewer.com/'
-    assert page.locator('#rad-ramp i').count() == 7 and page.locator('.rad-snow-ramp').is_visible()
+    assert page.locator('#rad-ramp i').count() == 9 and page.locator('.rad-snow-ramp').count()==0
     assert '10 min' in page.locator('#rad-src-cap').inner_text()
     assert page.evaluate('radarView.data.updatedAt') == '21:08'
     page.wait_for_function('radarView.loaded.every(f => f.ready)')
@@ -272,6 +269,13 @@ def check_source_switch(browser, html, output_dir, theme):
     push(clear)
     page.wait_for_function('document.getElementById("rad-plate").dataset.state === "clear"')
     assert page.locator('#rad-frame-time').inner_text() == 'No echoes · clear'
+    incomplete=json.loads(json.dumps(clear));incomplete['radar']['legend']['remapped']=False
+    incomplete['radar']['frames'][-1]['legend']=dict(remapped=False)
+    push(incomplete)
+    assert page.locator('#rad-plate').get_attribute('data-state')!='clear'
+    assert page.locator('#rad-frame-time').inner_text()!='No echoes · clear'
+    assert 'palette incomplete' in page.locator('#rad-src-cap').inner_text()
+    push(clear);page.wait_for_function('radarView.clear')
     assert page.locator('#rad-updated-row').count() == 0 and page.locator('#rad-asof').is_visible()
     assert '2 min' in page.locator('#rad-src-cap').inner_text()
     clear['radar'].update(stale=True, ageSec=601); push(clear)
@@ -375,6 +379,7 @@ def check_zoom_site(browser, html, output_dir, theme, site):
         page.wait_for_function('radarView.data && !radarView.pending')
 
         def poll():
+            page.wait_for_timeout(140)
             page.wait_for_function('!polling'); page.evaluate('poll()'); page.wait_for_function('!polling')
 
         def build(desired=None, history=True):
@@ -420,7 +425,7 @@ def check_zoom_site(browser, html, output_dir, theme, site):
         if slug=='antimeridian': assert emitter._radar_bounds['e'] < emitter._radar_bounds['w']
         if slug!='seattle':
             assert page.locator('#rad-zoom-in').is_disabled()
-            assert page.locator('#rad-zoom-note').inner_text() == 'Closest view for RainViewer'
+            assert page.locator('#rad-note').inner_text() == 'Closest view for RainViewer'
         if slug=='ocean':
             page.wait_for_function('document.getElementById("rad-plate").dataset.state === "clear"')
             assert page.locator('#rad-frame-time').inner_text() == 'No echoes · clear'
@@ -487,14 +492,17 @@ def check_zoom_site(browser, html, output_dir, theme, site):
             state.source_down=True; r=build(9)
             assert r['zoomDesired']==9 and r['zoom']==7 and r['zoomCapped']
             assert page.locator('#rad-zoom-in').is_disabled()
-            assert page.locator('#rad-zoom-note').inner_text()=='Set closer than RainViewer reaches — showing its closest.'
+            page.wait_for_function("document.getElementById('rad-note').textContent==='Set closer than RainViewer reaches — showing its closest.'")
+            assert page.locator('#rad-note').inner_text()=='Set closer than RainViewer reaches — showing its closest.'
             shot('capped')
             state.source_down=False; r=build()
             assert r['zoom']==9 and not r['zoomCapped']
-            assert 'MRMS' in page.locator('#rad-zoom-note').inner_text()
+            page.wait_for_function("document.getElementById('rad-note').textContent.includes('MRMS')")
+            assert 'MRMS' in page.locator('#rad-note').inner_text()
             page.keyboard.press('+'); build(9)
             assert page.locator('#rad-zoom-in').is_disabled()
-            assert page.locator('#rad-zoom-note').inner_text()=='Closest view for MRMS'
+            page.wait_for_function("document.getElementById('rad-note').textContent==='Closest view for MRMS'")
+            assert page.locator('#rad-note').inner_text()=='Closest view for MRMS'
             shot('ceiling')
             page.keyboard.press('0'); build('auto')
             page.locator('#rad-play').click(); page.wait_for_function('!!radarView.timer')
@@ -810,14 +818,14 @@ def check_radar_v2(browser, html, output_dir, theme):
     assert page.locator('.rad-rail, .rad-place, .rad-sub, #rad-range, #rad-updated-row, #rad-cadence-row').count()==0
     box=page.locator('#rad-plate').bounding_box()
     assert box==dict(x=34,y=76,width=956,height=490),box
-    for selector in ('#rad-src','#rad-src-cap','#rad-legend','#rad-loop','#rad-zoom','#rad-zoom-note'):
+    for selector in ('#rad-src','#rad-src-cap','#rad-legend','#rad-loop','#rad-zoom','#rad-note'):
         if not page.locator(selector).is_visible():continue
         b=page.locator(selector).bounding_box();x=b['x']-box['x'];y=b['y']-box['y']
         assert y>=0 and (y+b['height']<=73 or y>=418) and y+b['height']<=490,(selector,b)
         dx=max(x-478,0,478-x-b['width']);dy=max(y-245,0,245-y-b['height'])
         assert dx*dx+dy*dy>150**2,(selector,b)
     assert page.locator('#rad-legend').bounding_box()['width']==414
-    assert page.locator('#rad-ramp i').count()==7
+    assert page.locator('#rad-ramp i').count()==9
     assert page.locator('.rad-legend-unit').inner_text()=='dBZ'          # unit, mixed case, no duplicate title
     assert page.locator('.rad-legend-title').count()==0
     assert page.locator('.mast-station .sub').is_hidden()               # station subtitle dropped on the radar tab
@@ -882,11 +890,13 @@ def check_radar_v2(browser, html, output_dir, theme):
     # Optimistic tap preserves old presentation until authoritative site pixels decode.
     push(initial);page.locator('#rad-src-site').tap()
     assert page.locator('#rad-src').get_attribute('data-state')=='pending'
-    assert page.locator('#rad-src-site').get_attribute('aria-pressed')=='true'
+    assert page.locator('#rad-src-site').get_attribute('aria-pressed')=='false'
     assert page.evaluate('radarView.data.sourceId')=='iem-mrms-lcref'
     page.evaluate('radarSource.sent=true')
-    site=source_payload('iem-nexrad-n0b');site['radar'].update(sourceMode='site',siteId='KATX',
-        sources=r['sources'],zoomMin=7,zoomMax=10,ageSec=720,stale=False)
+    site=source_payload('iem-nexrad-n0b');site['radar'].update(sourceMode='site',sourcePref='site',siteId='KATX',
+        sources=r['sources'],zoomMin=4,zoomMax=10,ageSec=720,stale=False,
+        sites=[dict(id='KATX',lat=48.194611,lon=-122.49569,primary=True,contributing=True,reason=None)])
+    for item in site['radar']['frames']:item['siteScans']=[dict(id='KATX',ts=item['ts'])]
     delayed=[]
     page.route('https://radar.test/site-history.png',lambda route:delayed.append(route))
     site['radar']['frames'][0]['url']='https://radar.test/site-history.png'
@@ -897,7 +907,7 @@ def check_radar_v2(browser, html, output_dir, theme):
     delayed.pop().fulfill(body=stream.getvalue(),content_type='image/png')
     page.wait_for_function('radarView.data.sourceMode==="site" && !radarView.pending')
     assert page.locator('#rad-src').get_attribute('data-state')=='confirmed'
-    assert 'KATX Camano Island' in page.locator('#rad-src-cap').inner_text()
+    assert 'NEXRAD · KATX' in page.locator('#rad-src-cap').inner_text()
     assert '~5 min volume' in page.locator('#rad-src-cap').inner_text()
     assert page.locator('#rad-plate').get_attribute('data-state')!='stale'
     page.screenshot(path=str(output_dir/f'radar-v2-site-{theme}.png'))
@@ -905,13 +915,13 @@ def check_radar_v2(browser, html, output_dir, theme):
     push(none);page.wait_for_function('radarView.data.sourceMode==="mosaic" && !radarView.pending')
     assert page.locator('#rad-src-site').is_disabled() and page.locator('#rad-src-site').text_content()=='No site'
     push(initial);page.locator('#rad-src-site').tap();page.evaluate('radarSource.sent=true')
-    failed=copy.deepcopy(initial);failed['radar']['sources'][1].update(available=False,reason='not reporting')
+    failed=copy.deepcopy(initial);failed['radar']['sourcePref']='site';failed['radar']['sources'][1].update(available=False,reason='not reporting')
     push(failed)
     assert page.locator('#rad-src-mosaic').get_attribute('aria-pressed')=='true'
-    assert 'KATX unavailable' in page.locator('#rad-src-cap').inner_text()
+    assert 'KATX not reporting' in page.locator('#rad-src-cap').inner_text()
     page.wait_for_timeout(8100);assert 'unavailable' not in page.locator('#rad-src-cap').inner_text()
     rv=source_payload('rainviewer');push(rv);page.wait_for_function('radarView.data.sourceId==="rainviewer"')
-    assert page.locator('#rad-src').is_hidden() and page.locator('.rad-snow-ramp').is_visible()
+    assert page.locator('#rad-src').is_hidden() and page.locator('.rad-snow-ramp').count()==0
     # Return releases every history bitmap, then re-decodes on entry.
     page.locator('.tab[data-screen="s-obs"]').tap();assert page.evaluate('radarView.loaded.length')==0
     page.locator('.tab[data-screen="s-radar"]').tap();page.wait_for_function('radarReady().length===3')
@@ -950,6 +960,7 @@ def check_radar_touch(browser, html, output_dir, theme):
             pointer('pointermove', 1, 478 + dx, 245 + dy)
             pointer('pointerup', 1, 478 + dx, 245 + dy)
         def poll():
+            page.wait_for_timeout(140)
             page.wait_for_function('!polling'); page.evaluate('poll()'); page.wait_for_function('!polling')
         def build():
             poll(); emitter._do_radar(); emitter._emit(0); poll()
@@ -989,17 +1000,17 @@ def check_radar_touch(browser, html, output_dir, theme):
         assert abs(desired['lat']-lat)<1e-9 and abs(desired['lon']-lon)<1e-9, desired
         assert page.evaluate('radarGesture.state==="committing" && !radarView.timer')
         held=page.locator('#rad-stack').get_attribute('style'); poll()
-        assert 'radarCenter=' in page.evaluate('pollURLs.at(-1)')
-        saved=tuple(map(float,(root/'radar_center').read_text().split(',')))
+        assert page.evaluate('pollURLs.some(u=>u.includes("radarCenter="))')
+        record=json.loads((root/'radar_intent').read_text());saved=(record['center']['lat'],record['center']['lon'])
         assert abs(saved[0]-lat)<1e-9 and abs(saved[1]-lon)<1e-9
-        assert not (root/'radar_center').is_symlink()
+        assert not (root/'radar_intent').is_symlink()
         page.wait_for_timeout(2600)
-        assert page.locator('#rad-updating').is_visible()
+        assert page.locator('#rad-note').get_attribute('data-shown')=='false'  # worker is still idle
         assert page.locator('#rad-stack').evaluate('e=>e.style.transform')
         panned=build()
         page.wait_for_function('!!radarView.timer')
         assert page.locator('#rad-stack').evaluate('e=>e.style.transform') == ''
-        assert page.locator('#rad-updating').is_hidden()
+        assert page.locator('#rad-updating').count()==0
         assert page.locator('#rad-recenter').is_visible() and page.locator('.rad-station-accent').count()==1
         assert page.locator('.rad-cross').count()==0
         glyph=page.locator('.rad-station').evaluate('e=>[+e.getAttribute("cx"),+e.getAttribute("cy")]')
@@ -1011,7 +1022,7 @@ def check_radar_touch(browser, html, output_dir, theme):
         pointer('pointerdown',1,478,245,'#rad-recenter'); pointer('pointerup',1,478,245,'#rad-recenter')
         assert page.evaluate('radarGesture.state==="idle"')
         page.locator('#rad-recenter').tap(); centered=build()
-        assert (root/'radar_center').read_text().strip()=='station' and centered['centered']
+        assert json.loads((root/'radar_intent').read_text())['center']=='station' and centered['centered']
         assert page.locator('#rad-recenter').is_hidden() and page.locator('.rad-cross').count()==1
         # Pinch 2x, freeze newest, whole-stack midpoint transform, integer snap/zoom channel.
         z=page.evaluate('radarView.data.zoom')
@@ -1086,7 +1097,7 @@ def check_radar_touch(browser, html, output_dir, theme):
         pointer('pointercancel',1,20478,10245)
         assert page.evaluate('radarGesture.state==="idle" && radarGesture.pointers.size===0')
         # Unequal axes at z4 expose any mpp/tangent or uniform-scale approximation.
-        page.evaluate('radarZoom.desired=4;radarZoom.sent=false'); build()
+        page.evaluate('radarZoom.desired=4;radarZoom.sent=false;radarPostIntent()'); build()
         page.locator('#rad-plate').evaluate('e=>{e.style.width="800px";e.style.height="400px"}')
         r=page.evaluate('radarView.data'); client=page.locator('#rad-plate').evaluate('e=>[e.clientWidth,e.clientHeight]')
         cx,cy=world_point(r['center']['lat'],r['center']['lon'],4)
@@ -1110,6 +1121,269 @@ def check_radar_touch(browser, html, output_dir, theme):
     print(f'RADAR TOUCH PASS: {theme}; real loopback/emitter pan+pinch, exact Mercator, independent axes, '
           'pointer capture/gating, freeze/settle, delayed/superseded intents, wheel/ctrl-wheel, '
           'caps/reduced-motion, glyph/recenter, 90s idle reset, off-tab cancel; no page errors',flush=True)
+
+
+def check_radar_v3(browser, html, output_dir, theme):
+    """G2: instrument geometry, honest copy, hit testing and overlapping intents."""
+    import copy
+    data=source_payload('iem-mrms-lcref');r=data['radar']
+    r.update(zoom=7,zoomDesired=7,zoomAuto=False,zoomMin=4,zoomMax=9,zoomCapped=False,
+             sourceMode='mosaic',sourcePref='mosaic',sourceFallback=None,sitePreferred=False,
+             siteResumeZoom=7,sources=[dict(mode='mosaic',available=True),dict(mode='site',siteId='KATX',available=True)],
+             intent=dict(seq=0,zoom=7,center='station',source='mosaic'),
+             refresh=dict(state='idle',frameIndex=1,frameTotal=1,forSeq=0))
+    # A known row of all 26 LUT samples tests actual canvas bytes in either theme.
+    image=Image.new('RGBA',(956,490));draw=ImageDraw.Draw(image)
+    for i,(_,color) in enumerate(ae._RADAR_LUT):draw.rectangle((i*36,100,i*36+35,390),fill=color)
+    stream=io.BytesIO();image.save(stream,'PNG')
+    frame=dict(id='v3-ramp',ts=r['observedTs'],at='17:12',complete=True,legend=dict(remapped=True),
+               url='data:image/png;base64,'+base64.b64encode(stream.getvalue()).decode())
+    r.update(frames=[frame],latest=frame['id'],observedAt='17:12')
+    context=browser.new_context(viewport=dict(width=1024,height=600),has_touch=True)
+    context.add_init_script("""window.pollURLs=[];window.testPayload=PAYLOAD;
+      window.fetch=u=>{pollURLs.push(String(u));return Promise.resolve({ok:true,
+        headers:{get:()=>new Date().toUTCString()},json:()=>Promise.resolve(testPayload)});};""".replace('PAYLOAD',json.dumps(data)))
+    context.route('https://radar.test/**',lambda route:route.fulfill(body=html,content_type='text/html'))
+    page=context.new_page();errors=[];page.on('pageerror',lambda e:errors.append(str(e)))
+    page.goto('https://radar.test/?tabs=1&theme='+theme);page.locator('.tab[data-screen="s-radar"]').click()
+    page.wait_for_function('radarView.good && !radarView.pending')
+    page.evaluate('radarView.paused=true;radarStopLoop(false)')
+    def push(d):
+        page.evaluate('(d)=>{if(d.radar && d.radar.intent){d.radar.intent.seq=radarIntent.targetSeq || 0;d.radar.refresh.forSeq=d.radar.intent.seq;}testPayload=d;render(d)}',d)
+    def note(state,index=0,total=1,seq=0):
+        page.evaluate("""([state,index,total,seq])=>{radarIntent.postedAt=0;radarView.refresh=
+          {state,frameIndex:index,frameTotal:total,forSeq:seq};radarNoteRender()}""",[state,index,total,seq])
+    widths=page.locator('#rad-ramp i').evaluate_all('es=>es.map(e=>e.getBoundingClientRect().width)')
+    assert len(widths)==9 and all(abs(a-b)<1 for a,b in zip(widths,[57.2,28.6,57.2,28.6,28.6,28.6,57.2,57.2,28.6]))
+    assert page.locator('#rad-ramp').bounding_box()['width']==372
+    ticks=page.locator('.rad-tick').evaluate_all("""es=>es.map(e=>({text:e.textContent,left:parseFloat(e.style.left),
+      w:getComputedStyle(e,'::before').width,h:getComputedStyle(e,'::before').height}))""")
+    assert [t['text'] for t in ticks]==['10','20','30','40','50','60','70']
+    assert all(abs(t['left']-x)<1 and t['w']=='1px' and t['h']=='3px' for t,x in zip(ticks,[0,57.2,114.5,171.7,228.9,286.2,343.4]))
+    pixels=page.locator('#rad-echo').evaluate('(e)=>Array.from({length:26},(_,i)=>Array.from(e.getContext("2d").getImageData(i*36+10,200,1,1).data))')
+    assert pixels==[list(c) for _,c in ae._RADAR_LUT]
+    assert page.locator('#rad-echo').evaluate('e=>getComputedStyle(e).filter')=='none'
+    for source in ae._RADAR_SOURCES:
+        changed=copy.deepcopy(data);changed['radar']['sourceId']=source;push(changed)
+        assert page.locator('.rad-snow-ramp,.rad-snow-label').count()==0
+    push(data)
+    assert page.locator('#rad-updating').count()==0 and page.locator('#rad-plate').get_attribute('aria-busy') is None
+    page.evaluate("""window.busyWrites=[];new MutationObserver(ms=>ms.forEach(m=>{
+      if(m.attributeName==='aria-busy')busyWrites.push(m.target.getAttribute('aria-busy'));
+      })).observe(document.getElementById('rad-plate'),{attributes:true});""")
+    page.evaluate("radarView.zoomNote='Closest view for MRMS';radarView.data.sourceFallback='site-zoom-floor'")
+    note('newest');assert page.locator('#rad-note').inner_text()=='Refreshing · newest frame'
+    note('history',4,12);assert page.locator('#rad-note').inner_text()=='Refreshing · frame 4 of 12'
+    page.evaluate("radarView.zoomNote='';radarView.data.sourceFallback=null")
+    note('idle');assert page.locator('#rad-note').get_attribute('data-shown')=='false'
+    page.evaluate('radarIntent.localSeq=41');note('newest',0,1,40)
+    assert page.locator('#rad-note').inner_text()=='Refreshing · restarted'
+    note('failed',0,1,41);assert page.locator('#rad-note').inner_text()=="Couldn't refresh · showing 17:12"
+    for state in ('newest','history','failed','idle'):
+        note(state,4,12,41)
+        assert page.locator('#rad-note').bounding_box()['height']==14
+        assert page.locator('#rad-note').bounding_box()['y']-page.locator('#rad-plate').bounding_box()['y']>=418
+    assert page.locator('#rad-note').evaluate('e=>getComputedStyle(e).pointerEvents')=='none'
+    # At the specified y418, the note is ABOVE the steppers. Verify the real
+    # hit surface, then overlap it temporarily with + to test pointer pass-through.
+    assert page.locator('#rad-note').evaluate('e=>{let b=e.getBoundingClientRect();return document.elementFromPoint(b.x+b.width/2,b.y+b.height/2)!==e}')
+    page.evaluate("""let n=document.getElementById('rad-note'),b=document.getElementById('rad-zoom-in').getBoundingClientRect(),p=document.getElementById('rad-plate').getBoundingClientRect();
+      n.style.top=(b.y-p.y+15)+'px';n.style.width='44px';n.style.right='auto';n.style.left=(b.x-p.x)+'px';""")
+    b=page.locator('#rad-note').bounding_box();page.mouse.click(b['x']+b['width']/2,b['y']+7)
+    page.wait_for_timeout(150)
+    assert page.evaluate('pollURLs.filter(u=>u.includes("radarSeq=")).length')==1
+    page.locator('#rad-note').evaluate("e=>e.removeAttribute('style')")
+    page.evaluate("radarView.refresh={state:'newest',forSeq:radarIntent.localSeq,frameIndex:0,frameTotal:1};radarIntent.postedAt=Date.now()-400;radarNoteRender()");assert page.locator('#rad-note').get_attribute('data-shown')=='false'
+    page.evaluate('radarIntent.postedAt=Date.now()-800;radarNoteRender()');assert page.locator('#rad-note').get_attribute('data-shown')=='true'
+    # Reset only test intents before the next independent case.
+    page.evaluate("radarZoom.desired=null;radarCenter.desired=null;radarSource.desired=null;radarGestureReset(false);radarIntent.localSeq=0;radarIntent.targetSeq=0;radarIntent.pending=null;radarIntent.postedAt=0")
+    fallback=copy.deepcopy(data);fallback['radar'].update(zoom=5,zoomDesired=5,sourcePref='site',sitePreferred=True,sourceFallback='site-zoom-floor')
+    push(fallback);page.wait_for_function('radarView.data.zoom===5 && !radarView.pending')
+    assert page.locator('#rad-src-mosaic').get_attribute('aria-pressed')=='true'
+    assert page.locator('#rad-src-site').get_attribute('aria-pressed')=='false'
+    assert page.locator('#rad-src-site').get_attribute('data-preferred')=='true'
+    assert page.locator('#rad-src-site').evaluate('e=>getComputedStyle(e).borderBottomStyle')=='dotted'
+    assert page.locator('#rad-src-cap').inner_text().endswith('· wider than KATX reaches')
+    assert page.locator('#rad-note').inner_text()=='KATX resumes at zoom 7'
+    assert not page.locator('#rad-src-site').is_disabled()
+    page.locator('#rad-src-mosaic').tap()
+    assert page.locator('#rad-src-site').get_attribute('data-preferred')=='false'
+    assert 'resumes' not in page.locator('#rad-note').inner_text()
+    assert not page.locator('#rad-src-cap').inner_text().endswith('· wider than KATX reaches')
+    page.wait_for_timeout(200)
+    cancelled=copy.deepcopy(fallback);cancelled['radar'].update(sourcePref='mosaic',sitePreferred=False,sourceFallback=None)
+    push(cancelled);page.wait_for_function('radarSource.desired===null')
+    count=page.evaluate('pollURLs.filter(u=>u.includes("radarSeq=")).length')
+    page.locator('#rad-src-site').tap();page.wait_for_timeout(250)
+    urls=page.evaluate('pollURLs.filter(u=>u.includes("radarSeq="))')
+    assert len(urls)==count+1 and 'radarSource=site' in urls[-1] and 'radarZoom=7' in urls[-1]
+    page.evaluate("radarZoom.desired=null;radarSource.desired=null;radarGestureReset(false);radarIntent.localSeq=0;radarIntent.targetSeq=0;radarIntent.pending=null;radarIntent.postedAt=0")
+    push(data);page.wait_for_function('radarView.data.zoom===7 && !radarView.pending')
+    count=page.evaluate('pollURLs.filter(u=>u.includes("radarSeq=")).length')
+    page.evaluate('radarZoomChange(1)');page.wait_for_timeout(60);page.evaluate('radarZoomChange(-1)');page.wait_for_timeout(180)
+    assert page.evaluate('pollURLs.filter(u=>u.includes("radarSeq=")).length')==count+1
+    page.evaluate('radarZoomChange(1)');page.wait_for_timeout(200);page.evaluate('radarZoomChange(-1)');page.wait_for_timeout(200)
+    assert page.evaluate('pollURLs.filter(u=>u.includes("radarSeq=")).length')==count+3
+    page.evaluate("radarZoom.desired=8;radarTransform(2,-478,-245,false);radarGesturePending()")
+    # Record every rAF in the drag; a frame landing for the old geometry is frozen.
+    motion=page.evaluate("""async d=>{
+      const plate=document.getElementById('rad-plate'),stack=document.getElementById('rad-stack');
+      const point=(type,x)=>plate.dispatchEvent(new PointerEvent(type,{pointerId:8,pointerType:'touch',clientX:x,clientY:260,bubbles:true}));
+      const pixel=()=>Array.from(document.getElementById('rad-echo').getContext('2d').getImageData(20,200,1,1).data);
+      let before=pixel(),matrices=[];point('pointerdown',400);
+      for(let x=410;x<=480;x+=10){point('pointermove',x);renderRadar(d);await new Promise(requestAnimationFrame);matrices.push(new DOMMatrix(getComputedStyle(stack).transform).m41);}
+      let held=pixel(),transform=stack.style.transform;point('pointerup',480);renderRadar(d);
+      return {before,held,after:pixel(),matrices,transform,afterTransform:stack.style.transform};
+    }""",data)
+    assert motion['before']==motion['held']==motion['after']
+    assert all(b>=a for a,b in zip(motion['matrices'],motion['matrices'][1:]))
+    assert all(x!=0 for x in motion['matrices']) and motion['transform']==motion['afterTransform']
+    page.evaluate("radarZoom.desired=null;radarCenter.desired=null;radarSource.desired=null;radarGestureReset(false);radarIntent.localSeq=0;radarIntent.targetSeq=0;radarIntent.pending=null;radarIntent.postedAt=0")
+    # A crop arriving under fingers is evaluated on release and clears in the
+    # decoded commit, with no spring back or intervening identity frame.
+    push(data);page.wait_for_function('!radarView.pending')
+    page.evaluate("""()=>{let p=document.getElementById('rad-plate');
+      for(let [type,x] of [['pointerdown',400],['pointermove',440]])p.dispatchEvent(new PointerEvent(type,{pointerId:9,pointerType:'touch',clientX:x,clientY:260,bubbles:true}));}""")
+    center=page.evaluate('radarGesture.pan.center')
+    matching=copy.deepcopy(data);mr=matching['radar'];mr.update(center=center,centered=False)
+    _,mr['metersPerPixel'],mr['bounds'],_=ae._radar_viewport(center['lat'],center['lon'],7,956,490)
+    mr['latest']='v3-matching';mr['frames'][0]['id']=mr['latest']
+    old=page.evaluate('radarView.good.id');push(matching)
+    assert page.evaluate('radarView.good.id')==old
+    page.evaluate("document.getElementById('rad-plate').dispatchEvent(new PointerEvent('pointerup',{pointerId:9,pointerType:'touch',clientX:440,clientY:260,bubbles:true}))")
+    page.wait_for_function("radarView.good.id==='v3-matching' && radarGesture.state==='idle' && !radarView.pending")
+    assert page.locator('#rad-stack').evaluate("e=>e.style.transform==='' && e.style.transition===''")
+    page.evaluate("radarCenter.desired=null;radarSource.desired=null;clearTimeout(radarIntent.timer);radarIntent.ready=false;radarIntent.localSeq=0;radarIntent.targetSeq=0;radarIntent.pending=null;radarIntent.postedAt=0")
+    sites=copy.deepcopy(data);sr=sites['radar'];sr.update(sourceMode='site',sourceId='iem-nexrad-n0b',sourcePref='site',sitePreferred=True,siteId='KATX')
+    sr['sites']=[dict(id=i,lat=lat,lon=lon,primary=n==0,contributing=True,reason=None) for n,(i,lat,lon) in enumerate([
+      ('KATX',47.65,-122.33),('KLGX',46.98,-123.82),('KRTX',49.2,-122.33)])]
+    push(sites);page.wait_for_function('radarView.data.sourceMode==="site" && !radarView.pending')
+    page.evaluate('window.heldOverlay=document.getElementById("rad-over").firstChild')
+    aged=copy.deepcopy(sites)
+    for item in aged['radar']['sites']:item['ageSec']=123
+    push(aged)
+    assert page.evaluate('document.getElementById("rad-over").firstChild===heldOverlay')
+    assert page.locator('.rad-site-edge').count()==3
+    assert page.evaluate("[...document.styleSheets].flatMap(s=>[...s.cssRules]).some(r=>r.selectorText==='.rad-over .rad-site-edge' && r.style.stroke==='var(--rule-faint)')")
+    assert page.locator('#rad-src-cap').inner_text()=='NEXRAD · KATX +2 · ~5 min volumes · IEM / NOAA'
+    for label in page.locator('.rad-site-label').all():
+        assert 88<=float(label.get_attribute('y'))<=412
+    assert 'KRTX' not in page.locator('.rad-site-label').all_text_contents()
+    dark=copy.deepcopy(sites);dark['radar']['siteId']='KLGX'
+    dark['radar']['sites'][0].update(contributing=False,primary=False,reason='not reporting')
+    dark['radar']['sites'][1]['primary']=True
+    dark['radar']['sites'].append(dict(id='KPDT',lat=47,lon=-121,contributing=True,primary=False,reason=None))
+    push(dark);page.wait_for_function('!radarView.pending && radarView.data.siteId==="KLGX"')
+    assert page.locator('#rad-src-site').inner_text()=='KLGX +2'
+    assert page.locator('#rad-src-cap').inner_text().endswith('· KATX not reporting')
+    secondary=copy.deepcopy(sites);sr=secondary['radar'];sr['observedTs']-=60
+    sr['latest']='recovered-primary';sr['frames'][0].update(id=sr['latest'],ts=sr['observedTs'],siteScans=[dict(id='KLGX',ts=sr['observedTs'])])
+    sr['sites'][0].update(contributing=False,reason='scan unavailable')
+    for item in sr['sites'][1:]:item['contributing']=item['id']=='KLGX'
+    push(secondary);page.wait_for_function('!radarView.pending && radarView.good.id==="recovered-primary"')
+    assert page.locator('#rad-src-site').inner_text()=='KLGX'
+    assert 'timeline KATX' in page.locator('#rad-src-cap').inner_text()
+    assert 'KATX scan unavailable' in page.locator('#rad-src-cap').inner_text()
+    colors=[b[k] for b in ae._RADAR_RAMP['bands'] for k in ('start','end')]
+    purity=page.evaluate("""colors=>{
+      const rgb=colors.map(c=>{let e=document.createElement('i');e.style.color=c;document.body.append(e);let v=getComputedStyle(e).color;e.remove();return v});
+      return [...document.querySelectorAll(RAD_CONTROLS+',.rad-tick,.rad-legend-unit,#rad-src-cap,#rad-note')].every(e=>!rgb.includes(getComputedStyle(e).color));
+    }""",colors)
+    assert purity
+    for target in page.locator('.rad-play,.rad-step,.rad-reset,.rad-seg').all():
+        if target.is_visible():
+            b=target.bounding_box();assert b['height']>=44 and b['width']>=44
+    contrast=page.evaluate("""()=>{
+      function rgba(s){let c=document.createElement('canvas'),x=c.getContext('2d');x.fillStyle=s;x.fillRect(0,0,1,1);let a=Array.from(x.getImageData(0,0,1,1).data);a[3]/=255;return a}
+      function lum(c){let a=c.slice(0,3).map(v=>v/255<=.04045?v/255/12.92:((v/255+.055)/1.055)**2.4);return a[0]*.2126+a[1]*.7152+a[2]*.0722}
+      let root=getComputedStyle(document.documentElement),ground=document.documentElement.dataset.theme==='night'?[255,255,255]:[0,0,0];
+      return ['#rad-note','#rad-src-cap','.rad-loop-read','.rad-zoom-read'].map(sel=>{
+        let e=document.querySelector(sel),style=getComputedStyle(e),fg=rgba(style.color),bg=rgba(style.backgroundColor),a=bg[3]??1;
+        let mixed=bg.slice(0,3).map((v,i)=>v*a+ground[i]*(1-a)),x=lum(fg),y=lum(mixed);return (Math.max(x,y)+.05)/(Math.min(x,y)+.05);
+      });
+    }""")
+    assert min(contrast)>=4.5,contrast
+    assert page.evaluate('busyWrites.length')==0 and not errors,errors
+    page.screenshot(path=str(output_dir/f'radar-v3-{theme}.png'))
+    print('RADAR V3 PASS:',theme,'; G2 legend/ticks, LUT pixels, single note/suppression/priority, fallback, debounce, overlapping gestures, multisite/dark chrome, targets and contrast',flush=True)
+    context.close()
+
+
+def check_radar_recovery(browser, html, theme):
+    """Deterministic delivery, debounce, reload and frozen-canvas regressions."""
+    import copy
+    data=source_payload('iem-mrms-lcref');r=data['radar']
+    r.update(zoom=7,zoomDesired=7,zoomAuto=False,zoomMin=4,zoomMax=9,sourceMode='mosaic',sourcePref='mosaic',
+             intent=dict(seq=40,zoom=7,source='mosaic',center='station'),
+             refresh=dict(state='idle',frameIndex=1,frameTotal=1,forSeq=41),
+             sources=[dict(mode='mosaic',available=True),dict(mode='site',siteId='KATX',available=True)])
+    context=browser.new_context(viewport=dict(width=1024,height=600))
+    context.add_init_script("""window.testPayload=PAYLOAD;window.pollURLs=[];window.serverSeq=42;
+      window.fetch=u=>{pollURLs.push(String(u));return Promise.resolve({ok:true,
+        headers:{get:k=>k==='X-Radar-Intent-Seq'?String(serverSeq):new Date().toUTCString()},
+        json:()=>Promise.resolve(testPayload)});};""".replace('PAYLOAD',json.dumps(data)))
+    context.route('https://radar.test/**',lambda route:route.fulfill(body=html,content_type='text/html'))
+    page=context.new_page();errors=[];page.on('pageerror',lambda e:errors.append(str(e)))
+    page.goto('https://radar.test/?tabs=1&theme='+theme);page.locator('.tab[data-screen="s-radar"]').click()
+    page.wait_for_function('radarView.good && !radarView.pending && !polling')
+    assert page.evaluate('radarIntent.localSeq')==42
+    page.clock.install();page.clock.pause_at(page.evaluate('Date.now()'))
+    page.evaluate("()=>{radarView.paused=true;radarStopLoop(false);window.requests=[];window.fetch=u=>{pollURLs.push(String(u));return new Promise((resolve,reject)=>requests.push({u,resolve,reject}));};}")
+    # Exact debounce boundary and coalescing, independent of host scheduling.
+    page.evaluate('radarZoomChange(1)');page.clock.run_for(60);page.evaluate('radarZoomChange(-1)')
+    page.clock.run_for(119);assert page.evaluate('requests.length')==0
+    page.clock.run_for(1);assert page.evaluate('requests.length')==1
+    query=page.evaluate('String(requests[0].u).split("&radarZoom=")[1]')
+    assert query.endswith('radarSeq=43')
+    page.evaluate('requests[0].reject(new Error("offline"))');page.wait_for_function('!polling')
+    assert page.evaluate('radarIntent.pending.seq')==43
+    page.evaluate('poll()');assert page.evaluate('requests.length')==2
+    assert page.evaluate('String(requests[1].u).split("&radarZoom=")[1]')==query
+    # Suppression has a hard boundary; retain the failed request while checking it.
+    page.evaluate("radarView.refresh={state:'newest',forSeq:43,frameIndex:0,frameTotal:1}")
+    page.clock.run_for(599);assert page.locator('#rad-note').get_attribute('data-shown')=='false'
+    page.clock.run_for(2);assert page.locator('#rad-note').get_attribute('data-shown')=='true'
+    # A second gesture queues behind the outstanding poll and flushes on finish.
+    page.evaluate('radarZoomChange(1)');page.clock.run_for(120)
+    assert page.evaluate('requests.length')==2
+    page.evaluate("requests[1].resolve({ok:true,headers:{get:k=>k==='X-Radar-Intent-Seq'?'43':null},json:()=>Promise.resolve(testPayload)})")
+    page.wait_for_function('requests.length===3')
+    assert page.evaluate('requests[2].u.includes("radarSeq=44")')
+    page.evaluate("requests[2].resolve({ok:true,headers:{get:k=>k==='X-Radar-Intent-Seq'?'44':null},json:()=>Promise.resolve(testPayload)})")
+    page.wait_for_function('!polling');assert page.evaluate('radarIntent.pending') is None
+    page.clock.resume()
+    # Reset intent state only; a fresh deferred fixture must show no failure note.
+    page.evaluate("radarZoom.desired=null;radarSource.desired=null;radarCenter.desired=null;radarGestureReset(false);radarIntent.targetSeq=0;radarIntent.postedAt=0;radarIntent.restartUntil=0")
+    page.evaluate("renderRadar({radar:Object.assign({},radarView.data,{refresh:{state:'idle',forSeq:40,frameIndex:1,frameTotal:1}})})")
+    assert page.locator('#rad-note').get_attribute('data-shown')=='false'
+    # Draw a historical image distinct from newest, then hold replacement decode.
+    page.evaluate("""()=>{let canvas=document.createElement('canvas');canvas.width=956;canvas.height=490;
+      let ctx=canvas.getContext('2d');ctx.fillStyle='#112233';ctx.fillRect(0,0,956,490);
+      window.historical=Object.assign({},radarView.good,{id:'historical',at:'17:10',ts:radarView.good.ts-120,img:canvas});
+      radarDraw(historical);radarTransform(2,-478,-245,false);radarGesture.state='committing';
+      window.nativeDecode=Image.prototype.decode;Image.prototype.decode=function(){return new Promise(resolve=>window.finishDecode=resolve)};
+      window.sample=()=>Array.from(document.getElementById('rad-echo').getContext('2d').getImageData(20,200,1,1).data);
+    }""")
+    held=page.evaluate('sample()')
+    replacement=copy.deepcopy(data);replacement['radar']['latest']='replacement';replacement['radar']['frames'][-1]['id']='replacement'
+    replacement['radar']['intent']['seq']=44
+    page.evaluate('d=>renderRadar(d)',replacement);page.wait_for_function('!!window.finishDecode')
+    assert page.evaluate('sample()')==held and page.evaluate('radarView.current.id')=='historical'
+    page.evaluate('()=>{finishDecode();Image.prototype.decode=nativeDecode;}');page.wait_for_function('!radarView.pending')
+    assert page.evaluate('radarView.good.id')=='replacement' and page.evaluate('sample()')!=held
+    page.evaluate("radarView.refreshFailure=true;radarDraw(historical)")
+    assert page.locator('#rad-note').inner_text()=="Couldn't refresh · showing 17:10"
+    page.evaluate('radarDraw(radarView.good)')
+    assert page.locator('#rad-note').inner_text().endswith(page.evaluate('radarFrameLabel(radarView.good)'))
+    page.evaluate("radarView.data.zoom=5;radarZoom.desired=null;radarSource.desired=null;radarCenter.desired={lat:47.8,lon:-122.3};radarTransform(1,40,20,false)")
+    size=page.locator('#rad-plate').evaluate('e=>[e.clientWidth,e.clientHeight]')
+    page.locator('#rad-src-site').click()
+    actual=page.evaluate('[radarGesture.scale,radarGesture.x,radarGesture.y]')
+    assert actual==[4,160-1.5*size[0],80-1.5*size[1]],actual
+    assert page.evaluate('radarCenter.desired')==dict(lat=47.8,lon=-122.3)
+    assert not errors,errors
+    context.close()
+    print('RADAR RECOVERY PASS:',theme,'; exact debounce/suppression clock, rejected delivery retry, authoritative reload seq, queued poll flush, idle deferral, historical decode fence, dynamic failure time',flush=True)
 
 
 def main():
@@ -1151,6 +1425,18 @@ def main():
             assert '&view=radar' in page.evaluate('pollURLs.at(-1)')
             assert '&r=1' in page.evaluate('pollURLs.at(-1)')
             page.wait_for_function('document.querySelector("#rad-plate").dataset.state === "live"')
+            # Progress must remain observable even while decoded pixels are
+            # frozen by an outstanding gesture intent. This adds no visual UI.
+            refresh = dict(state='history', frameIndex=2, frameTotal=8, forSeq=0)
+            actual=page.evaluate("""f => {
+                const good=radarView.good; radarGesture.state='gesturing';
+                renderRadar({radar:Object.assign({},radarView.data,{refresh:f})});
+                const result={refresh:radarView.refresh,held:radarView.good===good};
+                renderRadar({radar:radarView.data});
+                result.reset=radarView.refresh.state==='idle'; radarGesture.state='idle';
+                return result;
+            }""",refresh)
+            assert actual==dict(refresh=refresh,held=True,reset=True)
             assert page.locator('#s-radar').is_visible()
             assert page.locator('#rad-echo').evaluate('(e) => e.width === 956 && e.height === 490 && !e.hidden')
             box = page.locator('#rad-plate').bounding_box()
@@ -1189,6 +1475,8 @@ def main():
         check_forecast_blend(browser, html)
         check_loop(browser, html)
         for theme in ('paper', 'night'):
+            check_radar_recovery(browser, html, theme)
+            check_radar_v3(browser, html, args.output_dir, theme)
             check_source_switch(browser, html, args.output_dir, theme)
         for theme in ('paper', 'night'):
             check_radar_touch(browser, html, args.output_dir, theme)
@@ -1205,7 +1493,8 @@ def main():
           'palette fidelity per paint, scan/relative times and telemetry, clear/stale/legacy, '
           '1024x600 alert layout in both themes; five-site zoom paper/night, real loopback persistence, '
           'pending/confirmed/coalescing/reset, keyboard/focus, bounds/caps/restore, geometry/paused history, '
-          'refresh persistence, clear/stale, system dark theme, no accent zoom chrome; no page errors')
+          'refresh persistence, clear/stale, system dark theme, no accent zoom chrome; '
+          'v3 shared reflectivity, intent/refresh note and G2 in both themes; no page errors')
 
 
 if __name__ == '__main__':
