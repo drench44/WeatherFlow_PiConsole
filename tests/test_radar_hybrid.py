@@ -295,7 +295,7 @@ def test_legend_fidelity_real_iem_native_colortable():
         context = ssl.create_default_context(cafile=certifi.where())
     except ImportError:
         pass
-    req = urllib.request.Request(url, headers={'User-Agent': 'WeatherFlow-PiConsole-almanac'})
+    req = urllib.request.Request(url, headers={'User-Agent': 'WeatherAlmanac'})
     try:
         with urllib.request.urlopen(req, timeout=25, context=context) as response:
             html = response.read().decode()

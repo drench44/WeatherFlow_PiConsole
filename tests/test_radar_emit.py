@@ -33,7 +33,7 @@ def radar_net(monkeypatch):
 
     def fetch(req, timeout):
         assert 0 < timeout <= ae.RADAR_HTTP_TIMEOUT_SEC
-        assert req.get_header('User-agent') == 'WeatherFlow-PiConsole-almanac'
+        assert req.get_header('User-agent') == 'WeatherAlmanac'
         url = req.full_url
         if url == ae.RADAR_IEM_METADATA_URL:
             raise urllib.error.URLError('primary unavailable in fallback fixture')
@@ -292,7 +292,7 @@ def test_legend_fidelity_against_published_colortable():
     except ImportError:
         pass
     url = 'https://www.rainviewer.com/files/rainviewer_api_colors_table.csv'
-    request = urllib.request.Request(url, headers={'User-Agent': 'WeatherFlow-PiConsole-almanac'})
+    request = urllib.request.Request(url, headers={'User-Agent': 'WeatherAlmanac'})
     try:
         with urllib.request.urlopen(request, timeout=25, context=context) as response:
             rows = response.read().decode().splitlines()

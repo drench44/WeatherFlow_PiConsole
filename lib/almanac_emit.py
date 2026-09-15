@@ -176,7 +176,7 @@ ALERT_MAX              = 3     # cap the alerts array (the HTML strip renders on
 # NWS asks for a User-Agent that identifies the app with a contact. Keep any real
 # address OUT of git: read Station/Contact from config, else env ALMANAC_CONTACT,
 # else this generic repo URL (NWS rejects a blank/absent UA with 403).
-ALERTS_UA_FALLBACK = 'WeatherFlow-PiConsole-almanac (+https://github.com/gneitzke/WeatherFlow_PiConsole)'
+ALERTS_UA_FALLBACK = 'WeatherAlmanac (+https://github.com/gneitzke/weather-almanac)'
 
 # NWS product level parsed from the LAST word of the event name — a controlled
 # vocabulary that stays reliable even when CAP severity/urgency are 'Unknown'.
@@ -1737,7 +1737,7 @@ class AlmanacEmitter:
                     self._radar_health.issue_hedge(stall=attempt.stall_hedge)
                 else:
                     self._radar_health.retries += 1
-        headers = {'User-Agent': 'WeatherFlow-PiConsole-almanac'}
+        headers = {'User-Agent': 'WeatherAlmanac'}
         cached = self._radar_metadata.get(url)
         if metadata:
             headers['Cache-Control'] = 'no-cache'
@@ -3329,7 +3329,7 @@ class AlmanacEmitter:
                    '&wind_speed_unit=kmh'
                    f'&precipitation_unit={precip_unit}'
                    f'&temperature_unit={unit}&forecast_days=7&timezone=auto')
-            req = urllib.request.Request(url, headers={'User-Agent': 'WeatherFlow-PiConsole-almanac'})
+            req = urllib.request.Request(url, headers={'User-Agent': 'WeatherAlmanac'})
             with urllib.request.urlopen(req, timeout=25) as resp:
                 data = json.loads(resp.read().decode('utf-8'))
             days = self._fc_daily_from(data.get('daily') or {})
@@ -3625,7 +3625,7 @@ class AlmanacEmitter:
             if token:
                 # WAQI: nearest EPA/AirNow monitoring station
                 url = f'https://api.waqi.info/feed/geo:{lat};{lon}/?token={token}'
-                req = urllib.request.Request(url, headers={'User-Agent': 'WeatherFlow-PiConsole-almanac'})
+                req = urllib.request.Request(url, headers={'User-Agent': 'WeatherAlmanac'})
                 with urllib.request.urlopen(req, timeout=25) as resp:
                     data = json.loads(resp.read().decode('utf-8'))
                 if data.get('status') != 'ok':
@@ -3649,7 +3649,7 @@ class AlmanacEmitter:
                 url = ('https://air-quality-api.open-meteo.com/v1/air-quality'
                        f'?latitude={lat}&longitude={lon}&current=us_aqi,pm2_5'
                        '&hourly=us_aqi,pm2_5&forecast_days=1&timezone=auto')
-                req = urllib.request.Request(url, headers={'User-Agent': 'WeatherFlow-PiConsole-almanac'})
+                req = urllib.request.Request(url, headers={'User-Agent': 'WeatherAlmanac'})
                 with urllib.request.urlopen(req, timeout=25) as resp:
                     data = json.loads(resp.read().decode('utf-8'))
                 cur = data.get('current') or {}

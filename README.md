@@ -1,12 +1,20 @@
-# WeatherFlow PiConsole — Almanac fork
+# Weather Almanac
 
-> This is a fork of [Peter Davis's WeatherFlow PiConsole](https://github.com/peted-davis/WeatherFlow_PiConsole),
+A content-first weather console for a WeatherFlow Tempest station on a Raspberry Pi:
+one dominant temperature, a plain-language forecast, a seven-day band, and a live
+radar map you drag and pinch like any other. It runs on a wall panel as a kiosk
+and is viewable from any browser on the LAN.
+
+> Weather Almanac is built on [Peter Davis's WeatherFlow PiConsole](https://github.com/peted-davis/WeatherFlow_PiConsole),
 > the original and still-maintained console for WeatherFlow Tempest stations. Everything that
-> reads the station, talks to WeatherFlow, and draws the classic six-panel console is his work;
-> this fork adds the Almanac interface and its radar on top and keeps merging his fixes. If you
-> find the console useful, the person to thank is him.
+> reads the station, talks to WeatherFlow, and draws the classic six-panel console is his work
+> and is kept intact here: the classic console remains a supported mode, and his fixes are
+> merged as they land. If you find the console useful, the person to thank is him.
+>
+> **Installing the Almanac on a Pi:** see [`design/almanac/kiosk/PI4-SETUP.md`](design/almanac/kiosk/PI4-SETUP.md).
+> The installation sections further down are the upstream instructions for the classic console.
 
-The WeatherFlow PiConsole is a Python console that displays the data collected
+The WeatherFlow PiConsole underneath is a Python console that displays the data collected
 by a WeatherFlow Tempest or Smart Home Weather Station. The console uses either
 the WeatherFlow REST API and websocket service or the local UDP connection to
 stream data from your station in real time, including the 3-second rapid wind
@@ -26,7 +34,7 @@ please checkout the WeatherFlow community forums: https://community.weatherflow.
 https://weatherflow.com/tempest-weather-system/<br/>
 https://community.weatherflow.com/
 
-## The Almanac UI (this fork)
+## The Almanac UI
 
 This fork adds an optional **Almanac** interface: a glance-first redesign of the
 same station data, built to be read from across a room on a wall-mounted 7-inch

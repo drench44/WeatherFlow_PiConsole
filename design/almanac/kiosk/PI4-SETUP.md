@@ -41,7 +41,7 @@ guesses wrong. Point at a specific browser with `WFP_CHROMIUM=/usr/bin/chromium`
    You do **not** need to switch Wayland→X11; the launcher handles either.
 4. **Clone the fork and install:**
    ```
-   git clone -b main https://github.com/gneitzke/WeatherFlow_PiConsole.git ~/wfpiconsole
+   git clone -b main https://github.com/gneitzke/weather-almanac.git ~/wfpiconsole
    cd ~/wfpiconsole && ./wfpiconsole.sh install
    ```
 5. **Configure** (`wfpiconsole start`, then the wizard). It asks for a WeatherFlow

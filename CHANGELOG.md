@@ -1,6 +1,6 @@
 # Changelog
 
-Changes in this fork's Almanac work, newest first. The upstream WeatherFlow
+Changes in Weather Almanac, newest first. The upstream WeatherFlow
 PiConsole keeps its own release notes; entries under **Core** below are fixes
 to shared upstream code that the classic console benefits from too.
 
