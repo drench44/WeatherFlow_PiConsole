@@ -7,6 +7,21 @@ to shared upstream code that the classic console benefits from too.
 ## 2026-09-15
 
 ### Radar
+- **Radar v6.3 gives retries a timer-owned lifetime.** `refresh.nextRetry` and
+  `refresh.retryReason` exist only for a successfully scheduled future retry.
+  Dispatch, scheduled pass start, fulfilled completion, unchanged discovery,
+  supersession and stop clear the retry; intent work preserves only a still
+  pending future validation. Replacement callbacks are fenced and serialization
+  omits expired timestamps even when dispatch is late.
+- Both themes use the payload's `ts` for retry copy, name the budget/deadline/
+  provider/local/site cause, and say “next attempt now” below one second. A UI
+  switch timeout alone keeps “Updating”/“Switching” copy. Automatic buffering
+  settles on advancing playback without waiting for an unrequested intent ACK.
+  Expired retries leave settled captions and off-air refusal notes intact. The masthead's existing
+  data-age freshness rules are unchanged and now covered against retry state.
+- Deterministic engine lifecycle tests and both-theme headless regressions cover
+  expired/future retries, skewed browser clocks, subsecond copy, off-air refusal,
+  and independent STALE behavior. Verification is local only.
 - **Radar v6.2 bounds routine outage logging.** Each pass reports outcome,
   attempted source/site, elapsed time, request totals and failure classes, hedges,
   breaker state, next retry seconds and one escaped, bounded error. Independent

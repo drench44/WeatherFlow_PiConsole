@@ -827,6 +827,80 @@ def review_cases(browser,server,theme):
     (server.root/'wx.json').write_text(json.dumps(original));context.close()
 
 
+def check_retry_lifecycle(browser, server, theme):
+    timer = server.module._camera_persist_timer
+    if timer is not None:
+        timer.cancel(); timer.join()
+    server.module._radar_owner = None
+    for marker in ('radar_intent', 'radar_zoom', 'radar_source'):
+        (server.root/marker).unlink(missing_ok=True)
+    original = copy.deepcopy(server.data)
+    data = copy.deepcopy(original)
+    data['obsAgeSec'] = 0
+    data['radar']['refresh'] = dict(state='idle', frameIndex=8, frameTotal=31,
+        pending=dict(newest=False, four=False, eight=False, optional=False),
+        nextRetry=data['ts']-120, retryReason='budget')
+    # Include the old top-level alias: it must not resurrect an expired retry.
+    data['radar']['nextRetry'] = data['ts']-120
+    (server.root/'wx.json').write_text(json.dumps(data))
+    context = browser.new_context(viewport=dict(width=1024, height=600))
+    page = context.new_page()
+    errors = []
+    page.on('pageerror', lambda error: errors.append(str(error)))
+    page.goto(server.url+'/?tabs=1&theme='+theme)
+    page.wait_for_function('radarView.data?.completeFrameCount===8')
+    page.locator('.tab[data-screen="s-radar"]').click()
+    page.wait_for_function('radarReady().length===8&&radarView.current?.bitmap&&!radarSwitch', timeout=20000)
+    stamp = page.evaluate('radarView.current.stamp')
+    page.wait_for_function('stamp=>radarView.current.stamp!==stamp', arg=stamp, timeout=10000)
+    assert page.locator('#rad-src-cap').inner_text().startswith('Many radars blended')
+    assert 'Retrying' not in page.locator('#rad-note').inner_text()
+    result = page.evaluate(r"""d=>{
+      clearTimeout(pollTimer);pollController?.abort();++pollGen;
+      radarIntent.postedAt=0;
+      const cap=()=>document.getElementById('rad-src-cap').textContent;
+      const note=()=>document.getElementById('rad-note').textContent;
+      const realNow=Date.now;
+      const evidence=[];
+      try{
+        // Browser clock is years ahead of the payload. Only d.ts decides retry.
+        Date.now=()=> (d.ts+10*365*86400)*1000;
+        lastRenderMs=Date.now();failCount=0;recvAgeSec=0;recvPerf=performance.now();
+        for(const [reason,words] of [['budget','work budget'],['deadline','acquisition deadline'],['provider','provider issue'],['local','local issue'],['not reporting','site not reporting']]){
+          d.radar.refresh.nextRetry=d.ts+30;d.radar.refresh.retryReason=reason;
+          render(d);updateFreshness();
+          if(!cap().startsWith('Retrying view · '+words)||!note().includes(words+' · next attempt 30s'))throw Error(cap()+' / '+note());
+          if(document.getElementById('staleflag').classList.contains('on'))throw Error('retry marked fresh data STALE');
+          evidence.push({reason,caption:cap(),note:note()});
+        }
+        d.radar.refresh.nextRetry=d.ts+.25;render(d);
+        if(!note().includes('next attempt now')||note().includes('next attempt 0s'))throw Error(note());
+        // A later payload expires the timer, regardless of the browser clock.
+        d.ts+=1;render(d);
+        if(!cap().startsWith('Many radars blended')||note().includes('Retrying'))throw Error('expired '+cap()+' / '+note());
+        Date.now=()=> (d.ts-10*365*86400)*1000;
+        render(d);
+        if(cap().includes('Retrying')||note().includes('next attempt'))throw Error('past retry used browser clock');
+        // A missed switch deadline alone does not assert a scheduled retry.
+        radarSwitch={overdue:true};radarSourceRender();radarNoteRender();
+        if(!cap().startsWith('Updating view')||note().includes('Retrying'))throw Error('timeout invented retry');
+        radarSource.desired='site';radarSourceRender();
+        if(!cap().startsWith('Switching to Camano Island radar'))throw Error(cap());
+        // Off-air refusal still settles on Region with measured site evidence.
+        radarSwitch=null;radarSource.desired=null;radarSource.refused='site';
+        d.radar.nexrad={...d.radar.nexrad,reason:'not reporting',newestTs:null};render(d);
+        if(!cap().startsWith('Many radars blended')||!note().startsWith('KATX is off air · showing Region'))throw Error(cap()+' / '+note());
+        lastRenderMs=Date.now();recvAgeSec=61;updateFreshness();
+        if(!document.getElementById('staleflag').classList.contains('on'))throw Error('old data lost STALE');
+      }finally{Date.now=realNow;}
+      return evidence;
+    }""", data)
+    assert not errors, errors
+    print('RETRY LIFECYCLE', theme, result, flush=True)
+    context.close()
+    (server.root/'wx.json').write_text(json.dumps(original))
+
+
 def main():
     global QUICK
     p=argparse.ArgumentParser();p.add_argument('--browser');p.add_argument('--output-dir',type=Path,default=Path('/tmp/wfp-radar-v4'));p.add_argument('--smoke',action='store_true');args=p.parse_args();args.output_dir.mkdir(parents=True,exist_ok=True)
@@ -838,6 +912,7 @@ def main():
         for theme in ('paper','night'):
             smoke(browser,server,theme,args.output_dir)
             review_cases(browser,server,theme)
+            check_retry_lifecycle(browser,server,theme)
         check_forecast_blend(browser,Path('design/almanac/console_live.html').read_text())
         check_cold_load_no_data(browser,Path('design/almanac/console_live.html').read_text())
         browser.close()

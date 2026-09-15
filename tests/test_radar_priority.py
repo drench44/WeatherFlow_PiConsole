@@ -50,7 +50,7 @@ def test_request_order_loop_neighbours_deep_and_resume(make_emitter, hybrid, tmp
     emitter = make_emitter()
     mature_during_newest(hybrid, tmp_path)
     retries = []
-    emitter._schedule_retry = lambda key, callback, delay: retries.append(delay)
+    emitter._schedule_retry = lambda key, callback, delay, **kw: retries.append(delay)
     emitter._do_radar()
     newest = hybrid.latest
     expected = [(stamp(newest-120*i),8) for i in range(8) for _ in range(12)]

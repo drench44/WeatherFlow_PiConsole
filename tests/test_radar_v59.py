@@ -70,15 +70,14 @@ def test_progress_resets_hedge_timer(monkeypatch, stall):
 def test_corner_note_keeps_page_acquisition_after_wrap(state, expected):
     import json
     import subprocess
-    from pathlib import Path
-    html = Path('design/almanac/console_live.html').read_text()
-    function = next(line for line in html.splitlines() if line.startswith('  function radarNoteRender('))
+    from tests.test_radar_v46 import function
+    functions = '\n'.join(function(n) for n in ('isNum', 'radarPendingRetry', 'radarNoteRender'))
     script = '''
 const node={dataset:{}},$=()=>node,radarIntent={postedAt:0},radarSwitch=null,radarSource={};
 const radarFrameLabel=()=>'12:00';
 const radarView={data:{frameCount:8},current:{bitmap:{}},holdingWindow:false,
  loaded:Array.from({length:8},(_,i)=>({bitmap:i<4?{}:null})),refresh:{state:STATE}};
-''' .replace('STATE', json.dumps(state)) + function + '\nradarNoteRender();console.log(node.textContent);'
+''' .replace('STATE', json.dumps(state)) + functions + '\nradarNoteRender();console.log(node.textContent);'
     result = subprocess.run(['node', '-e', script], capture_output=True, text=True, check=True)
     assert result.stdout.strip() == expected
 

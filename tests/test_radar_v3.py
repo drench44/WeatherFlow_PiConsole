@@ -427,7 +427,7 @@ def test_budget_retry_exact_subsecond_headroom(make_emitter,hybrid,monkeypatch):
     emitter=make_emitter();emitter._do_radar()
     needed=len(ae._radar_viewport(47.61,-122.33,8,956,490)[0])+2
     emitter._radar_request_times=[-59.5]*needed+[0]*(ae.RADAR_REQUESTS_PER_MIN-needed)
-    delays=[];monkeypatch.setattr(emitter,'_schedule_retry',lambda key,cb,delay:delays.append(delay))
+    delays=[];monkeypatch.setattr(emitter,'_schedule_retry',lambda key,cb,delay,**kw:delays.append(delay))
     emitter._do_radar();assert delays==[.5] and emitter._radar_refresh['state']=='idle'
 
 

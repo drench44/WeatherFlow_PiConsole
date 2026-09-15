@@ -89,8 +89,8 @@ def verify(browser, server, theme, output):
     assert evidence['compositeEscape']
     # Contract expiry is independent of successful server polls. Invoke the
     # deadline callback with a fake timer instead of sleeping twenty seconds.
-    evidence['retry']=page.evaluate('''()=>{var callback,real=setTimeout;window.setTimeout=(fn,ms)=>{if(ms===RAD_SWITCH_MS){callback=fn;return 0;}return real(fn,ms);};try{radarChooseSource('mosaic');callback();}finally{window.setTimeout=real;}return {retry:radarSwitch.retry,caption:document.getElementById('rad-src-cap').textContent,bitmap:!!radarView.current.bitmap};}''')
-    assert evidence['retry']['retry'] and evidence['retry']['bitmap'] and evidence['retry']['caption'].startswith('Retrying Region')
+    evidence['retry']=page.evaluate('''()=>{var callback,real=setTimeout;window.setTimeout=(fn,ms)=>{if(ms===RAD_SWITCH_MS){callback=fn;return 0;}return real(fn,ms);};try{radarChooseSource('mosaic');callback();}finally{window.setTimeout=real;}return {overdue:radarSwitch.overdue,caption:document.getElementById('rad-src-cap').textContent,bitmap:!!radarView.current.bitmap};}''')
+    assert evidence['retry']['overdue'] and evidence['retry']['bitmap'] and evidence['retry']['caption'].startswith('Switching to Region')
     # Basemap stays at the camera's level even when echo source caps lower.
     assert page.evaluate('''()=>{radarView.data.zoomMax=7;radarCamera.zoom=10;return radarLevel()===7&&radarBasemapLevel()===10;}''')
     assert not errors,errors

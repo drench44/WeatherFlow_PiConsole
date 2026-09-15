@@ -1012,6 +1012,8 @@ class AlmanacEmitter:
         self._radar_request_metrics = []
         self._radar_failure_logs = {}
         self._radar_log_retry_at = None
+        self._radar_next_retry = None
+        self._radar_retry_reason = None
         self._radar_begin_log_pass()
         self._radar_metadata_at = {}
         self._radar_restart = False
@@ -1119,6 +1121,7 @@ class AlmanacEmitter:
                 except Exception:                                             # noqa: BLE001
                     pass
             self._events = []
+            self._radar_clear_retry()
             self._retries.clear()
             self._event = None
             self._radar_emit_pending = None
@@ -1179,14 +1182,17 @@ class AlmanacEmitter:
         except Exception:                                                 # noqa: BLE001
             self._inflight.discard(key)
 
-    def _schedule_retry(self, key, callback, timeout):
+    def _schedule_retry(self, key, callback, timeout, retry_reason="provider"):
         """ Arm the ONE pending retry a provider is allowed. Without this, every
         failure of a periodic poll starts its own retry chain and the chains
         multiply for as long as the network is down. """
         def _retry(dt):
-            self._retries.pop(key, None)
-            if key == 'radar':
-                self._radar_log_retry_at = None
+            with self._life_lock:
+                if self._retries.get(key) is not handle:
+                    return  # a cancelled/replaced callback cannot consume its successor
+                self._retries.pop(key, None)
+                if key == 'radar':
+                    self._radar_clear_retry()
             callback(dt)
 
         with self._life_lock:
@@ -1196,7 +1202,11 @@ class AlmanacEmitter:
             if handle is not None:
                 self._retries[key] = handle
                 if key == 'radar':
-                    self._radar_log_retry_at = time.time()+timeout
+                    with self._radar_lock:
+                        self._radar_log_retry_at = self._radar_next_retry = time.time()+timeout
+                        self._radar_retry_reason = retry_reason
+                        self._radar_refresh = dict(self._radar_refresh,
+                            nextRetry=self._radar_next_retry, retryReason=retry_reason)
 
     def _check_radar(self, _dt=None):
         with self._life_lock:
@@ -1523,10 +1533,12 @@ class AlmanacEmitter:
                 bytes=getattr(self, '_radar_received_bytes', 0)))
             self._radar_phase_metrics = self._radar_phase_metrics[-128:]
         refresh.update(reason='not reporting' if ctx.get('source_fallback') == 'site-not-reporting' else None,
-                       intent=dict(ctx.get('intent', {})), pending=dict(self._radar_pending),
-                       nextRetry=getattr(self, '_radar_next_retry', None))
-        ctx['refresh'] = refresh
+                       intent=dict(ctx.get('intent', {})), pending=dict(self._radar_pending))
         with self._radar_lock:
+            refresh.pop('nextRetry', None)
+            refresh.pop('retryReason', None)
+            refresh.update(self._radar_retry_fields())
+            ctx['refresh'] = refresh
             if snapshot is not None:
                 self._radar_result = snapshot
             self._radar_refresh = dict(refresh)
@@ -1541,20 +1553,37 @@ class AlmanacEmitter:
             window = self._radar_request_times[min(missing, count)-1]+60-now if missing > 0 and count else 0
             return max(0, window, self._radar_cooldowns.get(source, 0)-now)
 
-    def _radar_budget_retry(self, source, needed, min_delay=0):
+    def _radar_retry_fields(self):
+        # Caller holds the publication lock; expiry can precede timer dispatch.
+        if self._radar_next_retry is not None and self._radar_next_retry > time.time():
+            return dict(nextRetry=self._radar_next_retry, retryReason=self._radar_retry_reason)
+        return {}
+
+    def _radar_clear_retry(self):
+        """Consume/cancel the timer and its publication as one lifecycle operation."""
+        with self._life_lock:
+            old = self._retries.pop('radar', None)
+            if old is not None:
+                old.cancel()
+                if old in self._events:
+                    self._events.remove(old)
+            with self._radar_lock:
+                self._radar_log_retry_at = self._radar_next_retry = None
+                self._radar_retry_reason = None
+                self._radar_refresh = {k: v for k, v in self._radar_refresh.items()
+                                       if k not in ('nextRetry', 'retryReason')}
+
+    def _radar_budget_retry(self, source, needed, min_delay=0, reason='budget'):
         if self._radar_pass["outcome"] != "failed":
             self._radar_pass["outcome"] = "deferred"
         delay = max(min_delay, self._radar_headroom_delay(source, needed))
         # Build/deadline yields with free transport resume on the next watcher.
         delay = delay if delay > 0 else 2
         with self._life_lock:
-            old = self._retries.pop('radar', None)
-            if old is not None:
-                old.cancel()
-                if old in self._events: self._events.remove(old)
-        self._radar_next_retry = time.time()+delay
-        self._radar_refresh = dict(self._radar_refresh, nextRetry=self._radar_next_retry, pending=dict(self._radar_pending))
-        self._schedule_retry('radar', self._check_radar, delay)
+            self._radar_clear_retry()
+            self._schedule_retry('radar', self._check_radar, delay, retry_reason=reason)
+            with self._radar_lock:
+                self._radar_refresh = dict(self._radar_refresh, pending=dict(self._radar_pending))
 
     def _radar_note_source(self, source, ctx):
         old = self._radar_result
@@ -1652,7 +1681,7 @@ class AlmanacEmitter:
             self._radar_refresh = dict(state=state, frameIndex=sum(f['complete'] for f in snap.frames),
                                       frameTotal=len(snap.frames), intent=dict(self._radar_refresh.get('intent', {})),
                                       reason='not reporting' if snap.source_fallback == 'site-not-reporting' else None,
-                                      pending=dict(self._radar_pending), nextRetry=getattr(self, '_radar_next_retry', None))
+                                      pending=dict(self._radar_pending), **self._radar_retry_fields())
         self._radar_emit_now()
 
     def _radar_request_gate(self, source, deadline, reserve=0):
@@ -2435,7 +2464,7 @@ class AlmanacEmitter:
                 raise TimeoutError('visible newest objective failed three passes')
             self._radar_pending.update(newest=True, four=True, eight=True)
             ctx['retained_failed'] = True
-            self._radar_budget_retry(source, len(ctx['tiles'])+2)
+            self._radar_budget_retry(source, len(ctx['tiles'])+2, reason=self._radar_retry_reason or 'provider')
             return self._radar_result
         if ctx['viewed'] or ctx.get('staging_source'):
             self._radar_publish_refresh(ctx,state='idle')
@@ -2446,6 +2475,7 @@ class AlmanacEmitter:
             needed = 0
             view_delay = 0
             deferred = False
+            retry_reason = 'budget'
             retry = self._radar_session.on_retry
             # The callback also charges transparent retries at the current tier's
             # floor. HEAD probes and tile workers use the same atomic gate.
@@ -2511,7 +2541,8 @@ class AlmanacEmitter:
                         self._radar_publish_refresh(ctx, state='history', frameTotal=len(slots))
                         try:
                             frame = build(t, ctx['deadline'])
-                        except (TimeoutError, _RadarBudget):
+                        except (TimeoutError, _RadarBudget) as error:
+                            retry_reason = 'deadline' if isinstance(error, TimeoutError) else 'budget'
                             deferred = True
                             break
                         if frame['complete']:
@@ -2519,7 +2550,8 @@ class AlmanacEmitter:
                             pending_work()
                             if not publish():
                                 break
-            except (TimeoutError, _RadarBudget):
+            except (TimeoutError, _RadarBudget) as error:
+                retry_reason = 'deadline' if isinstance(error, TimeoutError) else 'budget'
                 deferred = True
                 view_delay = self._radar_deep_view_delay(ctx) if ctx.get('deep_history') else 0
             finally:
@@ -2528,7 +2560,7 @@ class AlmanacEmitter:
                 self._radar_session.on_retry = retry
             if any(not f['complete'] for f in frames.values()):
                 if deferred and view_delay is not None:
-                    self._radar_budget_retry(source, needed, min_delay=view_delay)
+                    self._radar_budget_retry(source, needed, min_delay=view_delay, reason=retry_reason)
                 else:
                     self._radar_budget_retry(source, max(1, needed))
         completed = sum(frames[t]['complete'] for t in slots[-target:])
@@ -2818,7 +2850,8 @@ class AlmanacEmitter:
             return True
         self._radar_retained_refresh('failed')
         probe = self._radar_health.probe_delay({source}) or 0
-        self._radar_budget_retry(source, 1, min_delay=max(2, probe))
+        self._radar_budget_retry(source, 1, min_delay=max(2, probe),
+            reason='deadline' if isinstance(error, TimeoutError) and not local else 'local' if local else 'provider')
         return False
 
     def _radar_refuse_dark_site(self, ctx):
@@ -2836,7 +2869,7 @@ class AlmanacEmitter:
                 source_fallback='site-not-reporting', sources=tuple(choices))
             self._radar_pending = {}
             self._radar_refresh = dict(state='idle', reason='not reporting',
-                intent=dict(ctx['intent']), frameIndex=0, frameTotal=0, pending={}, nextRetry=None)
+                intent=dict(ctx['intent']), frameIndex=0, frameTotal=0, pending={}, **self._radar_retry_fields())
         return True
 
     def _do_radar(self, intent_triggered=None, view_started=False, discovery=False):
@@ -2850,6 +2883,11 @@ class AlmanacEmitter:
             # Direct callers follow changed markers; scheduled/retry callbacks
             # explicitly force validation even if an intent arrived meanwhile.
             intent_triggered = stamp != self._radar_zoom_stamp or self._radar_restart
+        # A scheduled pass consumes the retry, even if discovery overtook it.
+        # Intent work can reuse cached knowledge while validation remains scheduled.
+        if not intent_triggered or self._radar_next_retry is None or self._radar_next_retry <= time.time():
+            self._radar_clear_retry()
+        inherited_retry = self._retries.get('radar')
         self._radar_restart = False
         self._radar_warm_pending = False
         self._radar_zoom_stamp = stamp
@@ -2857,7 +2895,7 @@ class AlmanacEmitter:
         # Production starts this at boot, 60s before the provider. An early tap
         # yields the lane while the bounded scanner finishes; no cache I/O here.
         if not self._radar_cache_ready.wait(0 if 'radar' in self._inflight else 30):
-            self._schedule_retry('radar', self._check_radar, .1)
+            self._schedule_retry('radar', self._check_radar, .1, retry_reason='local')
             return
         self._radar_consume_bad_tiles()
         if view_started and stamp == self._radar_result_stamp:
@@ -3014,7 +3052,7 @@ class AlmanacEmitter:
                     ctx['switch_reason'] = '; '.join(errors) or 'preferred source recovered after 300s dwell'
                 if self._radar_cooldowns.get(source, 0) > time.monotonic():
                     self._radar_retained_refresh('failed')
-                    self._radar_budget_retry(source, 1)
+                    self._radar_budget_retry(source, 1, reason='provider')
                     return
                 ctx['deadline'] = min(pass_deadline, time.monotonic()+RADAR_SOURCE_DEADLINE_SEC)
                 ctx.pop('hedge_budget', None)
@@ -3106,6 +3144,7 @@ class AlmanacEmitter:
                         self._schedule_retry('radar', self._check_radar, max(1, probe_delay))
                     return
                 except _RadarUnchanged:
+                    self._radar_clear_retry()
                     self._radar_pass['outcome'] = 'unchanged'
                     if source in self._radar_pass['validated']:
                         self._radar_pass['recovered'].add((source, 'pass'))
@@ -3146,12 +3185,7 @@ class AlmanacEmitter:
             self._radar_restart = True
             # The worker's single-flight guard releases before its immediate wakeup.
             # The 100 ms watcher also sees the unserved preference stamp.
-            with self._life_lock:
-                retry = self._retries.pop('radar', None)
-                if retry is not None:
-                    retry.cancel()
-                    if retry in self._events:
-                        self._events.remove(retry)
+            self._radar_clear_retry()
         except Exception as error:
             if self._radar_result.ts_frame is None:
                 self._radar_result=self._radar_result._replace(available=self._radar_result.center is not None,reason='no radar tiles')
@@ -3165,9 +3199,18 @@ class AlmanacEmitter:
             self._radar_log_failure(self._radar_pass['source'] or self._radar_result.source_id, error)
             probe_delay = self._radar_probe_delay()
             self._schedule_retry('radar', self._check_radar,
-                RADAR_RETRY_SEC if probe_delay is None else max(1, probe_delay))
+                RADAR_RETRY_SEC if probe_delay is None else max(1, probe_delay),
+                retry_reason='deadline' if isinstance(error, TimeoutError) else
+                'provider' if failure_class(error) == 'host' else 'local')
 
         finally:
+            # A completed pass retires its fulfilled retry. Preserve a new yield
+            # and an intent pass's still-pending scheduled validation.
+            if (self._radar_pass['outcome'] in ('ok', 'unchanged')
+                    and self._retries.get('radar') is inherited_retry
+                    and not (intent_triggered and self._radar_next_retry is not None
+                             and self._radar_next_retry > time.time())):
+                self._radar_clear_retry()
             if any(self._radar_pending.get(k) for k in ('newest','four','eight')) and not self._radar_restart and 'radar' not in self._retries:
                 self._radar_budget_retry(self._radar_result.source_id, 1)
             self._radar_arm_discovery()
@@ -3178,6 +3221,11 @@ class AlmanacEmitter:
 
     @staticmethod
     def _radar_payload(snap, now, tz, refresh=None):
+        refresh = dict(refresh or dict(state='idle', frameIndex=0, frameTotal=0))
+        retry = refresh.get('nextRetry')
+        if not isinstance(retry, (int, float)) or not math.isfinite(retry) or retry <= now:
+            refresh.pop('nextRetry', None)
+            refresh.pop('retryReason', None)
         def local(ts):
             return datetime.fromtimestamp(ts,tz).strftime('%H:%M') if ts is not None else None
         complete = [f['ts'] for f in snap.frames if f['complete']]
@@ -3197,7 +3245,8 @@ class AlmanacEmitter:
         return dict(available=snap.available,reason=snap.reason,geo=snap.geo,tiles=tiles,
             intent=tiles.get('intent', {}), geometry=tiles.get('geometry'), camera=tiles.get('camera'),
             advertisedTs=max((f['ts'] for f in snap.frames), default=None), acquiredTs=snap.ts_frame,
-            pending=(refresh or {}).get('pending', {}), nextRetry=(refresh or {}).get('nextRetry'),
+            pending=refresh.get('pending', {}),
+            **({k: refresh[k] for k in ('nextRetry', 'retryReason') if k in refresh}),
             switchDeadlineSec=20,
             sourceMode=snap.source_mode,siteId=snap.site_id,sources=list(snap.sources),
             sites=[dict(s,ageSec=int(now-s['newestTs']) if s['newestTs'] is not None else None) for s in snap.sites],

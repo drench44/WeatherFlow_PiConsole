@@ -184,14 +184,62 @@ contract. A mode tap synchronously paints `Switching to <choice> · showing
 <displayed source>`; zoom synchronously paints `Updating view · showing
 <displayed source>`. Both are observable in the first animation frame.
 
-At 20 seconds, any unfinished transaction enters visible `Retrying` copy even
-if polling has stopped responding. It retains the requested choice, scheduled
-acquisition and the old usable bitmap/loop. Rate-limited work exposes `nextRetry`
-as a wall-clock epoch and the page displays the remaining seconds. A retry does
-not silently choose another source. Paused, reduced-motion and clear-weather
-loops explicitly retain their corresponding static states instead of claiming
-advancing playback. The 20-second acceptance gate is measured on loopback; it is
-not a new claim about Pi CPU performance.
+At 20 seconds, an unfinished transaction remains visibly `Updating view` or
+`Switching to <choice>`. A missed UI deadline alone is not evidence of a retry.
+Automatic loop buffering
+settles once decoded playback advances; only a user intent transaction requires
+its matching engine acknowledgement.
+`Retrying` appears only for a scheduled retry whose `refresh.nextRetry` is
+strictly later than the same payload's top-level `ts`. The caption and note name
+`refresh.retryReason`; the note says `next attempt Ns`, or `next attempt now`
+when less than one second remains. Neither the browser wall clock nor elapsed
+switch time determines whether a retry is pending. A past/equal timestamp is
+ignored, including legacy payloads. The countdown changes with each payload.
+The requested choice and old usable bitmap/loop remain. A retry does not silently
+choose another source. Paused, reduced-motion and clear-weather loops explicitly
+retain their corresponding static states instead of claiming advancing playback.
+The 20-second acceptance gate is measured on loopback; it is not a new claim
+about Pi CPU performance.
+
+#### Retry fields (v6.3)
+
+- `radar.refresh.nextRetry`: optional Unix epoch seconds, with fractional seconds
+  preserved. Present **only after a retry timer has been successfully armed and
+  while its due time is strictly greater than the emitter time at serialization**
+  (therefore also later than the whole-second payload `ts`). Absent otherwise;
+  it is not a historical timestamp or a null placeholder.
+- `radar.refresh.retryReason`: present alongside `nextRetry`; one of `budget`
+  (request/build capacity or paced history), `deadline` (acquisition timeout),
+  `provider` (provider failure, cooldown or recovery probe), `local` (local
+  connection/resources/processing), or `not reporting` (site is not reporting).
+  The page uses respectively “work budget”, “acquisition deadline”,
+  “provider issue”, “local issue”, and “site not reporting”.
+- `refresh.reason` retains its existing acquisition/refusal meaning, including
+  `not reporting`; it cannot describe routine budget/deadline yields because
+  those can coexist with `state: "idle"` and `reason: null`. The distinct
+  `retryReason` carries the scheduled timer's cause. For older producers the
+  page can use a recognized `refresh.reason`, otherwise “scheduled retry”.
+- Top-level `radar.nextRetry` and `radar.retryReason` mirror the optional refresh
+  fields for compatibility; `refresh` is authoritative for the page.
+
+Timer dispatch clears the fields before pass admission, including a busy lane
+whose work is queued. A scheduled/discovery pass that overtakes the timer
+consumes and cancels it at pass start. Completion retires the fulfilled retry;
+`_RadarUnchanged`, supersession and stop also clear it. A successful intent pass
+preserves an inherited timer only while it is still pending and in the future:
+reusing cached intent knowledge does not replace scheduled validation. A pass
+that defers/fails may arm a new retry; that future schedule survives publication
+of retained/idle frames. Serialization independently omits an expired timestamp
+if timer dispatch is delayed. Cancelled callbacks cannot consume replacement
+timers.
+
+Closest-site off-air rechecks currently use `nexrad.nextCheckTs`/`nextCheckAt`
+and the discovery schedule, not a repair retry; they keep the measured off-air
+note and settled Region caption. `not reporting` is supported as a retry reason
+without inventing an additional timer for that refusal. The masthead `STALE`
+continues to mean stalled/missing engine data (and `SILENT` old observations);
+it never depends on radar retry state. Radar imagery retains its separate age
+and refresh-failure status.
 
 ### Intent protocol and ownership
 

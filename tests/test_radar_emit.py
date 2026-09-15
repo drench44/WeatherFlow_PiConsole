@@ -211,7 +211,7 @@ def test_never_raises_keeps_last_good_and_warns_once(make_emitter, radar_net, mo
     radar_net['times'] = [1800001200]
     warnings, retries = [], []
     monkeypatch.setattr(ae.Logger, 'warning', warnings.append)
-    monkeypatch.setattr(emitter, '_schedule_retry', lambda *a: retries.append(a))
+    monkeypatch.setattr(emitter, '_schedule_retry', lambda *a, **kw: retries.append(a))
     def fail(url):
         if failure == 'manifest' or (failure == 'tile' and url != ae.RADAR_RAINVIEWER_MANIFEST_URL):
             raise urllib.error.URLError('offline')
