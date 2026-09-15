@@ -208,11 +208,14 @@ MRMS metadata:
 `https://mesonet.agron.iastate.edu/data/gis/images/4326/mrms/lcref.json`.
 `meta.end_valid` must be UTC, an even minute, fresh, with `product:lcref` and
 `units:0.5 dBZ`. Conditional requests/304 retain validators and revalidate age.
-Candidates start at the advertised `end_valid` (`RADAR_IEM_READY_LAG_SEC = 0`).
-v4.9 removes the five-minute readiness hold: it alone made a one-cadence AS OF
-impossible on a two-minute feed. Tiles that are not rendered yet remain missing
-for this pass; validated sibling tiles publish partial and the next pass repairs
-from cache. Every accepted timestamp still names matching provider tiles.
+Candidates start at the advertised `end_valid`. In v5.0,
+`RADAR_IEM_READY_LAG_SEC = 300` predicts when the next scan should be fetchable;
+it does not cap the advertised stamp or delay an early available scan. Tiles
+that are not rendered yet remain missing for this pass; validated sibling tiles
+publish partial and the next pass repairs from cache. Newest-acquisition archive
+misses expire after 20 seconds so a previous miss cannot mask readiness; history
+and prefetch retain their 120-second negative cache. Every accepted timestamp
+still names matching provider tiles.
 
 During validation, an MRMS candidate probes the original archive with HEAD
 unless that stamp already has a successful probe:
@@ -344,6 +347,13 @@ INFO; the v4.8 retry line still carries `transport_retries` and
 `stale_first_byte_retries`. Radar faults do not change the engine/sensor HTTP health
 verdict. Health reflects the latest engine payload, like other `/health` fields.
 
+v5.0 adds `health.discovery`: `expectedReadyTs`, `nextPollTs`, `lastPollTs`
+(Unix seconds, null before known), `fastPolls` (0–6), `backingOff` (the bounded
+fast window is exhausted), and `ageSec` (current newest measurement age, null
+without a measurement). These appear in `/health.radar` and per-pass INFO too.
+`nextPollTs` includes budget/breaker delays and busy-lane rearming. Age is computed
+when telemetry is emitted, never frozen at fetch time.
+
 Validated native PNG bytes enter a 400-tile in-memory LRU before cancellation is
 checked. Keys include source, site when applicable, scan timestamp, zoom and tile
 X/Y. IEM native bytes do not depend on the console palette revision; RainViewer
@@ -373,8 +383,46 @@ continuous-view gate survive. Hidden documents omit the view signal. Off-tab
 passes fetch newest only and retain the hour on disk; warm view-start publishes
 that retained manifest without changed observation/fetch times. It also resumes
 missing opposite-mode warming; already resident rounds need no provider HTTP.
-Scheduled provider checks remain 180 seconds; external failures retry at 120
-seconds; capacity and view-gate yields schedule their next eligible opportunity.
+
+**Readiness discovery (v5.0).** After the staggered boot fetch, a single cancellable
+one-shot replaces the old 180-second radar interval. MRMS discovery runs at
+`publishedStamp + 120 + RADAR_IEM_READY_LAG_SEC`, then every 20 seconds when the
+stamp has not advanced. Site discovery uses `publishedStamp + expectedCadence`:
+the median of the last four listed volume gaps, bounded to 300–600 seconds
+(default 300), followed by 30-second re-polls. RainViewer uses its 600-second
+cadence with 25-second re-polls. Six attempts bound each fast polling window;
+without a new stamp discovery backs off to 120 seconds until recovery. A new
+published source/site/stamp resets and re-aligns the window; rezooms and warming
+of the same stamp do not reset it.
+
+Discovery uses the existing single-flight radar lane and real metadata GETs
+(including conditional MRMS responses) or concurrent site listings. An unchanged
+complete newest scan refreshes validated intent/prefetch knowledge and ends a
+discovery pass before tiles/history/prefetch. A new
+stamp goes immediately through normal primary acquisition, v4.7 manifest sliding,
+and v4.6 wrap adoption. Existing partial repair and warming retries remain
+separate, with their original reserve and tiers. Discovery needs one free request
+slot to start; every listing, tile, retry and hedge still pays the shared 240/minute
+gate. Open breakers wait for their recovery probe, provider cooldowns and full
+budgets postpone wakeups, and a busy lane re-arms after five seconds while warming
+yields at its next checkpoint. A coincident repair/history retry becomes the due
+discovery pass, consuming that wakeup once. Breakers/cooldowns are scoped to the
+active/preferred source chain; an unused fallback cannot force one-second polls.
+Stop cancels the readiness event through the normal lifecycle registry. The two-second emit
+tick only reports data; it does not schedule discovery.
+
+On a healthy regular MRMS feed within the bounded polling window, the target is
+newest pixels on screen within about 30 seconds of fetchability and AS OF age
+below `120 + 300 + 30 = 450` seconds, including discovery/acquisition/display.
+This is a warm-path target, not a guarantee during provider outages, exhausted
+budgets or sustained transport failure. The 80% of `staleSec` suffix threshold
+is unchanged. `tests/test_radar_v50.py` uses a deterministic clock;
+`tests/verify_radar_v50.py` exercises five scheduled publications with a
+300-second lag and publication jitter through real loopback TLS and both browser
+themes. Only the inter-poll waits are accelerated; decoding/playback and I/O
+latency are measured in real time. A canvas draw audit measures the first visible
+new-stamp composite, including the wait through the preserved playback wrap.
+The 20-second MRMS re-poll leaves room for acquisition and that wrap.
 
 ```
 radar/t/<renderRevision>/<sourceId>/<ICAO-or->/<YYYYMMDDHHMM>/<z>/<x>/<y>.png

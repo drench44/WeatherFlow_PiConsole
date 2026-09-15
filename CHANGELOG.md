@@ -7,6 +7,18 @@ to shared upstream code that the classic console benefits from too.
 ## 2026-09-14
 
 ### Radar
+- **Radar v5.0 discovers scans at expected readiness.** A cancellable one-shot
+  replaces the unaligned 180-second poll. MRMS predicts the next stamp plus a
+  300-second provider lag, then re-polls every 20 seconds; site listings predict
+  the next volume from recent spacing and re-poll every 30 seconds. Six fast
+  attempts are bounded by 120-second backoff, host breakers and the shared
+  240/minute budget. Unchanged discovery ends after metadata/listings. New scans
+  retain the sliding manifest and wrap playback, reserve, partial repair and
+  prefetch tiers. The lag predicts discovery without suppressing early scans;
+  newest archive misses expire within a re-poll. Health/INFO expose expected
+  readiness, next/last poll, bounded polling state and live age. Deterministic
+  scheduler tests and a five-stamp, both-theme loopback TLS/browser harness cover
+  publication jitter and the warm-path fetchability-to-screen/age targets.
 - **Radar v4.9 isolates request failures from the displayed window.** Newest
   tiles hedge after two seconds without a response byte, using fresh connections
   and three reserved rescue leases. Each tile gets at most two six-second

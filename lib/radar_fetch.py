@@ -106,9 +106,11 @@ class HostHealth:
                 raise CircuitOpen('radar source host circuit open: '+source)
             return [(s['url'], s['metadata']) for s in states if s['until']]
 
-    def probe_delay(self):
+    def probe_delay(self, sources=None):
         with self.lock:
-            delays = [max(0, s['until']-time.monotonic()) for s in self.hosts.values() if s['until']]
+            hosts = self.hosts if sources is None else {
+                h: self.hosts[h] for source in sources for h in self.sources.get(source, ())}
+            delays = [max(0, s['until']-time.monotonic()) for s in hosts.values() if s['until']]
             return min(delays) if delays else None
 
     def snapshot(self):

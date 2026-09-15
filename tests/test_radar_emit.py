@@ -244,7 +244,7 @@ def test_radar_schedules_are_registered_and_cancelled(make_emitter, monkeypatch)
     clock = FakeClock(); monkeypatch.setattr(ae, 'Clock', clock)
     monkeypatch.setattr(ae, 'threading', SimpleNamespace(Thread=HangingThread))
     emitter = make_emitter(); emitter.start()
-    assert sorted(e.timeout for e in clock.events if e.timeout in (60, 180)) == [60, 180]
+    assert sorted(e.timeout for e in clock.events if e.timeout in (60, 180)) == [60]
     emitter._schedule_retry('radar', emitter._check_radar, 120)
     emitter._schedule_retry('radar', emitter._check_radar, 120)
     assert len(emitter._retries) == 1

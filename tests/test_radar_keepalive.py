@@ -28,7 +28,7 @@ def origin(tmp_path, monkeypatch):
     state = SimpleNamespace(connections=0, requests=[], closed=0, idle=2,
                             close_after=0, alternate=False, fail_fresh=False,
                             headers={}, second=None, delay=0, active=0, peak=0, hold=0, body=png(),
-                            newest_ts=None, behavior=None, path_counts={}, hang=False, hang_ids=set(), hang_path=None, release=threading.Event(), drip=None)
+                            newest_ts=None, behavior=None, response=None, path_counts={}, hang=False, hang_ids=set(), hang_path=None, release=threading.Event(), drip=None)
     lock = threading.Lock()
     gate = threading.Condition(lock)  # hold: tile requests wait until `hold` are in flight (deterministic peak)
     class Handler(BaseHTTPRequestHandler):
@@ -116,6 +116,8 @@ def origin(tmp_path, monkeypatch):
                 stamp = state.newest_ts or int(time.time())//120*120
                 raw = json.dumps(dict(meta=dict(product='lcref', units='0.5 dBZ',
                     end_valid=datetime.fromtimestamp(stamp, timezone.utc).isoformat()))).encode()
+            if state.response is not None:
+                raw = state.response(self.path, raw)
             self.send_response(200)
             self.send_header('Content-Length', str(len(raw)))
             for k, v in state.headers.items(): self.send_header(k, v)

@@ -49,6 +49,7 @@ from lib.radar_geometry import (world_point, world_inverse, parse_center,
                                 circle_intersects_bounds, distance_meters)
 from lib.radar_http import RadarSession, is_transport_error
 from lib.radar_fetch import HostHealth, CircuitOpen, Attempt, tile_race
+from lib.radar_discovery import DiscoverySchedule
 import logging
 # Pillow's PNG reader logs every chunk at DEBUG ("STREAM b'IDAT' ..."), and Kivy's
 # root logger passes DEBUG through to its file handler: on the Pi that was ~800 SD-card
@@ -70,7 +71,6 @@ AQI_CHECK_INTERVAL     = 600   # seconds (10 min) — refresh air quality; short
 ALERTS_CHECK_INTERVAL  = 900   # seconds (15 min) — NWS alerts change slowly; be gentle on api.weather.gov
 FORECAST_CHECK_INTERVAL = 3600 # seconds (1 h) — the daily outlook barely moves intra-hour
 FORECAST_RETRY_SEC      = 120  # seconds — boot retry cadence until the FIRST forecast succeeds
-RADAR_CHECK_INTERVAL = 180
 RADAR_RETRY_SEC = 120
 RADAR_HISTORY_SEC = 3600
 RADAR_IEM_FRAME_INTERVAL_SEC = 120
@@ -121,8 +121,8 @@ RADAR_VIEW_TTL = 900
 RADAR_VIEWPORT_W = 956
 RADAR_VIEWPORT_H = 490
 RADAR_VIEWPORT_PX = RADAR_VIEWPORT_H  # short-axis scale compatibility
-# MRMS on-demand tiles routinely trail metadata: avoid the unrendered newest slots.
-RADAR_IEM_READY_LAG_SEC = 0  # newest advertised measurement; partial tiles repair next pass
+# MRMS on-demand tiles routinely trail metadata: predict their publication window.
+RADAR_IEM_READY_LAG_SEC = 300  # readiness prediction only; never suppress an advertised scan
 RADAR_SITE_LIST_URL = "https://mesonet.agron.iastate.edu/json/radar.py"
 RADAR_SITE_TILE_TEMPLATE = "https://mesonet.agron.iastate.edu/cache/tile.py/1.0.0/ridge::{site}-N0B-{stamp}/{z}/{x}/{y}.png"
 RADAR_RAINVIEWER_COLOR = 2
@@ -615,6 +615,10 @@ class _RadarRevalidate(Exception):
     """Remembered newest tiles failed; rediscover the source in this pass."""
 
 
+class _RadarUnchanged(Exception):
+    """A discovery-only pass found the current complete scan."""
+
+
 class _RadarBudget(Exception):
     """Yield unfinished history to a later pass; never bypass the shared limit."""
 
@@ -929,6 +933,9 @@ class AlmanacEmitter:
         self._radar_transport_retries = 0
         self._radar_stale_first_byte_retries = 0
         self._radar_health = HostHealth()
+        self._radar_discovery = DiscoverySchedule()
+        self._radar_discovery_event = None
+        self._radar_discovery_pending = False
         self._radar_probe_reuse = {}
         self._radar_metadata = {}
         self._radar_zoom_stamp = None
@@ -1019,7 +1026,6 @@ class AlmanacEmitter:
             self._schedule(self._check_forecast, 50)
             self._schedule(self._check_forecast, FORECAST_CHECK_INTERVAL, interval=True)
             self._schedule(self._check_radar, 60)
-            self._schedule(self._check_radar, RADAR_CHECK_INTERVAL, interval=True)
             self._radar_zoom_stamp = self._radar_preference_stamp()
             self._schedule(self._check_radar_zoom, RADAR_INTENT_CHECK_SEC, interval=True)
             self._schedule(self._check_radar_geo, RADAR_GEO_QUANTUM_SEC, interval=True)
@@ -1041,6 +1047,8 @@ class AlmanacEmitter:
             self._retries.clear()
             self._event = None
             self._radar_emit_pending = None
+            self._radar_discovery_event = None
+            self._radar_discovery_pending = False
             if self._radar_session is not None and 'radar' not in self._inflight:
                 self._radar_session.close()
                 self._radar_session = None
@@ -1107,7 +1115,90 @@ class AlmanacEmitter:
                 self._retries[key] = handle
 
     def _check_radar(self, _dt=None):
+        if self._radar_discovery.due is not None and self._radar_discovery.due <= time.time():
+            self._check_radar_discovery(_dt)
+            return
         self._spawn('radar', lambda: self._do_radar(intent_triggered=False))
+
+    def _radar_arm_discovery(self, min_delay=0):
+        """One readiness wakeup, separate from repair/warming retries and emit."""
+        with self._life_lock:
+            old = self._radar_discovery_event
+            if old is not None:
+                old.cancel()
+                if old in self._events:
+                    self._events.remove(old)
+            self._radar_discovery_event = None
+            if not self._running:
+                return
+            now = time.time()
+            plan = self._radar_discovery
+            plan.observe(self._radar_result, now, RADAR_IEM_READY_LAG_SEC)
+            due = plan.due if plan.due is not None else now + RADAR_RETRY_SEC
+            delay = max(1, min_delay, due-now)
+            source = self._radar_result.source_id
+            probe = self._radar_probe_delay()
+            if probe is not None:
+                # Preserve recovery of a failed preferred source while on fallback.
+                delay = max(min_delay, 1, probe)
+            delay = max(delay, self._radar_headroom_delay(source, 1))
+            plan.due = now + delay
+            self._radar_discovery_event = self._schedule(self._check_radar_discovery, delay)
+
+    def _check_radar_discovery(self, _dt=None):
+        with self._life_lock:
+            # A repair/history retry can reach the same deadline first. It
+            # becomes discovery and consumes the pending readiness handle too.
+            old = self._radar_discovery_event
+            if old is not None:
+                old.cancel()
+                if old in self._events:
+                    self._events.remove(old)
+            self._radar_discovery_event = None
+        if 'radar' in self._inflight:
+            self._radar_discovery_pending = True
+            self._radar_arm_discovery(min_delay=5)
+            return
+        self._radar_discovery_pending = False
+        self._radar_discovery.started(time.time())
+        self._spawn('radar', lambda: self._do_radar(intent_triggered=False, discovery=True))
+
+    def _radar_discovery_unchanged(self, source, newest, ctx, validated=None):
+        snap = self._radar_result
+        if source == 'iem-nexrad-n0b' and (snap.site_id != ctx.get('site_id') or
+                not snap.frames or [(p['id'], p['ts']) for p in snap.frames[-1]['siteScans']]
+                != _radar_site_pairs(ctx, newest)):
+            return  # a secondary layer may advance between primary volumes
+        if (ctx.get('discovery') and snap.source_id == source and snap.ts_frame == newest
+                and self._radar_result_stamp == ctx.get('preference_stamp')
+                and snap.frames and snap.frames[-1]['complete']):
+            if validated is not None:
+                # The complete current scan has already passed tile validation.
+                # Refresh intent/prefetch knowledge even though no build runs.
+                self._radar_newest[(source, None)] = (time.monotonic(), validated)
+            raise _RadarUnchanged()
+
+    def _radar_health_payload(self):
+        health = self._radar_health.snapshot()
+        health['discovery'] = self._radar_discovery.telemetry(time.time(), self._radar_result.ts_frame)
+        return health
+
+    def _radar_probe_delay(self):
+        # Recover the active/preferred chain. An expired breaker belonging to
+        # an unused fallback must not turn healthy discovery into 1-second polls.
+        snap = self._radar_result
+        sources = {snap.source_id}
+        if snap.source_id == 'rainviewer':
+            sources.add('iem-mrms-lcref')
+        if snap.source_pref == 'site' and not snap.source_fallback:
+            sources.add('iem-nexrad-n0b')
+        probe = self._radar_health.probe_delay(sources)
+        now = time.monotonic()
+        delays = [until-now for source, until in self._radar_cooldowns.items()
+                  if source in sources and until > now]
+        if probe is not None:
+            delays.append(probe)
+        return min(delays) if delays else None
 
     def _radar_read_intent(self):
         try:
@@ -1278,6 +1369,8 @@ class AlmanacEmitter:
     def _radar_checkpoint(self, ctx):
         if 'preference_stamp' in ctx and ctx['preference_stamp'] != self._radar_preference_stamp(ctx.get('stamp_names')):
             raise _RadarSuperseded('radar intent changed')
+        if self._radar_discovery_pending and (ctx.get('prefetch') or ctx.get('request_reserve')):
+            raise _RadarBudget('radar warming yielded to readiness discovery')
         if ctx.get('deep_history') and self._radar_deep_view_delay(ctx) != 0:
             raise _RadarBudget('radar continuous view ended')
         if ctx.get('prefetch') and not self._radar_is_viewed():
@@ -1347,7 +1440,7 @@ class AlmanacEmitter:
         self._schedule_retry('radar', self._check_radar, delay)
 
     def _radar_log_pass(self, started):
-        health = self._radar_health.snapshot()
+        health = self._radar_health_payload()
         health.update(source=self._radar_result.source_id,
                       elapsedSec=round(time.monotonic()-started, 3))
         Logger.info('almanac_emit: radar pass '+json.dumps(health, sort_keys=True))
@@ -1620,7 +1713,9 @@ class AlmanacEmitter:
         ctx['builds'] += 1
         work = list(reversed(layers)) if layers is not None else [(None,ts,tile_url)]
         if archive_url:
-            try: self._radar_archive_probe(source,archive_url,deadline,ctx.get('request_reserve',0))
+            try: self._radar_archive_probe(source,archive_url,deadline,ctx.get('request_reserve',0),
+                negative_ttl=20 if not ctx.get('prefetch') and ctx.get('refresh', {}).get('state') == 'newest'
+                else RADAR_NEGATIVE_CACHE_SEC)
             except (_RadarBudget,_RadarSuperseded,CircuitOpen): raise
             except Exception as error:
                 if is_transport_error(error): raise
@@ -1710,7 +1805,7 @@ class AlmanacEmitter:
             if key[0] == source and (site is None or key[1] == site):
                 del self._radar_newest[key]
 
-    def _radar_archive_probe(self, source, url, deadline, reserve=0):
+    def _radar_archive_probe(self, source, url, deadline, reserve=0, negative_ttl=RADAR_NEGATIVE_CACHE_SEC):
         if url in self._radar_archive_positive:
             return
         if time.monotonic() < self._radar_negative.get(url, 0):
@@ -1721,7 +1816,7 @@ class AlmanacEmitter:
             raise
         except Exception as error:
             if not is_transport_error(error):
-                self._radar_negative[url] = time.monotonic() + RADAR_NEGATIVE_CACHE_SEC
+                self._radar_negative[url] = time.monotonic() + negative_ttl
             raise
         self._radar_archive_positive.add(url)
 
@@ -1743,7 +1838,7 @@ class AlmanacEmitter:
                     meta.get('units') != '0.5 dBZ' or ts % RADAR_IEM_FRAME_INTERVAL_SEC or
                     not 0 <= now - ts <= RADAR_IEM_STALE_SEC):
                 raise ValueError('invalid or stale IEM metadata')
-            newest = min(ts, int(now - RADAR_IEM_READY_LAG_SEC) // 120 * 120)
+            newest = ts
         else:
             newest = known['newest']
         return newest, known, deadline
@@ -1752,6 +1847,7 @@ class AlmanacEmitter:
         """Acquire a fresh complete primary first, probing even UTC slots backward."""
         source = 'iem-mrms-lcref'
         newest, known, deadline = self._radar_iem_scan(ctx)
+        self._radar_discovery_unchanged(source, newest, ctx, dict(newest=newest))
         now = time.time()
         self._radar_publish_refresh(ctx, frameTotal=RADAR_HISTORY_SEC // 120 + 1 if ctx['viewed'] else 1)
         def build(stamp, limit):
@@ -1857,6 +1953,7 @@ class AlmanacEmitter:
         source = 'iem-nexrad-n0b'
         now = time.time()
         stamps, deadline = self._radar_site_discover(ctx)
+        self._radar_discovery_unchanged(source, stamps[-1], ctx)
         def build(ts, limit):
             layers = []
             for site, scan in _radar_site_pairs(ctx, ts):
@@ -1905,6 +2002,7 @@ class AlmanacEmitter:
             if known is not None:
                 raise _RadarRevalidate('remembered RainViewer scan aged out')
             raise ValueError('invalid or stale RainViewer manifest')
+        self._radar_discovery_unchanged(source, newest, ctx, dict(newest=newest, host=host, past=past))
         self._radar_publish_refresh(ctx, frameTotal=len(past) if ctx['viewed'] else 1)
         def build(ts, limit):
             path = past[ts]
@@ -2235,7 +2333,7 @@ class AlmanacEmitter:
         revision.write_text(_radar_render_revision())
         publish_revision(RADAR_DIR)
 
-    def _do_radar(self, intent_triggered=None, view_started=False):
+    def _do_radar(self, intent_triggered=None, view_started=False, discovery=False):
         """Primary-first orchestration; radar failures never alter engine health."""
         pass_deadline = time.monotonic() + RADAR_BUILD_DEADLINE_SEC
         self._radar_probe_reuse.clear()
@@ -2314,7 +2412,7 @@ class AlmanacEmitter:
             # One budget spans both attempts; geometry is source-specific, intent is not.
             ctx = dict(center=center, nexrad=_radar_nexrad(station_lat, station_lon, unit), viewed=viewed,
                 desired=desired, auto_zoom=auto_zoom, builds=0, station=station, unit=unit, previous_result=previous,
-                preference_stamp=stamp, stamp_names=stamp_names, intent_triggered=intent_triggered,
+                preference_stamp=stamp, stamp_names=stamp_names, intent_triggered=intent_triggered, discovery=discovery,
                 deadline=pass_deadline, pass_deadline=pass_deadline)
             self._radar_negative = {k: v for k, v in self._radar_negative.items() if v > time.monotonic()}
             adapters = [('rainviewer', self._radar_rainviewer_frames)]
@@ -2395,7 +2493,7 @@ class AlmanacEmitter:
                 self._radar_session.on_retry = lambda end, first_byte=False, source=source: self._radar_transport_retry(source, end, first_byte=first_byte)
                 self._radar_session.begin_pass(ctx['deadline'])
                 needed = len(tiles) + 2
-                if self._radar_headroom_delay(source, needed):
+                if self._radar_headroom_delay(source, 1 if discovery else needed):
                     self._radar_publish_refresh(ctx, state='idle')
                     self._radar_budget_retry(source, needed)
                     return
@@ -2427,9 +2525,12 @@ class AlmanacEmitter:
                         self._radar_retained_refresh('failed')
                     else:
                         self._radar_publish_refresh(ctx, state='idle')
-                    probe_delay = self._radar_health.probe_delay()
+                    probe_delay = self._radar_probe_delay()
                     if probe_delay is not None:
                         self._schedule_retry('radar', self._check_radar, max(1, probe_delay))
+                    return
+                except _RadarUnchanged:
+                    self._radar_retained_refresh('idle')
                     return
                 except _RadarSuperseded:
                     raise
@@ -2485,11 +2586,12 @@ class AlmanacEmitter:
                     self._radar_publish_refresh(ctx, state='failed')
             self._radar_health.last_error = str(error) or type(error).__name__
             Logger.warning(f'almanac_emit: radar fetch failed - {error}')
-            probe_delay = self._radar_health.probe_delay()
+            probe_delay = self._radar_probe_delay()
             self._schedule_retry('radar', self._check_radar,
                 RADAR_RETRY_SEC if probe_delay is None else max(1, probe_delay))
 
         finally:
+            self._radar_arm_discovery()
             self._radar_log_pass(pass_deadline-RADAR_BUILD_DEADLINE_SEC)
             if not self._running and self._radar_session is not None and 'radar' in self._inflight:
                 self._radar_session.close()
@@ -3375,7 +3477,7 @@ class AlmanacEmitter:
 
         payload = {
             'radar': dict(self._radar_payload(radar_snap, now, tz, radar_refresh),
-                          health=self._radar_health.snapshot()),
+                          health=self._radar_health_payload()),
             'ts':      int(now),                     # engine heartbeat ONLY - see obsAgeSec
             'obsTs':     int(obs_ts) if obs_ts is not None else None,
             'obsAgeSec': obs_age,                    # age of the newest OUTDOOR observation
