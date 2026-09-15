@@ -71,6 +71,8 @@ def controls(browser,server,theme,output):
     original=copy.deepcopy(server.data);original['radar'].update(sourceMode='mosaic',sourcePref='mosaic',refresh=dict(state='newest',frameIndex=0,frameTotal=8))
     site=site_payload(original);write(server,original)
     context,page,errors=setup(browser,server,theme,reduced=theme=='night')
+    assert page.locator('#rad-src-site').inner_text()=='KATX'
+    assert page.locator('#rad-src-site').get_attribute('aria-label')=='KATX: Camano Island radar, high resolution, 39 mi NE'
     timings=[]
     for mode,data in [('site',site),('mosaic',original)]:
         page.evaluate('pickerAudit.posts=[];pickerAudit.samples=[]')
@@ -79,7 +81,7 @@ def controls(browser,server,theme,output):
         page.wait_for_function('pickerAudit.samples.length && pickerAudit.posts.length')
         sample=page.evaluate('pickerAudit.samples[0]');post=page.evaluate('pickerAudit.posts[0].at-pickerAudit.start')
         assert sample['state']=='pending' and sample['busy']=='true' and sample['pressed']=='false',sample
-        assert sample['cap']==('Many radars blended · new image every 2 min · IEM / NOAA' if mode=='site' else 'Camano Island radar · 39 mi NE · new scan every ~5 min · IEM / NOAA'),sample
+        assert sample['cap']==('Many radars blended · new image every 2 min · IEM / NOAA' if mode=='site' else 'Camano Island radar, high resolution · 39 mi NE · new scan every ~5 min · IEM / NOAA'),sample
         assert post<100,post
         epoch=page.evaluate('performance.timeOrigin+pickerAudit.start')
         received=next(t['at']-epoch for t in server.request_times[received_at:] if 'radarSource='+mode in t['path'])
@@ -123,6 +125,23 @@ def controls(browser,server,theme,output):
     page.wait_for_timeout(2200)
     polls=page.evaluate('pickerAudit.polls.slice(-2)');assert polls[-1]-polls[-2]>=1900,polls
     write(server,site);wait_ack(page,'site')
+    # A closest-site outage changes the actual frame owner, never the control.
+    dark=copy.deepcopy(site);r=dark['radar'];r['siteId']='KLGX';r['tiles']['site']='KLGX'
+    r['sites']=[dict(id='KLGX',contributing=True,reporting=True),
+                dict(id='KATX',contributing=False,reporting=False,reason='not reporting')]
+    for frame in r['tiles']['frames']:frame['siteScans']=[dict(id='KLGX',ts=frame['ts'])]
+    native=server.root/'radar'/'t'/ae._radar_render_revision()/'iem-nexrad-n0b'
+    for source in (native/'KATX').rglob('*.png'):
+        target=native/'KLGX'/source.relative_to(native/'KATX')
+        target.parent.mkdir(parents=True,exist_ok=True);target.hardlink_to(source)
+    write(server,dark)
+    page.wait_for_function("radarView.data.siteId==='KLGX' && radarView.current?.drawnSites?.some(s=>s.id==='KLGX')")
+    assert page.locator('#rad-src-site').inner_text()=='KATX'
+    assert page.locator('#rad-src-site').get_attribute('aria-label')=='KATX: Camano Island radar, high resolution, 39 mi NE'
+    cap=page.locator('#rad-src-cap').inner_text()
+    assert cap.startswith('Langley Hill radar') and cap.endswith(' · KATX not reporting'),cap
+    assert '39 mi' not in cap
+    page.screenshot(path=str(output/f'radar-v51-dark-closest-{theme}.png'))
     assert not errors,errors
     print('PICKER',theme,json.dumps(timings),flush=True)
     context.close();write(server,original)

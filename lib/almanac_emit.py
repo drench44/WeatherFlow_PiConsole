@@ -514,7 +514,7 @@ _NEXRAD_SITES = {
     'KJKL': (37.590833, -83.313056, 'Jackson'),
     'KLBB': (33.654139, -101.81416, 'Lubbock'),
     'KLCH': (30.125306, -93.215889, 'Lake Charles'),
-    'KLGX': (47.116944, -124.10666, 'Langley Hill Nw Washington'),
+    'KLGX': (47.116944, -124.10666, 'Langley Hill'),
     'KLNX': (41.957944, -100.57622, 'North Platte'),
     'KLOT': (41.604444, -88.084444, 'Chicago'),
     'KLRX': (40.73955, -116.8027, 'Elko'),
@@ -1496,8 +1496,10 @@ class AlmanacEmitter:
                 raise
         if retry:
             with self._radar_health.lock:
-                self._radar_health.retries += 1
-                self._radar_health.hedges += int(attempt is not None and attempt.hedged)
+                if attempt is not None and attempt.hedged:
+                    self._radar_health.hedges += 1
+                else:
+                    self._radar_health.retries += 1
         headers = {'User-Agent': 'WeatherFlow-PiConsole-almanac'}
         cached = self._radar_metadata.get(url)
         if metadata:

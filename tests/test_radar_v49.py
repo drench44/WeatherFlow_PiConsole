@@ -36,7 +36,8 @@ def test_three_bad_tiles_hedged_on_fresh_connections(engine, origin, behavior):
     elapsed = time.monotonic()-start
     h = engine._radar_health.snapshot()
     assert len(result) == 10 and 2 <= elapsed < 3.5
-    assert h['hedges'] == h['retries'] == h['discardedHedges'] == 3
+    assert h['hedges'] == h['discardedHedges'] == 3
+    assert h['retries'] == 0  # winning hedges are not failure retries
     assert h['successRate60s'] == 10/13
     assert len(engine._radar_request_times) == len(origin.requests) == 13
     for x in range(3):
@@ -81,6 +82,7 @@ def test_deadline_and_all_busy_primary_slots(engine, origin):
     assert len(origin.requests) == 9
     assert not engine._radar_session._busy
     assert engine._radar_health.hedges == 6  # three leased and three bounded pool waiters
+    assert engine._radar_health.retries == 0  # losing hedges are not retries either
 
 
 def test_hedge_cap_and_rate_gate(engine, origin, monkeypatch):

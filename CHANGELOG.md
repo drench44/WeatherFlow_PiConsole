@@ -7,6 +7,14 @@ to shared upstream code that the classic console benefits from too.
 ## 2026-09-14
 
 ### Radar
+- **Radar v5.1 keeps the closest-site control stable.** The site segment and its
+  accessible name stay on `nexrad.id` when that site is dark, with the existing
+  drawn-contributor count. Captions retain the drawn site's name and outage
+  suffix. “High resolution” appears in the accessible name and, when it fits,
+  the caption; it yields before the existing distance/cadence/nearby drop order.
+  Health counters now separate overlapping two-second hedges from second
+  attempts after failure; a hedge no longer increments retries. Local unit and
+  both-theme browser/picker regressions cover identity, copy, fitting and counters.
 - **Radar v5.0 discovers scans at expected readiness.** A cancellable one-shot
   replaces the unaligned 180-second poll. MRMS predicts the next stamp plus a
   300-second provider lag, then re-polls every 20 seconds; site listings predict

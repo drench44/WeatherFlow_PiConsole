@@ -3135,16 +3135,18 @@
     radarWake();
   }
   // Keep the reporting timeline owner named while its tiles are arriving.
-  // A viewport-selected neighbour keeps its callsign; nearest-site metadata
-  // must never migrate with it. The inactive segment names the available site.
+  // A viewport-selected neighbour keeps its own name; nearest-site metadata
+  // must never migrate with it. The segment always names the closest site.
   function radarSourceSubject(r,siteChoice=false){
     var mode=r.sourceMode||'mosaic',site=(r.sources||[]).find(s=>s.mode==='site');
     var frame=radarView.current,contributors=frame&&frame.drawnSites?frame.drawnSites:
       frame&&frame.siteScans?frame.siteScans:(r.sites||[]).filter(s=>s.contributing);
     var id=(mode==='site'?(r.siteId&&!(r.sites||[]).some(s=>s.id===r.siteId&&s.reason==='not reporting')?r.siteId:contributors[0]?.id):
       site&&site.reason!=='no site in range'&&site.siteId)||null;
-    var extra=mode==='site'?contributors.filter(s=>s.id!==id).length:0,nearest=id&&id===r.nexrad?.id;
-    var name=nearest?(radarSiteTable.find(s=>s.id===id)?.name||r.nexrad.name||id):id;
+    var extra=mode==='site'?contributors.filter(s=>s.id!==id).length:0;
+    if(siteChoice&&r.nexrad!=null)id=r.nexrad.id;
+    var nearest=id&&id===r.nexrad?.id;
+    var name=radarSiteTable.find(s=>s.id===id)?.name||(nearest&&r.nexrad.name)||id;
     var distance=nearest&&r.nexrad.distanceDisp&&r.nexrad.bearing?r.nexrad.distanceDisp+' '+r.nexrad.bearing:'';
     return {id,extra,contributors,distance,subject:mode==='site'||siteChoice?(name?name+' radar':'No site'):
       (r.sourceId||'rainviewer')==='rainviewer'?'Worldwide blend':'Many radars blended'};
@@ -3161,12 +3163,13 @@
     button.setAttribute('aria-pressed',String(mode==='site'));
     button.dataset.preferred=String(radarSource.desired!==null ? radarSource.desired==='site' : r.sitePreferred===true);
     var info=radarSourceSubject(r),choice=radarSourceSubject(r,true),contributors=info.contributors;
-    button.textContent=(info.id||'No site')+(info.extra?' +'+info.extra:'');
+    button.textContent=(choice.id||'No site')+(info.extra?' +'+info.extra:'');
     button.disabled=!(site && site.available);
-    button.setAttribute('aria-label',(info.id||'No site')+(info.extra?' and '+info.extra+' nearby':'')+
-      ': '+choice.subject+(choice.distance?', '+choice.distance:''));
+    button.setAttribute('aria-label',(choice.id||'No site')+(info.extra?' and '+info.extra+' nearby':'')+
+      ': '+choice.subject+', high resolution'+(choice.distance?', '+choice.distance:''));
     var cap=$('rad-src-cap'),rainviewer=(r.sourceId||'rainviewer')==='rainviewer';
     var distance=mode==='site'&&!info.extra?info.distance:'',nearby=info.extra?' + '+info.extra+' nearby':'';
+    var resolution=mode==='site'?', high resolution':'';
     var cadence=mode==='site'?'new scan every ~5 min':'new image every '+(r.cadenceSec||600)/60+' min';
     var exceptions=[];
     if (rainviewer) exceptions.push('reflectivity only');
@@ -3186,7 +3189,7 @@
     if (r.sourceFallback==='site-zoom-floor' && site && radarSource.desired!=='mosaic') exceptions.push('wider than '+site.siteId+' reaches');
     var switching=radarSource.desired&&Date.now()-radarIntent.postedAt>=600;
     function write(){
-      cap.replaceChildren(document.createTextNode(info.subject+nearby+(distance?' · '+distance:'')+' · '+cadence+' · '));
+      cap.replaceChildren(document.createTextNode(info.subject+resolution+nearby+(distance?' · '+distance:'')+' · '+cadence+' · '));
       // Keep attribution visible and text-only: the kiosk has no way back.
       var credit=document.createElement('a');credit.id='rad-attrib';credit.className='rad-attrib';
       credit.textContent=rainviewer?'RainViewer':'IEM / NOAA';credit.removeAttribute('href');cap.append(credit);
@@ -3196,6 +3199,7 @@
     write();
     // Fit the rendered font, not a character estimate. Preserve every exception
     // and the provider; the final CSS ellipsis bounds any future longer flags.
+    if(cap.scrollWidth>cap.clientWidth&&resolution){resolution='';write();}
     if(cap.scrollWidth>cap.clientWidth&&distance){distance='';write();}
     if(cap.scrollWidth>cap.clientWidth&&mode==='site'){cadence='every ~5 min';write();}
     if(cap.scrollWidth>cap.clientWidth&&nearby){nearby='';write();}

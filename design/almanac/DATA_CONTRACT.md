@@ -331,15 +331,19 @@ A shared-host outage applies to both IEM products. Paid-for successes stay cache
 **Operator health.** `wx.json.radar.health` is exposed as `/health.radar`:
 
 ```json
-{"lastSuccessTs":1789444700.5,"successRate60s":0.78,"hedges":9,"retries":9,
+{"lastSuccessTs":1789444700.5,"successRate60s":0.78,"hedges":9,"retries":2,
  "discardedHedges":9,"breaker":"closed","lastError":"discarded radar attempt",
  "hosts":{"example.invalid":{"breaker":"closed","samples60s":41,"successRate60s":0.78}}}
 ```
 
 `lastSuccessTs` is Unix seconds of the last usable newest publication (including
 partial), not the measurement timestamp. Ratios are 0–1, null without samples.
-Hedges/retries are cumulative admitted attempts, including bounded DNS/pool waits;
-a hedge is also a retry. `discardedHedges` counts pending losers when a race wins.
+`hedges` and `retries` are distinct cumulative admitted second attempts, including
+bounded DNS/pool waits. `hedges` counts overlapping requests raced after 2 seconds
+without a response byte. `retries` counts second attempts after the first has
+failed (including transport recovery). A winning or losing hedge is never a
+retry; either kind consumes the tile's sole second attempt. Denied admission
+increments neither counter. `discardedHedges` counts pending losers when a race wins.
 `breaker` is the worst state across known hosts (`open`, `half`, `closed`), so a
 working fallback does not hide the primary outage. `lastError` retains the last
 request error even after recovery. Every ordinary fetch pass emits this object at
@@ -536,8 +540,8 @@ next rAF after decode. Temporal playback blending does not apply to arrivals.
 This user decision supersedes P4 and the v4.4 hatch rules.
 
 The reporting timeline owner (`siteId`, station-nearest reporting site) remains
-the caption/picker subject while its tiles are late: e.g. `Camano Island radar
-+ 1 nearby · new scan every ~5 min · IEM / NOAA · KATX loading`. Nearby counts
+the caption subject while its tiles are late (the picker stays on `nexrad.id`):
+e.g. `Camano Island radar + 1 nearby · new scan every ~5 min · IEM / NOAA · KATX loading`. Nearby counts
 count actual other contributors; station distance stays with the nearest site.
 `KATX loading` replaces `timeline KATX` (v4.4 overrides the exception vocabulary
 retained in Fable v4.3 §1.4). A site explicitly marked `not reporting` can still
@@ -883,25 +887,32 @@ survive. Each secondary scan is real, no later than the primary and no more than
 900s older. Tile failures preserve other successful tiles; the page combines
 aligned site tiles using one 256px scratch, never four viewport layers.
 
-The site picker names the reporting primary plus the number of actual other
-contributors (`KATX +2`), using the displayed frame's drawn sites. A late primary
-keeps its identity and the caption adds `KATX loading`; an explicitly non-reporting
-primary can yield to an actual contributor.
-The visible segments are `Region` and the live callsign (`KATX`, `KATX +2`).
+The site picker always names the closest site (`nexrad.id`), falling back to the
+caption's primary only when `nexrad` is null. It retains the number of actual
+other contributors from the displayed frame (`KATX +2`); that count is relative
+to the drawn primary, not the closest site's reporting state. A dark KATX never
+renames the button KLGX. The caption independently names the reporting timeline
+owner while its tiles are late (`KATX loading`); an explicitly non-reporting
+primary can yield to an actual contributor with the not-reporting suffix.
+The visible segments are `Region` and the closest callsign (`KATX`, `KATX +2`).
 The region segment has `aria-label="Region: many radars blended"`; the site
-segment expands to `KATX: Camano Island radar, 39 mi NE` or
-`KATX and 2 nearby: Camano Island radar, 39 mi NE`. Distance is omitted from
-both accessible and visible copy when that primary is not `nexrad.id`.
+segment expands to `KATX: Camano Island radar, high resolution, 39 mi NE` or
+`KATX and 2 nearby: Camano Island radar, high resolution, 39 mi NE`.
+Accessible distance describes the closest site; caption distance only describes
+the drawn site when it is `nexrad.id`.
 
-Caption copy (v4.3b) names the subject, arrival cadence, and provider:
+Caption copy (v5.1, retaining v4.3b vocabulary) names the subject, arrival
+cadence, and provider:
+
 - MRMS: `Many radars blended · new image every 2 min · IEM / NOAA`.
 - RainViewer: `Worldwide blend · new image every 10 min · RainViewer · reflectivity only`.
-- Nearest single site: `Camano Island radar · 39 mi NE · new scan every ~5 min · IEM / NOAA`.
+- Nearest single site (when width permits): `Camano Island radar, high resolution · 39 mi NE · new scan every ~5 min · IEM / NOAA`.
 - Neighbours: `Camano Island radar + 2 nearby · new scan every ~5 min · IEM / NOAA`.
-- Non-nearest primary: `KLGX radar · new scan every ~5 min · IEM / NOAA`.
+- Closest dark: `Langley Hill radar + 2 nearby · new scan every ~5 min · IEM / NOAA · KATX not reporting`.
 
-For the nearest primary, its site-table name wins over `nexrad.name`, then its
-callsign; a non-nearest primary uses its callsign, even if the table names it.
+The drawn site's site-table name wins, then `nexrad.name` only for the nearest
+site, then its callsign. KLGX's catalog name is `Langley Hill`. Nearest metadata
+never supplies a neighbour's name.
 Only `nexrad.distanceDisp` plus `bearing` supplies the station-relative distance.
 Visible distance yields to the neighbour count; the accessible name retains
 it when valid. Mosaic cadence stays derived from `cadenceSec/60`; the site's
@@ -914,7 +925,8 @@ Exception wording and ordering after attribution remain as before (including
 `scan unavailable`, `deferred`, `out of view`, `not reporting`,
 `palette incomplete`, `wider than KXXX reaches`). This follows Fable's exact
 RainViewer and dark-neighbour assertions; `· switching` is always last.
-Rendered overflow drops distance, then shortens `new scan every ~5 min` to
+Site subjects add `, high resolution` when width permits. Rendered overflow
+drops that phrase first, then distance, then shortens `new scan every ~5 min` to
 `every ~5 min`, then drops `+ n nearby`. Provider and exception text is never
 removed. The caption uses `overflow:hidden; text-overflow:ellipsis; white-space:nowrap`
 for any remaining overflow. Its outer maximum is 530px (516px text plus the

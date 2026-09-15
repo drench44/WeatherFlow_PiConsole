@@ -410,7 +410,7 @@ def chrome(page,theme,data,output):
     assert page.locator('#rad-src-mosaic').bounding_box()['width']>=84
     assert page.locator('#rad-src-site').inner_text()=='KATX'
     assert page.locator('#rad-src-mosaic').get_attribute('aria-label')=='Region: many radars blended'
-    assert page.locator('#rad-src-site').get_attribute('aria-label')=='KATX: Camano Island radar, 39 mi NE'
+    assert page.locator('#rad-src-site').get_attribute('aria-label')=='KATX: Camano Island radar, high resolution, 39 mi NE'
     caption(mosaic)
     assert page.locator('.rad-clear-note').count()==0
     page.screenshot(path=str(output/f'radar-v43b-mosaic-{theme}.png'))
@@ -456,7 +456,7 @@ def chrome(page,theme,data,output):
     assert swatch==dict(color='rgb(159, 159, 170)' if theme=='paper' else 'rgb(93, 96, 110)',image='none'),swatch
     assert page.locator('#rad-legend').bounding_box()['width']==414 and page.locator('.rad-legend-unit').bounding_box()['width']==34
     assert page.locator('#rad-ramp').get_attribute('aria-label')=='Reflectivity scale, 5 to 75 dBZ. Below 10 dBZ in grey: clear-air return, not precipitation.'
-    caption('Camano Island radar · 39 mi NE · new scan every ~5 min · IEM / NOAA')
+    caption('Camano Island radar, high resolution · 39 mi NE · new scan every ~5 min · IEM / NOAA')
     assert page.locator('.rad-clear-note').inner_text()=='Grey band: clear air, not rain'
     assert page.locator('#rad-ramp').bounding_box()['width']==372
     legend=page.locator('#rad-legend').bounding_box();clear=page.locator('.rad-clear-note').bounding_box()
@@ -469,29 +469,50 @@ def chrome(page,theme,data,output):
     contrast=page.evaluate('''()=>{function rgba(s){let c=document.createElement('canvas'),x=c.getContext('2d');x.fillStyle=s;x.fillRect(0,0,1,1);let a=Array.from(x.getImageData(0,0,1,1).data);a[3]/=255;return a}function lum(c){let a=c.slice(0,3).map(v=>v/255<=.04045?v/255/12.92:((v/255+.055)/1.055)**2.4);return a[0]*.2126+a[1]*.7152+a[2]*.0722}let ground=document.documentElement.dataset.theme==='night'?[255,255,255]:[0,0,0];return ['#rad-note','#rad-src-cap','.rad-clear-note','.rad-loop-read','.rad-zoom-read'].map(sel=>{let style=getComputedStyle(document.querySelector(sel)),fg=rgba(style.color),bg=rgba(style.backgroundColor);if(sel==='.rad-clear-note')bg=rgba(getComputedStyle(document.querySelector('#rad-legend')).backgroundColor);let a=bg[3]??1,mixed=bg.slice(0,3).map((v,i)=>v*a+ground[i]*(1-a)),x=lum(fg),y=lum(mixed);return (Math.max(x,y)+.05)/(Math.min(x,y)+.05);});}''')
     assert min(contrast)>=4.5,contrast
 
+    page.evaluate('''()=>{
+      const cap=document.getElementById('rad-src-cap');
+      cap.textContent='Camano Island radar · 39 mi NE · new scan every ~5 min · IEM / NOAA';
+      cap.style.maxWidth=(cap.scrollWidth+1)+'px';radarSourceRender();
+    }''')
+    caption('Camano Island radar · 39 mi NE · new scan every ~5 min · IEM / NOAA')
+    page.evaluate("document.getElementById('rad-src-cap').style.maxWidth='';radarSourceRender()")
+
     # Independent layer count and label-zone assertions, including dark sites.
     site_rows=[dict(id=i,lat=lat,lon=lon,primary=n==0,contributing=True,reason=None) for n,(i,lat,lon) in enumerate([('KATX',47.65,-122.33),('KLGX',46.98,-123.82),('KRTX',49.2,-122.33)])]
     page.evaluate('sites=>{radarView.active=false;radarCamera={...radarView.data.center,zoom:7};radarView.data.sites=sites;radarOverlayBuild();radarSourceRender()}',site_rows)
     assert page.locator('.rad-site-edge').count()==3
-    caption('Camano Island radar + 2 nearby · new scan every ~5 min · IEM / NOAA')
+    caption('Camano Island radar, high resolution + 2 nearby · new scan every ~5 min · IEM / NOAA')
     assert page.locator('#rad-src-site').inner_text()=='KATX +2'
-    assert page.locator('#rad-src-site').get_attribute('aria-label')=='KATX and 2 nearby: Camano Island radar, 39 mi NE'
+    assert page.locator('#rad-src-site').get_attribute('aria-label')=='KATX and 2 nearby: Camano Island radar, high resolution, 39 mi NE'
     page.evaluate("radarView.data.siteId='KLGX';radarView.data.sites=[{id:'KLGX',contributing:true}];radarSourceRender()")
-    neighbour=caption('KLGX radar · new scan every ~5 min · IEM / NOAA')
+    neighbour=caption('Langley Hill radar, high resolution · new scan every ~5 min · IEM / NOAA')
     # 'min' necessarily contains 'mi'; test the forbidden distance clause itself.
     assert '39 mi' not in neighbour and ' NE' not in neighbour
-    assert page.locator('#rad-src-site').get_attribute('aria-label')=='KLGX: KLGX radar'
+    assert page.locator('#rad-src-site').get_attribute('aria-label')=='KATX: Camano Island radar, high resolution, 39 mi NE'
     page.evaluate('sites=>{radarView.data.sites=sites;radarView.data.siteId="KATX";radarSourceRender()}',site_rows)
     for label in page.locator('.rad-site-label').all():assert 88<=float(label.get_attribute('y'))<=412
     assert 'KRTX' not in page.locator('.rad-site-label').all_text_contents()
     site_rows[0].update(contributing=False,reason='not reporting',primary=False);site_rows[1]['primary']=True
     page.evaluate('sites=>{radarView.data.sites=sites;radarView.data.siteId="KLGX";radarSourceRender()}',site_rows)
+    assert caption().startswith('Langley Hill radar')
     assert caption().endswith('· KATX not reporting')
+    assert page.locator('#rad-src-site').inner_text()=='KATX +1'
+    assert page.locator('#rad-src-site').get_attribute('aria-label')=='KATX and 1 nearby: Camano Island radar, high resolution, 39 mi NE'
+    page.evaluate("radarView.data.sites.push({id:'KOTX',contributing:true});radarSourceRender()")
+    caption('Langley Hill radar, high resolution + 2 nearby · new scan every ~5 min · IEM / NOAA · KATX not reporting')
+    page.evaluate("document.getElementById('rad-src-cap').style.maxWidth='500px';radarSourceRender()")
+    caption('Langley Hill radar + 2 nearby · new scan every ~5 min · IEM / NOAA · KATX not reporting')
+    assert page.locator('#rad-src-site').inner_text()=='KATX +2'
+    page.screenshot(path=str(output/f'radar-v51-dark-closest-{theme}.png'))
+    page.evaluate("window.savedNearest=radarView.data.nexrad;radarView.data.nexrad=null;radarSourceRender()")
+    assert page.locator('#rad-src-site').inner_text()=='KLGX +2'
+    assert page.locator('#rad-src-site').get_attribute('aria-label')=='KLGX and 2 nearby: Langley Hill radar, high resolution'
+    page.evaluate("radarView.data.nexrad=savedNearest;document.getElementById('rad-src-cap').style.maxWidth=''")
     # Names come from the table first, then nexrad.name, then the callsign.
     page.evaluate("window.savedSiteTable=radarSiteTable;radarSiteTable=[];radarView.data.siteId='KATX';radarView.data.sites=[{id:'KATX',contributing:true}];radarSourceRender()")
-    caption('Camano Island radar · 39 mi NE · new scan every ~5 min · IEM / NOAA')
+    caption('Camano Island radar, high resolution · 39 mi NE · new scan every ~5 min · IEM / NOAA')
     page.evaluate("radarView.data.nexrad.name='';radarSourceRender()")
-    caption('KATX radar · 39 mi NE · new scan every ~5 min · IEM / NOAA')
+    caption('KATX radar, high resolution · 39 mi NE · new scan every ~5 min · IEM / NOAA')
     page.evaluate("radarSiteTable=[{id:'KATX',name:'Langley Hill Nw Washington'}];radarView.data.nexrad.name='Ignored fallback';radarView.data.sites=['KATX','KLGX','KOTX','KMAX'].map(id=>({id,contributing:true})).concat([{id:'KRTX',contributing:false,reason:'not reporting'}]);radarSourceRender()")
     worst=caption('Langley Hill Nw Washington radar + 3 nearby · new scan every ~5 min · IEM / NOAA · KRTX not reporting')
     # Exercise each overflow reduction independently at a measured box budget.

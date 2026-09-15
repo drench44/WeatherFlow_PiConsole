@@ -158,8 +158,8 @@ def tile_race(request, deadline, hedge, claim_hedge, discarded):
                     failed = not pending
                     eligible = hedge is not None and not controls[0].first_byte.is_set()
                     if failed or (eligible and claim_hedge()):
-                        # A hedge is also the tile's sole retry; failures never
-                        # create a third request after an overlapping attempt.
+                        # Either kind consumes the tile's sole second attempt;
+                        # a failed hedge never creates a third request.
                         second = True
                         controls.append(Attempt(fresh=True, hedged=not failed))
                         pending.add(pool.submit(request, controls[-1], True))

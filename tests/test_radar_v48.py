@@ -82,7 +82,8 @@ def test_six_hanging_reused_workers_share_deadline(make_emitter, origin, monkeyp
         print(f'six reused TLS sockets, fresh_hangs={fresh_hangs}: {elapsed:.3f}s')
         assert (3.5 if fresh_hangs else 2) <= elapsed < 4.2
         assert session.retries == session.stale_first_byte_retries == 0
-        assert emitter._radar_health.hedges == emitter._radar_health.retries == 6
+        assert emitter._radar_health.hedges == 6
+        assert emitter._radar_health.retries == 0
         assert not infos  # tiles use the v4.9 race; pass logging lives in _do_radar
         assert not session._busy  # executor drained, no abandoned socket workers
         assert all(ident > 6 for ident, _, _ in origin.requests[12:])
