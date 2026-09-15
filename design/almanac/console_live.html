@@ -2689,7 +2689,7 @@
   }
 
   /* V4: a local camera, opaque raster basemaps and stamp-addressed tiles. */
-  var RAD_W=956, RAD_H=490, RAD_FRAME_MS=200, RAD_HOLD_MS=1100, RAD_BLEND_MS=120;
+  var RAD_W=956, RAD_H=490, RAD_FRAME_MS=350, RAD_HOLD_MS=1100, RAD_BLEND_MS=120;  /* 350 ms between scans: the user's call after 200 read too fast */
   var RAD_MAX_LAT=85.05112878, RAD_CONTROLS='.rad-src,.rad-src-cap,.rad-legend,.rad-loop,.rad-zoom,.rad-recenter';
   var radarView={data:null,active:false,loaded:[],readyFrames:[],current:null,good:null,paused:false,
     singleSweep:false,clear:false,refresh:{state:'idle'},legendKey:null,nextAt:0};
@@ -2950,7 +2950,12 @@
   function radarLoopSync(){var r=radarView.data,ready=radarReady(),play=$('rad-play'),loop=$('rad-loop');if(!r||!radarView.active){loop.hidden=true;return;}
     loop.hidden=false;var intent=!radarView.paused&&(!radarReduced()||radarView.singleSweep);play.hidden=false;play.disabled=false;play.textContent=intent?'❙❙':'▶';play.setAttribute('aria-label',intent?'Pause radar loop':'Play radar loop');$('rad-track').dataset.frames=ready.length?'1':'0';
     var read=$('rad-frame-time'),f=radarView.current;read.removeAttribute('aria-label');
-    if(ready.length<8||f&&!f.ready)read.textContent=(intent?'Buffering':'Paused')+' · '+ready.length+' of 8';
+    /* The loop plays from four decoded scans and grows; the inventory is measured against the
+       scans that EXIST in this window (a 10-min site has six per hour), never a hard eight -
+       the old read said "Buffering · 6 of 8" forever while the loop was in fact running. */
+    var expected=Math.max(radarView.loaded.length,r.frameCount||0,(r.refresh&&r.refresh.frameTotal)||0);
+    var total=Math.min(8,expected)||8,startAt=Math.min(4,total);
+    if(ready.length<startAt||f&&!f.ready)read.textContent=(intent?'Buffering':'Paused')+' · '+ready.length+' of '+total;
     else if(ready.length>=2&&ready.every(f=>!f.hasEcho&&(!f.legend||f.legend.remapped!==false))&&!(r.sites||[]).some(s=>s.reason))read.textContent=(intent?'':'Paused · ')+'No echoes · clear';
     else if(f)read.textContent=(intent?'':'Paused · ')+radarFrameLabel(f)+' · '+(f.ts===r.observedTs?'newest':'−'+Math.round((r.observedTs-f.ts)/60)+' min');
     var index=ready.indexOf(f);$('rad-tick').style.left=(ready.length>1?Math.max(0,index)/(ready.length-1)*218:218)+'px';

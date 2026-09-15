@@ -376,7 +376,7 @@ def chrome(page,theme,data,output):
         (holds if a['stamp']==timing['newest'] else intervals).append(b['at']-a['at'])
     assert timing['fetches']==timing['decodes']==0,timing
     assert len(holds)>=2 and all(1030<=v<=1170 for v in holds),holds
-    assert intervals and 190<=sum(intervals)/len(intervals)<=210,intervals
+    assert intervals and 340<=sum(intervals)/len(intervals)<=360,intervals
     print('PLAYBACK',theme,dict(intervalMs=sum(intervals)/len(intervals),holds=holds,fetches=timing['fetches'],decodes=timing['decodes']),flush=True)
     page.emulate_media(reduced_motion='reduce')
     page.wait_for_timeout(100)

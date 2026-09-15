@@ -41,7 +41,7 @@ def verify(browser, server, theme, output):
     # preserving the two real fixture scans already selected by the live clock.
     middle = page.evaluate('''()=>{const b=radarView.blend;radarBlendPaint(b.start+60);radarView.active=false;return {alpha:radarMetrics.blendAlpha,from:b.from.stamp,to:b.to.stamp,read:document.getElementById('rad-frame-time').textContent};}''')
     page.screenshot(path=str(output/f'mid-blend-{theme}.png'))
-    page.evaluate('radarView.active=true;radarView.blend=null;radarView.nextAt=performance.now()+200;v44.transitions=[];radarWake()')
+    page.evaluate('radarView.active=true;radarView.blend=null;radarView.nextAt=performance.now()+350;v44.transitions=[];radarWake()')
     page.wait_for_timeout(8500)
     playback = page.evaluate('''()=>{radarView.paused=true;radarView.blend=null;radarLoopSync();return {...v44,fetches:audit.fetches.filter(u=>u.includes('radar/t/')),decodes:audit.decodeCount,newest:radarView.good.stamp,memory:radarMemory(),observedMemory:audit.bytes()};}''')
     assert playback['decodes'] == 0 and playback['fetches'] == [], (playback['decodes'],playback['fetches'])
@@ -50,7 +50,7 @@ def verify(browser, server, theme, output):
     steps, holds = [], []
     for a, b in zip(playback['transitions'], playback['transitions'][1:]):
         (holds if a['stamp'] == playback['newest'] else steps).append(b['start']-a['start'])
-    assert steps and all(abs(step-200) <= 10 for step in steps), steps
+    assert steps and all(abs(step-350) <= 12 for step in steps), steps
     assert holds and all(abs(h-1100) <= 10 for h in holds), holds
     assert playback['memory'] <= 40*1024*1024 and playback['observedMemory'] <= 40*1024*1024
     # Pixel oracle: two disjoint translucent echoes must each have half their
@@ -68,7 +68,7 @@ def verify(browser, server, theme, output):
     page.wait_for_function('radarView.singleSweep')
     page.wait_for_function('!radarView.singleSweep && radarView.paused', timeout=10000)
     rainviewer = page.evaluate("()=>{const source=radarView.data.sourceId;radarView.data.sourceId='rainviewer';const intervals=[2,4,8].map(n=>radarInterval(n));radarView.data.sourceId=source;return intervals;}")
-    assert all(abs(n-180*200/110)<1e-8 for n in rainviewer), rainviewer
+    assert all(abs(n-180*350/110)<1e-8 for n in rainviewer), rainviewer
     reduced = page.evaluate('({blends:v44.blends.length,newest:radarView.current===radarView.good})')
     assert reduced == dict(blends=0, newest=True), reduced
     page.emulate_media(reduced_motion='no-preference')

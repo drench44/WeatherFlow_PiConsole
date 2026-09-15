@@ -29,11 +29,14 @@ def test_incomplete_inventory_is_visible_even_with_partial_echoes(count, paused)
     script = function('radarLoopSync') + '''
 const nodes=new Map(),$=id=>{if(!nodes.has(id))nodes.set(id,{dataset:{},style:{},setAttribute(){},removeAttribute(){}});return nodes.get(id);};
 const frames=Array.from({length:COUNT},()=>({ready:true,hasEcho:true}));
-const radarView={data:{observedTs:1},active:true,paused:PAUSED,current:{ts:1,ready:COUNT===8},nextAt:0};
+const radarView={data:{observedTs:1,frameCount:COUNT},active:true,paused:PAUSED,current:{ts:1,ready:true},nextAt:0,loaded:frames};
 const radarReady=()=>frames,radarReduced=()=>false,radarCouldLoop=()=>false,radarWake=()=>{},radarFrameLabel=()=>'17:12';
 radarLoopSync();console.log(JSON.stringify($('rad-frame-time').textContent));
 '''.replace('COUNT', str(count)).replace('PAUSED', json.dumps(paused))
     result = subprocess.run(['node', '-e', script], check=True, capture_output=True, text=True)
-    expected = (('Paused' if paused else 'Buffering') + f' · {count} of 8' if count < 8
+    # The inventory is measured against the scans that exist (a 10-min site has six an hour),
+    # and the loop plays from four: below that the read is the inventory, above it the scan time.
+    total = min(8, count) or 8
+    expected = (('Paused' if paused else 'Buffering') + f' · {count} of {total}' if count < min(4, total)
                 else ('Paused · ' if paused else '') + '17:12 · newest')
     assert json.loads(result.stdout) == expected

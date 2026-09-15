@@ -7,6 +7,12 @@ to shared upstream code that the classic console benefits from too.
 ## 2026-09-14
 
 ### Radar
+- **The loop breathes: 350 ms between scans, and the read tells the truth.** After 200 ms
+  the user asked for a longer pause; scans now advance every 350 ms (newest hold and
+  crossfade unchanged, hard cuts under reduced motion). The inventory read measured
+  itself against a hard eight and said "Buffering · 6 of 8" forever on a ten-minute
+  site with six scans an hour, while the loop was in fact running; it now counts the
+  scans that exist and the loop's own start of four.
 - **Radar v4.5 removes the hatch entirely (user decision, superseding P4/v4.4).**
   Missing tiles draw nothing; same-stamp parent tiles still fill in while finer
   tiles load. The drawing pattern, hatch token use, 400ms timer, coverage/40%

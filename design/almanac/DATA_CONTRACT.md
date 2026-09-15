@@ -822,7 +822,7 @@ station accent is unchanged. Ramp colours are confined to echo data and its scal
 
 Playback draws pre-decoded ImageBitmaps onto one canvas. The visible canvas has
 no `src`; a tick neither fetches nor decodes. A monotonic requestAnimationFrame
-clock uses **200ms** steps and an **1100ms** newest hold. RainViewer short loops
+clock uses **350ms** steps and an **1100ms** newest hold. RainViewer short loops
 use `clamp(2400/frameCount,110,180) * 200/110` ms, scaling the existing formula.
 Each transition (including loop wrap) blends two real cached scans linearly for
 120ms: previous weight `1-a`, next weight `a`. Two `drawImage` calls per composite
