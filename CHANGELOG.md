@@ -160,6 +160,19 @@ to shared upstream code that the classic console benefits from too.
   source builds at least four complete frames before publication, and recovery
   waits for a five-minute dwell. Every source switch logs its reason.
 
+### Console
+- **The board runs on plain http again.** Since radar v5.7 the page called
+  `crypto.randomUUID()` at top level to name its radar session. Browsers offer
+  that only in a secure context (https or localhost), so the kiosk was fine but
+  a phone or laptop opening `http://<pi-ip>:<port>/` threw
+  `crypto.randomUUID is not a function`, the whole board script stopped, and the
+  page kept the artboard's sample numbers with no visible error. The session id
+  now prefers `crypto.randomUUID` and otherwise builds a version 4 UUID from
+  `crypto.getRandomValues`, which works on plain http; the result still passes
+  `serve.py`'s `radarSession` check. Offline tests pin the guard and run the
+  fallback in node; verified in Chromium over the LAN address with
+  `isSecureContext` false.
+
 ## 2026-09-14
 
 ### Radar

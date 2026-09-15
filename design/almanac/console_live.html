@@ -2699,7 +2699,9 @@
   var radarView={data:null,active:false,loaded:[],readyFrames:[],cycle:[],retired:[],started:false,current:null,good:null,paused:false,
     singleSweep:false,clear:false,refresh:{state:'idle'},legendKey:null,nextAt:0};
   var radarCamera=null, radarSource={desired:null}, radarZoom={auto:true}, radarSmooth={value:null,pending:null};
-  var radarIntent={session:crypto.randomUUID(),generation:0,owner:null,owned:false,heartbeat:0,preferredMode:null,localSeq:0,ready:false,timer:null,postedAt:0};
+  /* crypto.randomUUID exists only in a secure context (https or localhost); a LAN viewer on plain http would throw here and stop the whole board. */
+  function radarSessionId(){var c=window.crypto;if(c&&typeof c.randomUUID==='function')return c.randomUUID();return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g,function(ch){var r=(c&&typeof c.getRandomValues==='function'?c.getRandomValues(new Uint8Array(1))[0]:Math.random()*256)&15;return (ch==='x'?r:(r&3|8)).toString(16);});}
+  var radarIntent={session:radarSessionId(),generation:0,owner:null,owned:false,heartbeat:0,preferredMode:null,localSeq:0,ready:false,timer:null,postedAt:0};
   var radarSwitch=null, RAD_SWITCH_MS=20000, RAD_TILE_MS=2500, radarJobs=new Set();
   function radarTrace(phase,extra={}){var row={phase,at:performance.now(),generation:radarIntent.generation,...extra};(radarMetrics.path||(radarMetrics.path=[])).push(row);if(radarMetrics.path.length>256)radarMetrics.path.shift();}
   function radarSwitchStart(requiresIntent=true){clearTimeout(radarSwitch?.timer);radarSwitch={start:performance.now(),generation:radarIntent.generation,requiresIntent,overdue:false,advanced:false};var owner=radarSwitch;owner.timer=setTimeout(()=>{if(radarSwitch===owner&&!owner.advanced){owner.overdue=true;radarTrace('switchDeadline');radarSourceRender();radarLoopSync();radarNoteRender();}},RAD_SWITCH_MS);radarTrace('tap');}
