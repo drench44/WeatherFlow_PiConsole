@@ -80,14 +80,14 @@ def test_six_hanging_reused_workers_share_deadline(make_emitter, origin, monkeyp
             assert len(result()) == 12
         elapsed = time.monotonic()-start
         print(f'six reused TLS sockets, fresh_hangs={fresh_hangs}: {elapsed:.3f}s')
-        assert 3 <= elapsed < 4.2
-        assert session.retries == session.stale_first_byte_retries == 6
-        assert emitter._radar_stale_first_byte_retries == 6
-        assert len(infos) == 6 and any('stale_first_byte_retries=6' in line for line in infos)
+        assert (3.5 if fresh_hangs else 2) <= elapsed < 4.2
+        assert session.retries == session.stale_first_byte_retries == 0
+        assert emitter._radar_health.hedges == emitter._radar_health.retries == 6
+        assert not infos  # tiles use the v4.9 race; pass logging lives in _do_radar
         assert not session._busy  # executor drained, no abandoned socket workers
         assert all(ident > 6 for ident, _, _ in origin.requests[12:])
         if fresh_hangs:
-            assert len(origin.requests) == 18  # six prime, six dead, six fresh
+            assert len(origin.requests) == 15  # six prime, six dead, three rescue leases; three queued
         else:
             assert len(origin.requests) == 24  # second tile wave also succeeds
     finally:
@@ -214,7 +214,8 @@ def test_retried_pass_succeeds_without_failure_note(make_emitter, origin, monkey
         assert emitter._radar_refresh['state'] == 'idle'
         assert not warnings and not emitter._radar_transport_failures
         assert session.retries == emitter._radar_stale_first_byte_retries == 1
-        assert len(infos) == 1 and 'stale_first_byte_retries=1' in infos[0]
+        assert len(infos) == 2 and 'stale_first_byte_retries=1' in infos[0]
+        assert 'radar pass' in infos[1]
     finally:
         session.close()
 
@@ -232,15 +233,18 @@ def test_full_engine_pass_deadline_includes_all_tile_workers(make_emitter, origi
     monkeypatch.setattr(ae, 'RADAR_BUILD_DEADLINE_SEC', budget)
     monkeypatch.setattr(ae, 'RADAR_PRIMARY_DEADLINE_SEC', budget)
     monkeypatch.setattr(ae, 'RADAR_HTTP_TIMEOUT_SEC', 60)
+    monkeypatch.setattr(ae, 'RADAR_RAINVIEWER_MANIFEST_URL', origin.url+'/unavailable-fallback')
     origin.hang_path = '/tile/'
     start = time.monotonic()
     try:
         emitter._do_radar()
         elapsed = time.monotonic()-start
         print(f'full engine pass, six hanging tile reads: {elapsed:.3f}s (budget {budget}s)')
-        assert budget-.05 <= elapsed < budget+.4
+        assert elapsed < budget+.4
+        if budget == 25:
+            assert elapsed < 9  # opening host breaker leaves the rest of the pass free
         retries = emitter._radar_stale_first_byte_retries
-        assert sum(path.startswith('/tile/') for _, _, path in origin.requests) == 6 + retries
+        assert 6 <= sum(path.startswith('/tile/') for _, _, path in origin.requests) <= 12
         assert emitter._radar_session is None or not emitter._radar_session._busy
     finally:
         if emitter._radar_session:

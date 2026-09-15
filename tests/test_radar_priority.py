@@ -12,6 +12,13 @@ from tests.test_radar_v3 import multisite  # noqa: F401
 SOURCE = 'iem-mrms-lcref'
 
 
+@pytest.fixture(autouse=True)
+def isolate_tier_order_from_source_failover_clock(monkeypatch):
+    # These tests jump 20 seconds inside a mocked request to mature deep-view
+    # demand. Source-deadline/fallback behavior is covered by v4.9 real TLS tests.
+    monkeypatch.setattr(ae, 'RADAR_SOURCE_DEADLINE_SEC', 25)
+
+
 def viewing(hybrid, tmp_path, since=None):
     hybrid.view()
     now = ae.time.time()

@@ -236,7 +236,7 @@ def test_newest_history_concurrency_bound(make_emitter, monkeypatch, workers):
     barrier, release = threading.Barrier(workers+1), threading.Event()
     active = peak = 0
     lock = threading.Lock()
-    def request(*args):
+    def request(*args, **kwargs):
         nonlocal active, peak
         with lock:
             active += 1; peak = max(active, peak)

@@ -186,3 +186,31 @@ def make_parser():
         return parser
 
     return _make
+
+
+@pytest.fixture(autouse=True)
+def loopback_only_when_offline(monkeypatch):
+    """Offline suites must not accidentally escape through a new fallback path."""
+    import os
+    import socket
+    import ipaddress
+    if os.environ.get('RADAR_NET_TEST') != '0':
+        return
+    resolve, connect = socket.getaddrinfo, socket.socket.connect
+    def local(host):
+        if host == 'localhost':
+            return True
+        try:
+            return ipaddress.ip_address(host).is_loopback
+        except ValueError:
+            return False
+    def guarded_resolve(host, *args, **kwargs):
+        if not local(host):
+            raise socket.gaierror('offline test blocked non-loopback DNS')
+        return resolve(host, *args, **kwargs)
+    def guarded_connect(sock, address):
+        if sock.family in (socket.AF_INET, socket.AF_INET6) and not local(address[0]):
+            raise OSError('offline test blocked non-loopback connection')
+        return connect(sock, address)
+    monkeypatch.setattr(socket, 'getaddrinfo', guarded_resolve)
+    monkeypatch.setattr(socket.socket, 'connect', guarded_connect)

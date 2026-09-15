@@ -50,7 +50,8 @@ def test_connect_preserves_sni_and_host_without_dns(monkeypatch):
     context=Mock(); conn._context=context
     conn.connect()
     sock.connect.assert_called_once_with(('192.0.2.1',443))
-    context.wrap_socket.assert_called_once_with(sock,server_hostname='radar.example')
+    context.wrap_socket.assert_called_once_with(sock,server_hostname='radar.example',do_handshake_on_connect=False)
+    conn.sock.do_handshake.assert_called_once_with()
     assert conn.host=='radar.example'
     conn.close()
 
@@ -67,7 +68,7 @@ def test_dns_failure_cached_for_pass_and_next_pass_retries(monkeypatch):
     assert lookup.call_count==2
 
 
-def test_readiness_lag_and_fail_fast(make_emitter,hybrid):
+def test_newest_advertised_scan_and_bounded_failures(make_emitter,hybrid):
     hybrid.now=hybrid.latest+60
     def fail(req,_):
         if 'mrms::' in req.full_url:
@@ -77,8 +78,8 @@ def test_readiness_lag_and_fail_fast(make_emitter,hybrid):
     gets=[c[2] for c in hybrid.calls if 'mrms::' in c[2]]
     assert gets
     stamps=[datetime.strptime(u.split('lcref-')[1].split('/')[0],'%Y%m%d%H%M').replace(tzinfo=timezone.utc).timestamp() for u in gets]
-    assert all(hybrid.now-ts>=300 for ts in stamps)
-    assert all(stamps.count(t)<=6 for t in set(stamps))  # only the initial in-flight batch
+    assert stamps[0] == hybrid.latest  # no artificial five-minute readiness hold
+    assert all(stamps.count(t)<=12 for t in set(stamps))  # six workers, at most two attempts
     assert emitter._radar_result.source_id=='rainviewer'
 
 
@@ -86,7 +87,8 @@ def test_placeholder_fail_fast(make_emitter,hybrid):
     hybrid.tile=png((255,0,0,255))
     emitter=make_emitter(); emitter._do_radar()
     gets=[c[2].split('lcref-')[1].split('/')[0] for c in hybrid.calls if 'mrms::' in c[2]]
-    assert gets and all(gets.count(t)<=6 for t in set(gets))
+    assert gets and all(gets.count(t)<=12 for t in set(gets))  # six tiles, at most two attempts
+    assert not any(k[0] == 'iem-mrms-lcref' for k in emitter._radar_tiles)
 
 
 def test_stickiness_logs_failure_then_switch_and_recovery(make_emitter,hybrid,monkeypatch):

@@ -315,14 +315,16 @@ def test_all_dark_sites_keep_contract_on_mosaic(make_emitter,hybrid,multisite):
     assert all(not s['contributing'] and not s['primary'] and s['reason']=='not reporting' for s in r['sites'])
 
 
-def test_one_complete_site_keeps_full_history(make_emitter,hybrid,multisite,monkeypatch):
+def test_repeated_layer_transport_failure_opens_shared_host(make_emitter,hybrid,multisite,monkeypatch):
     monkeypatch.setattr(ae,'RADAR_REQUESTS_PER_MIN',10000)
     stamps=list(range(hybrid.latest-3600,hybrid.latest+1,120))
     multisite.scans.update(KNEA=stamps,KMID=stamps)
     def fail(site,url):
         if site=='KMID':raise OSError('layer down')
     multisite.failure=fail;hybrid.view();emitter=make_emitter();emitter._do_radar()
-    assert len(emitter._radar_frames)==31
+    assert emitter._radar_result.source_id == 'rainviewer'
+    assert emitter._radar_health.snapshot()['breaker'] == 'open'
+    assert any(k[1] == 'KNEA' for k in emitter._radar_tiles)  # paid-for good site tiles survive
 
 
 

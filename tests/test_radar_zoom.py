@@ -93,7 +93,8 @@ def test_zoom_during_429_obeys_source_cooldown(make_emitter, hybrid, tmp_path, r
     hybrid.failure = None; hybrid.calls.clear(); emitter._do_radar()
     assert all(c[0] == 'rainviewer' for c in hybrid.calls)
     r = emitter._build_payload()['radar']
-    assert 'geometryOnly' not in r and not r['tiles']['frames'] and r['refresh']['state']=='idle'
+    assert 'geometryOnly' not in r and r['tiles']['frames'] and r['refresh']['state']=='idle'
+    assert r['sourceId'] == 'rainviewer'  # eligible fallback keeps its real cached window
     assert not hybrid.calls  # map geometry needs no capacity or provider request
     hybrid.mono = 179; hybrid.calls.clear(); emitter._do_radar()
     assert all(c[0] == 'rainviewer' for c in hybrid.calls)

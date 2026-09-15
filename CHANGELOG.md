@@ -7,6 +7,20 @@ to shared upstream code that the classic console benefits from too.
 ## 2026-09-14
 
 ### Radar
+- **Radar v4.9 isolates request failures from the displayed window.** Newest
+  tiles hedge after two seconds without a response byte, using fresh connections
+  and three reserved rescue leases. Each tile gets at most two six-second
+  attempts; admitted hedges/retries share the unchanged 240/minute gate and a
+  per-pass hedge cap. Failed tiles stay local, partial newest inventory publishes,
+  and its repair precedes history/warming. A 60-second host health window opens
+  a 30-second circuit below 50% success with six samples, then admits one recovery
+  probe. Source acquisition gets 16 seconds inside the existing 25-second pass,
+  with immediate eligible fallback. The artificial five-minute MRMS readiness
+  delay is removed: acquisition starts at the advertised scan. `/health.radar`
+  and per-pass INFO expose success, hedges, retries, breakers and last error.
+  Existing failure copy appears only after a failed pass with newest older than
+  two cadences. Fake-origin, real loopback TLS and both-theme browser scenarios
+  cover recovery, deadlines, partial repair, rate gates and retained playback.
 - **Radar v4.8 bounds silently dead pooled sockets.** Reused connections wait at
   most three seconds for the first response byte, then retry a zero-byte
   GET/HEAD failure once on a fresh connection. Partial responses and fresh hangs

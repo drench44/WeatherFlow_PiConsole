@@ -62,6 +62,8 @@ class _CountingReader(io.RawIOBase):
                 raise _StaleFirstByteTimeout('radar reused socket first-byte timeout') from error
             raise
         self.conn.response_bytes += count or 0
+        if count and getattr(self.conn, "attempt", None):
+            self.conn.attempt.first_byte.set()
         return count
 
     def close(self):
@@ -81,6 +83,7 @@ class _Connection(http.client.HTTPSConnection):
     def __init__(self, host, port, addresses, timeout):
         super().__init__(host, port, timeout=timeout)
         self.addresses = addresses
+        self.attempt = None
         self.response_bytes = 0
         self.deadline = time.monotonic() + timeout
         self.first_byte_end = None
@@ -106,6 +109,8 @@ class _Connection(http.client.HTTPSConnection):
                 remaining = end - time.monotonic()
                 if remaining <= 0:
                     raise socket.timeout('radar connect exceeded deadline')
+                if getattr(self, "attempt", None):
+                    self.attempt.attach(sock)
                 _tcp_keepalive(sock)
                 sock.settimeout(remaining)
                 sock.connect(address)
@@ -113,7 +118,10 @@ class _Connection(http.client.HTTPSConnection):
                 if remaining <= 0:
                     raise socket.timeout('radar TLS exceeded deadline')
                 sock.settimeout(remaining)
-                self.sock = self._context.wrap_socket(sock, server_hostname=self.host)
+                self.sock = self._context.wrap_socket(sock, server_hostname=self.host, do_handshake_on_connect=False)
+                if getattr(self, "attempt", None):
+                    self.attempt.attach(self.sock)
+                self.sock.do_handshake()
                 return
             except OSError as error:
                 failure = error
@@ -258,6 +266,10 @@ class RadarSession:
 
     def _release(self, key, conn, broken=False, idle_sec=None):
         with self._condition:
+            control = vars(conn).get("attempt")
+            if control is not None:
+                with control.lock:
+                    control.sock = None
             self._busy.discard(conn)
             if broken or self._closed:
                 conn.close()
@@ -275,11 +287,14 @@ class RadarSession:
         url = urlsplit(req.full_url)
         if url.scheme != 'https' or not url.hostname or url.username or url.password:
             raise ValueError('radar requires an HTTPS host')
+        control = getattr(req, "radar_attempt", None)
         key = (url.hostname, url.port or 443)
         end = min(time.monotonic() + timeout, self._pass_deadline)
-        for attempt in range(2):
+        for attempt in range(1 if control is not None else 2):
             if time.monotonic() >= end:
                 raise TimeoutError('radar pass exceeded deadline')
+            if control is not None:
+                control.check()
             addresses = self._addresses_for(key, end)
             with self._condition:
                 while True:
@@ -291,24 +306,31 @@ class RadarSession:
                         raise TimeoutError('radar DNS/pool exceeded request deadline')
                     conns = self.connections.setdefault(key, [])
                     idle = next((c for c in conns if c not in self._busy), None)
-                    conn = idle if not attempt else None
-                    if attempt and len(conns) >= self.MAX_CONNECTIONS and idle is not None:
+                    fresh = attempt or (control is not None and control.fresh)
+                    limit = self.MAX_CONNECTIONS + (3 if control is not None else 0)
+                    conn = idle if not fresh else None
+                    if fresh and len(conns) >= limit and idle is not None:
                         # A retry needs a fresh socket. Evict an idle lease only
                         # if another caller has already taken the freed slot.
                         self._release(key, idle, broken=True)
                     reused = conn is not None
-                    if conn is None and len(conns) < self.MAX_CONNECTIONS:
+                    if conn is None and len(conns) < limit:
                         conn = _Connection(*key, addresses, remaining)
                         conns.append(conn)
                     if conn is not None:
                         self._busy.add(conn)
                         break
                     self._condition.wait(remaining)
+            conn.attempt = control
             conn.timeout = remaining
             conn.deadline = end
             conn.first_byte_end = None
             conn.response_bytes = 0
             try:
+                if control is not None:
+                    control.check()
+                    if conn.sock:
+                        control.attach(conn.sock)
                 if conn.sock:
                     conn.sock.settimeout(remaining)
                 conn.request(req.get_method(), url.path + ('?' + url.query if url.query else ''),
@@ -316,10 +338,10 @@ class RadarSession:
                 remaining = end - time.monotonic()
                 if remaining <= 0:
                     raise TimeoutError('radar request exceeded deadline')
-                if reused:
+                if reused and control is None:
                     conn.first_byte_end = min(end, time.monotonic() + self.first_byte_timeout)
                 if conn.sock:
-                    conn.sock.settimeout(min(remaining, self.first_byte_timeout) if reused else remaining)
+                    conn.sock.settimeout(min(remaining, self.first_byte_timeout) if reused and control is None else remaining)
                 response = conn.getresponse()
                 if response.status != 200:
                     response.close()
@@ -327,14 +349,24 @@ class RadarSession:
                 return _Response(self, key, conn, response)
             except Exception as error:
                 self._release(key, conn, broken=True)
-                if (attempt or not reused or req.get_method() not in ('GET', 'HEAD') or
+                if (control is not None or attempt or not reused or req.get_method() not in ('GET', 'HEAD') or
                         not is_transport_error(error) or conn.response_bytes or
                         time.monotonic() >= end):
                     raise
                 first_byte = isinstance(error, _StaleFirstByteTimeout)
-                if self.on_retry is not None:
-                    # The caller's rate/cooldown gate also covers retries.
-                    self.on_retry(end, first_byte=first_byte)
+                failure = getattr(req, 'radar_retry_failure', None)
+                if failure is not None:
+                    failure(error)
+                try:
+                    check = getattr(req, 'radar_retry_check', None)
+                    if check is not None:
+                        check()
+                    if self.on_retry is not None:
+                        # The caller's rate/cooldown gate also covers retries.
+                        self.on_retry(end, first_byte=first_byte)
+                except Exception:
+                    req.radar_gate_failed = True  # failed attempt already sampled
+                    raise
                 with self._condition:
                     self.retries += 1
                     self.stale_first_byte_retries += int(first_byte)

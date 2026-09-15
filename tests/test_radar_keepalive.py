@@ -28,7 +28,7 @@ def origin(tmp_path, monkeypatch):
     state = SimpleNamespace(connections=0, requests=[], closed=0, idle=2,
                             close_after=0, alternate=False, fail_fresh=False,
                             headers={}, second=None, delay=0, active=0, peak=0, hold=0, body=png(),
-                            hang=False, hang_ids=set(), hang_path=None, release=threading.Event(), drip=None)
+                            newest_ts=None, behavior=None, path_counts={}, hang=False, hang_ids=set(), hang_path=None, release=threading.Event(), drip=None)
     lock = threading.Lock()
     gate = threading.Condition(lock)  # hold: tile requests wait until `hold` are in flight (deterministic peak)
     class Handler(BaseHTTPRequestHandler):
@@ -55,7 +55,27 @@ def origin(tmp_path, monkeypatch):
         def do_GET(self):
             self.count += 1
             with lock: state.requests.append((self.ident, self.command, self.path))
-            if state.hang or self.ident in state.hang_ids or (state.hang_path and self.path.startswith(state.hang_path)):
+            with lock:
+                state.path_counts[self.path] = state.path_counts.get(self.path, 0)+1
+                ordinal = state.path_counts[self.path]
+            behavior = state.behavior(self.path, ordinal) if state.behavior else 'normal'
+            if behavior == 'fail':
+                self.send_error(503)
+                return
+            if behavior == 'slow':
+                state.release.wait(4)
+            if behavior == 'body':
+                self.send_response(200)
+                self.send_header('Content-Length', str(len(state.body)))
+                self.end_headers()
+                self.wfile.flush()
+                state.release.wait(4)
+                try:
+                    self.wfile.write(state.body)
+                except OSError:
+                    pass
+                return
+            if behavior == 'hang' or state.hang or self.ident in state.hang_ids or (state.hang_path and self.path.startswith(state.hang_path)):
                 # Read the complete request, then send nothing and keep TLS open.
                 state.release.wait(40)
                 self.close_connection = True
@@ -93,7 +113,7 @@ def origin(tmp_path, monkeypatch):
             with lock: state.active -= 1
             raw = state.body
             if self.path == '/metadata':
-                stamp = int(time.time())//120*120
+                stamp = state.newest_ts or int(time.time())//120*120
                 raw = json.dumps(dict(meta=dict(product='lcref', units='0.5 dBZ',
                     end_valid=datetime.fromtimestamp(stamp, timezone.utc).isoformat()))).encode()
             self.send_response(200)
@@ -249,15 +269,15 @@ def test_six_workers_complete_frame_with_closing_connections(make_emitter, origi
         session = emitter._radar_session
         assert origin.peak == 6
         assert len(session.connections[('localhost', int(origin.url.rsplit(':',1)[1]))]) <= 6
-        assert emitter._radar_transport_retries == session.retries > 0
-        assert len(emitter._radar_request_times) == len(origin.requests) + session.retries
+        assert emitter._radar_health.retries > 0
+        assert len(emitter._radar_request_times) == len(origin.requests) + emitter._radar_health.retries
         assert not warnings and not any('SWITCH' in line for line in infos)
     finally:
         if emitter._radar_session: emitter._radar_session.close()
 
 
 @pytest.mark.parametrize('phase', ['metadata', 'tile'])
-def test_primary_transport_failure_retains_new_geometry_then_recovers(make_emitter, hybrid, tmp_path, monkeypatch, phase):
+def test_primary_transport_failure_falls_back_in_new_geometry_then_recovers(make_emitter, hybrid, tmp_path, monkeypatch, phase):
     emitter = make_emitter(); emitter._do_radar()
     previous = emitter._radar_result
     clock = FakeClock(); monkeypatch.setattr(ae, 'Clock', clock); emitter._running = True
@@ -271,11 +291,11 @@ def test_primary_transport_failure_retains_new_geometry_then_recovers(make_emitt
     # Metadata outages are discovered by scheduled validation; warm intents
     # deliberately make no metadata request. Tile outages still exercise reuse.
     emitter._do_radar(intent_triggered=False if phase == 'metadata' else True)
-    assert emitter._radar_result is previous
-    assert emitter._radar_refresh['state'] == 'failed'
-    assert emitter._retries['radar'].timeout == 2
-    assert not emitter._radar_negative and all(c[0] == 'iem' for c in hybrid.calls)
+    assert emitter._radar_result.source_id == 'rainviewer'
+    assert emitter._radar_refresh['state'] == 'idle'
+    assert not emitter._radar_negative and any(c[0] == 'rainviewer' for c in hybrid.calls)
     hybrid.failure = None
+    hybrid.mono += 30  # a tile outage may open the shared IEM host circuit
     emitter._do_radar()
     assert emitter._radar_result.zoom == 7 and emitter._radar_result.source_id == 'iem-mrms-lcref'
     assert not emitter._radar_transport_failures
@@ -288,10 +308,7 @@ def test_repeated_transport_outage_falls_back_and_recovers(make_emitter, hybrid)
     def fail(req, timeout):
         if 'iastate.edu' in req.full_url: raise ConnectionResetError('outage')
     hybrid.failure = fail
-    for _ in range(2):
-        emitter._do_radar()
-        assert emitter._radar_result is previous
-    emitter._do_radar()
+    emitter._do_radar()  # fallback has a chance in the first failed pass
     assert emitter._radar_result.source_id == 'rainviewer'
     hybrid.failure = None
     emitter._do_radar()

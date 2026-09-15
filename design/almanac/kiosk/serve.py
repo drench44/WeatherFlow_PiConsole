@@ -352,6 +352,8 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 d = json.load(f)
             age = time.time() - float(d.get("ts", 0))
             h["dataAgeSec"]      = round(age, 1)
+            h["radar"] = (d.get("radar") or {}).get("health", dict(lastSuccessTs=None,
+                successRate60s=None, hedges=0, retries=0, breaker="closed", lastError=None))
             h["station"]         = d.get("station")
             h["temp"]            = d.get("temp")
             h["updateAvailable"] = d.get("updateAvailable")

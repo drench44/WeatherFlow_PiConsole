@@ -76,7 +76,7 @@ def test_pool_supersession_drains_and_reuses_all_completed_tiles(make_emitter, m
     calls = []
     lock = threading.Lock()
     active = peak = 0
-    def request(source, url, deadline):
+    def request(source, url, deadline, **kwargs):
         nonlocal active, peak
         with lock:
             active += 1; peak = max(peak, active); calls.append(url)

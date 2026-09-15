@@ -48,6 +48,7 @@ import pytz
 from lib.radar_geometry import (world_point, world_inverse, parse_center,
                                 circle_intersects_bounds, distance_meters)
 from lib.radar_http import RadarSession, is_transport_error
+from lib.radar_fetch import HostHealth, CircuitOpen, Attempt, tile_race
 import logging
 # Pillow's PNG reader logs every chunk at DEBUG ("STREAM b'IDAT' ..."), and Kivy's
 # root logger passes DEBUG through to its file handler: on the Pi that was ~800 SD-card
@@ -86,7 +87,10 @@ RADAR_REQUESTS_PER_MIN = 240
 # zoom's first echoes waiting 3-4 s for headroom on the Pi.
 RADAR_HISTORY_RESERVE = 34
 RADAR_MAX_FRAME_BUILDS_PER_PASS = 20
-RADAR_HTTP_TIMEOUT_SEC = 10
+RADAR_HTTP_TIMEOUT_SEC = 8
+RADAR_TILE_TIMEOUT_SEC = 6
+RADAR_HEDGE_SEC = 2
+RADAR_SOURCE_DEADLINE_SEC = 16
 # Preserve the tight primary deadline; persistent IPv4 TLS and readiness lag
 # address acquisition cost rather than hiding it behind a longer timeout.
 RADAR_PRIMARY_DEADLINE_SEC = 25
@@ -118,7 +122,7 @@ RADAR_VIEWPORT_W = 956
 RADAR_VIEWPORT_H = 490
 RADAR_VIEWPORT_PX = RADAR_VIEWPORT_H  # short-axis scale compatibility
 # MRMS on-demand tiles routinely trail metadata: avoid the unrendered newest slots.
-RADAR_IEM_READY_LAG_SEC = 300
+RADAR_IEM_READY_LAG_SEC = 0  # newest advertised measurement; partial tiles repair next pass
 RADAR_SITE_LIST_URL = "https://mesonet.agron.iastate.edu/json/radar.py"
 RADAR_SITE_TILE_TEMPLATE = "https://mesonet.agron.iastate.edu/cache/tile.py/1.0.0/ridge::{site}-N0B-{stamp}/{z}/{x}/{y}.png"
 RADAR_RAINVIEWER_COLOR = 2
@@ -924,6 +928,8 @@ class AlmanacEmitter:
         self._radar_transport_failures = {}
         self._radar_transport_retries = 0
         self._radar_stale_first_byte_retries = 0
+        self._radar_health = HostHealth()
+        self._radar_probe_reuse = {}
         self._radar_metadata = {}
         self._radar_zoom_stamp = None
         self._radar_refresh = dict(state='idle', frameIndex=0, frameTotal=0)
@@ -1180,6 +1186,8 @@ class AlmanacEmitter:
             self._radar_prefetch(source, warm)
         except _RadarSuperseded:
             pass  # the watcher owns the newer camera/source
+        finally:
+            self._radar_log_pass(warm['deadline']-RADAR_BUILD_DEADLINE_SEC)
 
     def _check_radar_geo(self, _dt=None):
         if not self._running or 'geo' in self._inflight:
@@ -1338,6 +1346,12 @@ class AlmanacEmitter:
                 if old in self._events: self._events.remove(old)
         self._schedule_retry('radar', self._check_radar, delay)
 
+    def _radar_log_pass(self, started):
+        health = self._radar_health.snapshot()
+        health.update(source=self._radar_result.source_id,
+                      elapsedSec=round(time.monotonic()-started, 3))
+        Logger.info('almanac_emit: radar pass '+json.dumps(health, sort_keys=True))
+
     def _radar_retained_refresh(self, state):
         snap = self._radar_result
         with self._radar_lock:
@@ -1362,15 +1376,35 @@ class AlmanacEmitter:
             self._radar_stale_first_byte_retries += int(first_byte)
             count = self._radar_transport_retries
             first_byte_count = self._radar_stale_first_byte_retries
+        with self._radar_health.lock:
+            self._radar_health.retries += 1
         Logger.info(f'almanac_emit: radar {source} stale connection retry; transport_retries={count}; '
                     f'stale_first_byte_retries={first_byte_count}')
 
-    def _radar_request(self, source, url, deadline, method='GET', metadata=False, reserve=0):
+    def _radar_request(self, source, url, deadline, method='GET', metadata=False, reserve=0, attempt=None, retry=False):
         """Validated transport; every attempt uses one monotonic rate/cooldown gate."""
         import urllib.request
         import urllib.error
         from email.utils import parsedate_to_datetime
-        self._radar_request_gate(source, deadline, reserve)
+        if metadata:
+            with self._radar_lock:
+                probed = self._radar_probe_reuse.pop(url, None)
+            if probed is not None:
+                return probed  # this pass already paid for the half-open probe
+        # Host and rate admission are atomic; an open host costs no budget and
+        # a denied rate slot must not strand a half-open probe.
+        with self._radar_health.lock:
+            probe = self._radar_health.admit(source, url, metadata)
+            try:
+                self._radar_request_gate(source, deadline, reserve)
+            except Exception:
+                if probe:
+                    self._radar_health._host(source, url)['probe'] = False
+                raise
+        if retry:
+            with self._radar_health.lock:
+                self._radar_health.retries += 1
+                self._radar_health.hedges += int(attempt is not None and attempt.hedged)
         headers = {'User-Agent': 'WeatherFlow-PiConsole-almanac'}
         cached = self._radar_metadata.get(url)
         if metadata:
@@ -1378,8 +1412,13 @@ class AlmanacEmitter:
             if cached:
                 headers.update(cached[1])
         req = urllib.request.Request(url, headers=headers, method=method)
+        req.radar_retry_failure = lambda error: self._radar_health.record(source, url, False, error)
+        req.radar_retry_check = lambda: self._radar_health.admit(source, url)
+        if attempt is not None or probe:
+            req.radar_attempt = attempt or Attempt(fresh=True)
         try:
-            with self._radar_session.open(req, timeout=min(RADAR_HTTP_TIMEOUT_SEC, deadline - time.monotonic())) as response:
+            timeout = RADAR_HTTP_TIMEOUT_SEC if metadata or method == "HEAD" else RADAR_TILE_TIMEOUT_SEC
+            with self._radar_session.open(req, timeout=min(timeout, deadline - time.monotonic())) as response:
                 if getattr(response, 'status', 200) != 200:
                     raise ValueError('unexpected radar HTTP status')
                 raw = response.read(2 * 1024 * 1024 + 1) if method == 'GET' else b''
@@ -1394,10 +1433,16 @@ class AlmanacEmitter:
                         if response_headers.get(name):
                             validators[request_name] = response_headers[name]
                     self._radar_metadata[url] = (raw, validators)
+                if attempt is not None:
+                    attempt.check()
+                    self._radar_validate_tile(raw, source)
+                self._radar_health.record(source, url, True, probe=probe)
                 return raw
         except urllib.error.HTTPError as error:
             if error.code == 304 and metadata and cached:
+                self._radar_health.record(source, url, True, probe=probe)
                 return cached[0]
+            self._radar_health.record(source, url, error.code == 404, error, probe=probe)
             if error.code == 429:
                 retry = error.headers.get('Retry-After', '') if error.headers else ''
                 try:
@@ -1412,14 +1457,44 @@ class AlmanacEmitter:
                 self._radar_cooldowns[source] = time.monotonic() + max(1, delay)
                 raise _RadarBudget('radar provider rate limited') from error
             raise
-        except Exception:
+        except Exception as error:
+            if not getattr(req, "radar_gate_failed", False):
+                self._radar_health.record(source, url, False, error, probe=probe)
             self._radar_session.discard(url)
             raise
+
+    @staticmethod
+    def _radar_validate_tile(raw, source):
+        from PIL import Image
+        if not raw.startswith(b"\x89PNG\r\n\x1a\n"):
+            raise ValueError("radar response is not PNG")
+        with Image.open(io.BytesIO(raw)) as image:
+            if image.format != "PNG" or image.size != (256, 256):
+                raise ValueError("unexpected radar tile size/format")
+            image.load()
+            if source.startswith("iem-"):
+                with image.convert("RGBA") as rgba:
+                    if rgba.getextrema() == ((255,255),(0,0),(0,0),(255,255)):
+                        raise ValueError("IEM placeholder tile")
 
     def _radar_tile_batch(self, source, stamp, ctx, deadline, url, site):
         """Six newest / four background requests; retain successes on cancellation."""
         from PIL import Image
         workers = ctx.get('tile_workers', RADAR_TILE_WORKERS)
+        interactive = workers == RADAR_NEWEST_TILE_WORKERS and not ctx.get('prefetch')
+        hedge_budget = ctx.setdefault('hedge_budget', dict(count=0, limit=len(ctx['tiles'])//2))
+        def claim_hedge():
+            with self._radar_lock:
+                reserve = ctx.get('request_reserve', 0)
+                if (hedge_budget['count'] >= hedge_budget['limit'] or
+                        self._radar_headroom_delay(source, reserve+1)):
+                    return False
+                hedge_budget['count'] += 1
+                return True
+        def discarded(count):
+            with self._radar_health.lock:
+                self._radar_health.discarded += count
+
         def fetch(tile):
             tx, ty, _, _ = tile
             target = _radar_tile_path(source, site, stamp, ctx['zoom'], tx, ty)
@@ -1441,17 +1516,13 @@ class AlmanacEmitter:
             reserve = ctx.get('request_reserve', RADAR_HISTORY_RESERVE if ctx.get('prefetch') else 0)
             options = dict(reserve=reserve) if reserve else {}
             if raw is None:
-                raw = self._radar_request(source, url(tx, ty), deadline, **options)
-            if not raw.startswith(b'\x89PNG\r\n\x1a\n'):
-                raise ValueError('radar response is not PNG')
-            with Image.open(io.BytesIO(raw)) as image:
-                if image.format != 'PNG' or image.size != (256, 256):
-                    raise ValueError('unexpected radar tile size/format')
-                image.load()  # never keep truncated or placeholder tiles
-                if source.startswith('iem-'):
-                    with image.convert('RGBA') as rgba:
-                        if rgba.getextrema() == ((255,255),(0,0),(0,0),(255,255)):
-                            raise ValueError('IEM placeholder tile')
+                def request(control, retry):
+                    # Count hedges at wire admission, independently from retries.
+                    return self._radar_request(source, url(tx, ty), deadline,
+                        attempt=control, retry=retry, **options)
+                raw = tile_race(request, deadline, RADAR_HEDGE_SEC if interactive else None,
+                                claim_hedge, discarded)
+            self._radar_validate_tile(raw, source)
             with self._radar_lock:
                 self._radar_tiles[key] = raw
                 self._radar_tiles.move_to_end(key)
@@ -1505,10 +1576,16 @@ class AlmanacEmitter:
                     ready=[];error=None
                     for future in done:
                         try:ready.append(future.result())
-                        except Exception as caught:error=error or caught
+                        except Exception as caught:
+                            if error is None or isinstance(caught, (_RadarBudget, _RadarSuperseded, CircuitOpen)):
+                                error = caught
                     for result in ready:
                         yield result
-                    if error is not None:raise error
+                    if isinstance(error, (_RadarBudget, _RadarSuperseded, CircuitOpen)):
+                        raise error
+                    if error is not None:
+                        ctx['last_error'] = str(error)
+                        ctx['missing_tiles'] = True
                     for _ in done:
                         checkpoint()
                         tile = next(tiles, None)
@@ -1544,7 +1621,7 @@ class AlmanacEmitter:
         work = list(reversed(layers)) if layers is not None else [(None,ts,tile_url)]
         if archive_url:
             try: self._radar_archive_probe(source,archive_url,deadline,ctx.get('request_reserve',0))
-            except (_RadarBudget,_RadarSuperseded): raise
+            except (_RadarBudget,_RadarSuperseded,CircuitOpen): raise
             except Exception as error:
                 if is_transport_error(error): raise
                 ctx['last_error']=str(error)
@@ -1592,9 +1669,14 @@ class AlmanacEmitter:
                                 tiles=_radar_tile_manifest(source, window, ctx),
                                 ts_fetch=snap.ts_fetch if snap.ts_frame == ts else partial.ts_fetch)
                         self._radar_result=partial
+                        self._radar_health.last_success = time.time()
                         self._radar_emit_now()
+                if ctx.get('reuse_newest') and not any(_radar_tile_path(source,site,stamp,ctx['zoom'],x,y).is_file()
+                        for x,y,_,_ in _radar_site_tiles(ctx,site)):
+                    self._radar_forget(source,site)
+                    raise _RadarRevalidate('remembered newest unavailable')
                 drawn.append((site,stamp))
-            except (_RadarSuperseded, _RadarBudget):
+            except (_RadarSuperseded, _RadarBudget, CircuitOpen, _RadarRevalidate):
                 raise
             except Exception as error:
                 if is_transport_error(error): raise
@@ -1903,7 +1985,14 @@ class AlmanacEmitter:
                 for x,y,_,_ in _radar_site_tiles(ctx,site)) for site,scan in pairs)
         if not publish():
             raise ValueError('IEM frame aged out during acquisition')
+        self._radar_health.last_success = time.time()
+        ctx['deadline'] = ctx.get('pass_deadline', ctx['deadline'])
+        self._radar_session.begin_pass(ctx['deadline'])
         self._radar_idle_context = (source, dict(ctx))
+        if not latest['complete']:
+            ctx['retained_failed'] = True
+            self._radar_budget_retry(source, len(ctx['tiles'])+2)
+            return self._radar_result
         if ctx['viewed']:
             self._radar_publish_refresh(ctx,state='idle')
             self._radar_prefetch(source,ctx)
@@ -2149,6 +2238,7 @@ class AlmanacEmitter:
     def _do_radar(self, intent_triggered=None, view_started=False):
         """Primary-first orchestration; radar failures never alter engine health."""
         pass_deadline = time.monotonic() + RADAR_BUILD_DEADLINE_SEC
+        self._radar_probe_reuse.clear()
         stamp_names = self._radar_stamp_names()
         stamp = self._radar_preference_stamp(stamp_names)
         if intent_triggered is None:
@@ -2169,6 +2259,7 @@ class AlmanacEmitter:
                 # Publish the retained loop first. Resume the idle tier on the
                 # next watcher tick, in the same single-flight radar lane.
                 self._radar_warm_pending = True
+                self._radar_log_pass(pass_deadline-RADAR_BUILD_DEADLINE_SEC)
                 return
         try:
             config = getattr(self.app, 'config', {}) or {}
@@ -2224,7 +2315,7 @@ class AlmanacEmitter:
             ctx = dict(center=center, nexrad=_radar_nexrad(station_lat, station_lon, unit), viewed=viewed,
                 desired=desired, auto_zoom=auto_zoom, builds=0, station=station, unit=unit, previous_result=previous,
                 preference_stamp=stamp, stamp_names=stamp_names, intent_triggered=intent_triggered,
-                deadline=pass_deadline)
+                deadline=pass_deadline, pass_deadline=pass_deadline)
             self._radar_negative = {k: v for k, v in self._radar_negative.items() if v > time.monotonic()}
             adapters = [('rainviewer', self._radar_rainviewer_frames)]
             if _radar_iem_eligible(station_lat, station_lon):
@@ -2257,6 +2348,20 @@ class AlmanacEmitter:
             self._radar_checkpoint(ctx)
             errors = []
             for source, adapter in adapters:
+                if self._radar_cooldowns.get(source, 0) > time.monotonic():
+                    errors.append('source cooldown: '+source)
+                    continue
+                ctx['deadline'] = min(pass_deadline, time.monotonic()+RADAR_SOURCE_DEADLINE_SEC)
+                ctx.pop('hedge_budget', None)
+                ctx.pop('missing_tiles', None)
+                ctx.pop('retained_failed', None)
+                try:
+                    probes = self._radar_health.probes(source)
+                except CircuitOpen as error:
+                    if source == 'iem-nexrad-n0b':
+                        ctx['sources'][1].update(available=False, reason='scan unavailable')
+                    errors.append(str(error))
+                    continue
                 zoom = max(RADAR_SITE_MIN_ZOOM if source == 'iem-nexrad-n0b' else RADAR_MIN_ZOOM, min(desired if desired is not None else auto_zoom,
                                                _RADAR_SOURCES[source]['max_zoom']))
                 tiles, mpp, bounds, _ = _radar_viewport(lat, lon, zoom, RADAR_VIEWPORT_W, RADAR_VIEWPORT_H)
@@ -2296,6 +2401,11 @@ class AlmanacEmitter:
                     return
                 started = time.monotonic()
                 try:
+                    for probe_url, is_metadata in probes:
+                        raw = self._radar_request(source, probe_url, ctx['deadline'],
+                            method='GET' if is_metadata else 'HEAD', metadata=True)
+                        if is_metadata:
+                            self._radar_probe_reuse[probe_url] = raw
                     ctx['tile_workers'] = RADAR_NEWEST_TILE_WORKERS
                     ctx['reuse_newest'] = False
                     try:
@@ -2317,10 +2427,17 @@ class AlmanacEmitter:
                         self._radar_retained_refresh('failed')
                     else:
                         self._radar_publish_refresh(ctx, state='idle')
+                    probe_delay = self._radar_health.probe_delay()
+                    if probe_delay is not None:
+                        self._schedule_retry('radar', self._check_radar, max(1, probe_delay))
                     return
                 except _RadarSuperseded:
                     raise
                 except _RadarBudget:
+                    if (time.monotonic() >= ctx['deadline'] and time.monotonic() < pass_deadline
+                            or self._radar_cooldowns.get(source, 0) > time.monotonic()):
+                        errors.append('source deadline/cooldown: '+source)
+                        continue
                     self._radar_forget(source)
                     fresh = previous.available and previous.ts_frame is not None and 0 <= time.time()-previous.ts_frame < previous.stale_sec
                     if self._radar_result.ts_frame is None:
@@ -2329,6 +2446,7 @@ class AlmanacEmitter:
                     self._radar_budget_retry(source, needed)
                     return
                 except Exception as error:
+                    self._radar_health.last_error = str(error) or type(error).__name__
                     self._radar_forget(source)
                     self._radar_checkpoint(ctx)
                     self._radar_session.close()
@@ -2336,21 +2454,7 @@ class AlmanacEmitter:
                     errors.append(str(error))
                     Logger.warning(f'almanac_emit: radar {source} failed: {type(error).__name__}: {error}; '
                                    f'candidates={ctx["candidates"]}; elapsed={time.monotonic()-started:.3f}s')
-                    transport = is_transport_error(error)
-                    if transport:
-                        failures = self._radar_transport_failures.get(source, 0) + 1
-                        self._radar_transport_failures[source] = failures
-                        if source == 'iem-mrms-lcref' and failures < 3:
-                            # Keep the last completed scan even at a new viewport.
-                            # Only repeated failed passes establish a transport outage.
-                            if self._radar_result.available:
-                                self._radar_retained_refresh('failed')
-                            else:
-                                self._radar_publish_refresh(ctx, state='failed')
-                            self._radar_budget_retry(source, needed)
-                            return
-                    else:
-                        self._radar_transport_failures.pop(source, None)
+                    transport = is_transport_error(error) or isinstance(error, CircuitOpen)
                     if source == 'iem-nexrad-n0b':
                         ctx['sources'][1].update(available=False, reason=ctx.get('site_failure', 'scan unavailable'))
                     if (not transport and source == 'iem-mrms-lcref' and previous.available and previous.source_id == source
@@ -2379,10 +2483,14 @@ class AlmanacEmitter:
                     self._radar_retained_refresh('failed')
                 else:
                     self._radar_publish_refresh(ctx, state='failed')
+            self._radar_health.last_error = str(error) or type(error).__name__
             Logger.warning(f'almanac_emit: radar fetch failed - {error}')
-            self._schedule_retry('radar', self._check_radar, RADAR_RETRY_SEC)
+            probe_delay = self._radar_health.probe_delay()
+            self._schedule_retry('radar', self._check_radar,
+                RADAR_RETRY_SEC if probe_delay is None else max(1, probe_delay))
 
         finally:
+            self._radar_log_pass(pass_deadline-RADAR_BUILD_DEADLINE_SEC)
             if not self._running and self._radar_session is not None and 'radar' in self._inflight:
                 self._radar_session.close()
                 self._radar_session = None
@@ -3266,7 +3374,8 @@ class AlmanacEmitter:
                   else self._process_alerts(alerts_snap.features, now, tz))
 
         payload = {
-            'radar': self._radar_payload(radar_snap, now, tz, radar_refresh),
+            'radar': dict(self._radar_payload(radar_snap, now, tz, radar_refresh),
+                          health=self._radar_health.snapshot()),
             'ts':      int(now),                     # engine heartbeat ONLY - see obsAgeSec
             'obsTs':     int(obs_ts) if obs_ts is not None else None,
             'obsAgeSec': obs_age,                    # age of the newest OUTDOOR observation

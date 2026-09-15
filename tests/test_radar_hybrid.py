@@ -49,6 +49,8 @@ def hybrid(tmp_path, monkeypatch):
             raw = json.dumps(dict(host='https://tiles.example', radar=dict(past=[
                 dict(time=state.rv - offset, path='/v2/' + str(state.rv - offset))
                 for offset in range(0, 7201, 600)]))).encode()
+        elif url.startswith(ae.RADAR_SITE_LIST_URL):
+            raw = b'{"scans":[]}'
         elif method == 'HEAD':
             assert '/archive/data/' in url
             raw = b''

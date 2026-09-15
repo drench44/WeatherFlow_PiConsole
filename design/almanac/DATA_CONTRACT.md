@@ -208,10 +208,11 @@ MRMS metadata:
 `https://mesonet.agron.iastate.edu/data/gis/images/4326/mrms/lcref.json`.
 `meta.end_valid` must be UTC, an even minute, fresh, with `product:lcref` and
 `units:0.5 dBZ`. Conditional requests/304 retain validators and revalidate age.
-Candidates start at `min(end_valid, floor((now-300)/120)*120)`. The five-minute
-readiness lag avoids IEM's as-yet-unrendered newest tiles. It is acquisition
-latency, not a substituted valid time: every accepted timestamp names matching
-provider tiles. The UI still reports actual age and may correctly mark MRMS stale.
+Candidates start at the advertised `end_valid` (`RADAR_IEM_READY_LAG_SEC = 0`).
+v4.9 removes the five-minute readiness hold: it alone made a one-cadence AS OF
+impossible on a two-minute feed. Tiles that are not rendered yet remain missing
+for this pass; validated sibling tiles publish partial and the next pass repairs
+from cache. Every accepted timestamp still names matching provider tiles.
 
 During validation, an MRMS candidate probes the original archive with HEAD
 unless that stamp already has a successful probe:
@@ -245,12 +246,14 @@ Idle prefetch reuses still-valid remembered stamps/listings. It may discover the
 other mode: cached per-site listings for N0B, or MRMS metadata plus archive
 readiness when no valid MRMS stamp exists. These requests share the background
 reserve and cancellation checkpoints. No separate background worker is added; provider cadence,
-readiness lag, observed timestamps, retained-failure handling and stale thresholds
-are unchanged.
+observed timestamps and stale thresholds are unchanged. v4.9 removes the artificial
+readiness delay and yields incomplete newest work before starting these tiers.
 
 The transport uses standard-library `http.client.HTTPSConnection`, with at most
-six leased connections per host. A connection stays leased until the response
-body has been consumed or closed; newest frames use six tile workers, history
+nine leased connections per host during tile races: six ordinary workers plus
+three rescue slots. Metadata-only sessions retain the six-connection bound. A
+connection stays leased until the response body has been consumed or closed;
+newest frames use six tile workers, history
 and idle prefetch use four. Sessions and successful IPv4 DNS results survive
 worker passes and socket expiry. Each host is resolved with `AF_INET`; the
 resolved IP retains the original TLS SNI, certificate hostname verification and
@@ -264,51 +267,82 @@ daemon resolver thread. Every cold caller waits on the shared event only until
 its deadline; a late result may populate the cache, but cannot issue a request.
 Cached callers never wait for resolution.
 
-**v4.8 transport deadlines.** Idle sockets expire after `RadarSession.IDLE_SEC = 2`
-seconds or the smaller advertised Keep-Alive window minus 250 ms. The shorter
-idle bound limits exposure to silent path death on a wifi mesh: an apparently
-open TCP socket can accept a request and then return no response. It is a
-conservative default, not a measured mesh lifetime. `Connection: close` drops
-the socket; provider changes and shutdown close the session.
+**v4.9 request isolation, hedges and deadlines.** Each immutable tile gets at
+most two attempts, each capped at six seconds including DNS, pool waits, TCP,
+TLS, send and every raw header/body read. A failed tile does not abort siblings.
+The winner must be a complete, bounded, decoded 256×256 native PNG; truncated,
+placeholder and invalid responses cannot win. A fast failure retries immediately
+on a fresh connection. A partial-body failure may also retry the immutable tile.
+No third attempt is possible, including through the v4.8 transport retry path.
 
-A reused socket gets `RadarSession.FIRST_BYTE_TIMEOUT_SEC = 3` seconds from the
-completed request send until its first HTTP response byte, capped by the original
-request/pass deadline. This is configurable per session with
-`RadarSession(first_byte_timeout=seconds)` (finite, positive). A zero-byte read
-timeout on a reused GET/HEAD discards that socket and retries once on a **fresh**
-connection, using the existing rate/cooldown gate and remaining time. Immediate
-zero-byte transport failures use the same retry path. The first response byte
-restores the remaining ordinary deadline; partial status lines, headers and
-bodies are never replayed. Fresh-socket failures, including a hanging fresh retry,
-propagate without another attempt. Fresh connections retain the ordinary
-`RADAR_HTTP_TIMEOUT_SEC = 10` request cap, bounded by the pass's remaining time.
+For newest only, no first response byte after `RADAR_HEDGE_SEC = 2` launches the
+second attempt on a fresh connection while the first remains eligible to win.
+A received status/header byte suppresses the hedge; slow bodies keep the six-second
+absolute cap. First valid response wins. The loser is shut down, drained/joined
+and discarded before cache mutation. At most `floor(len(ctx.tiles)/2)` hedges are
+reserved per source pass, shared by its site layers; every admitted hedge/retry
+uses the rolling rate gate. The cap is conservative for multi-site views (the
+viewport count, rather than the sum of layer tiles). Three extra pool slots keep
+six hanging primaries from starving all rescue requests. Other hedges may wait
+inside their request deadlines; no unbounded threads or abandoned tile workers.
+History and warming have four tile workers, sequential retries and no hedges.
+An incomplete newest publishes its partial inventory and requests another pass
+(normally two seconds with headroom) before history or warming can start.
 
-`RADAR_PRIMARY_DEADLINE_SEC = RADAR_BUILD_DEADLINE_SEC = 25` is one absolute
-monotonic deadline starting at pass entry, shared by metadata, archive HEADs,
-all tile/list workers, source fallback, revalidation, history and idle warming
-within that pass. It replaces the former 150-second overall build allowance.
-Independent resumed warming starts its own 25-second pass. Session admission,
-DNS/pool waits, connect, TLS, send, every raw header/body read and worker waits
-consume the same remaining budget; a retry or queued worker cannot reset it.
-After expiry no further network request is admitted. Active workers drain under
-that deadline with a small scheduling/CPU cleanup grace, retaining already
-validated tiles for the next pass. The regression tolerance is 0.4–0.5 seconds
-on loopback, not a hard real-time scheduling guarantee on the Pi.
+Metadata and archive HEADs have eight-second absolute request budgets. The
+v4.8 zero-byte retry remains for these: a reused socket gets up to three seconds
+from send for its first response byte; a zero-byte failure retries once fresh
+inside the original eight-second budget. First attempts and retries are sampled
+and rate-gated. Partial metadata responses are not replayed. Cold discovery is
+still a dependency and does not promise a three-second acquisition; valid intent
+knowledge and stale-while-refresh DNS remove that wait on warm paths.
 
-Pooled sockets enable `SO_KEEPALIVE`; where supported, Linux `TCP_KEEPIDLE = 2`,
-`TCP_KEEPINTVL = 2`, and `TCP_KEEPCNT = 2` detect dead paths between passes.
-Missing or rejected platform options are harmless. These probes complement the
-first-byte timeout and do not replace it.
+`RADAR_BUILD_DEADLINE_SEC = RADAR_PRIMARY_DEADLINE_SEC = 25` remains the shared
+absolute pass deadline. Each source gets at most 16 seconds to acquire newest,
+leaving up to nine seconds for the next source. A source timeout, open breaker or
+transport failure falls through immediately in the existing site → MRMS →
+RainViewer order as applicable. v4.8's three-failed-pass transport hold is removed.
+After newest publication, background tiers may use the remaining original
+25-second budget. Resumed warming gets a new 25-second pass. All active requests
+and their cleanup remain bounded by the original deadlines (0.4–0.5 second test
+cleanup grace; no hard real-time Pi claim).
 
-The INFO retry line carries cumulative `transport_retries=N` and
-`stale_first_byte_retries=M`; the latter counts only reused zero-byte read
-timeouts that pass the retry gate. Successful transparent recovery leaves the
-refresh state successful/idle, without a failure note or provider failure count.
-A failed primary transport pass retains the completed scan and retries in seconds;
-repeated failed passes permit fallback. Transport errors do not negatively cache
-frames. Loopback HTTPS regressions cover normal/idle-closing origins, accepted
-requests with no response, six simultaneous stale sockets, failed fresh retries,
-queued pool waiters, trickled headers/body, TCP options and engine refresh state.
+Idle sockets still expire after two seconds or the shorter advertised Keep-Alive
+minus 250ms. Every checkout checks expiry. Hedges and retries bypass idle sockets.
+`Connection: close`, provider changes and shutdown discard connections. SNI,
+certificate verification and IPv4 DNS caching remain intact. Best-effort Linux
+TCP keepalive uses 2/2/2 seconds/seconds/probes; missing options are harmless.
+
+**Host circuit breaker.** Completed attempt outcomes form a rolling 60-second
+window per hostname/port. At ≥6 samples and <50% successes, stop admitting that
+host for 30 seconds. Recovered hedges still count their failed/cancelled loser;
+HTTP 404 is a responding host with unavailable content, not a host outage.
+After cooldown, one fresh metadata request owns the `half` state; concurrent
+probes are rejected. Success clears the old samples and closes; failure opens
+another 30 seconds. Tile-only hosts use HEAD of a remembered tile URL because
+another metadata hostname cannot prove their recovery. Existing 429 cooldowns
+and the shared rate cap still apply. Eligible fallback runs in the same pass;
+recovery is retried after cooldown (or an already scheduled earlier retry).
+A shared-host outage applies to both IEM products. Paid-for successes stay cached.
+
+**Operator health.** `wx.json.radar.health` is exposed as `/health.radar`:
+
+```json
+{"lastSuccessTs":1789444700.5,"successRate60s":0.78,"hedges":9,"retries":9,
+ "discardedHedges":9,"breaker":"closed","lastError":"discarded radar attempt",
+ "hosts":{"example.invalid":{"breaker":"closed","samples60s":41,"successRate60s":0.78}}}
+```
+
+`lastSuccessTs` is Unix seconds of the last usable newest publication (including
+partial), not the measurement timestamp. Ratios are 0–1, null without samples.
+Hedges/retries are cumulative admitted attempts, including bounded DNS/pool waits;
+a hedge is also a retry. `discardedHedges` counts pending losers when a race wins.
+`breaker` is the worst state across known hosts (`open`, `half`, `closed`), so a
+working fallback does not hide the primary outage. `lastError` retains the last
+request error even after recovery. Every ordinary fetch pass emits this object at
+INFO; the v4.8 retry line still carries `transport_retries` and
+`stale_first_byte_retries`. Radar faults do not change the engine/sensor HTTP health
+verdict. Health reflects the latest engine payload, like other `/health` fields.
 
 Validated native PNG bytes enter a 400-tile in-memory LRU before cancellation is
 checked. Keys include source, site when applicable, scan timestamp, zoom and tile
@@ -318,7 +352,7 @@ pass reuses overlapping tiles without HTTP, even if the earlier crop never finis
 Truncated, oversized, placeholder and invalid tiles never enter this cache.
 
 The existing request budget remains 240/minute, rolling and shared across every
-source, HEAD, metadata request and transport retry. The interaction reserve is
+source, HEAD, metadata request, tile hedge and retry. The interaction reserve is
 34; optional warming and deep history retain 60 further slots. No gesture bypasses
 a provider cooldown. The worker has one flight, its preference watcher runs every
 100 ms, and supersession drains paid-for tile responses into the cache before
@@ -663,7 +697,11 @@ The only status corner is `#rad-note`, a fixed 14px box at top418/right12 with
 report it stays suppressed. Priority is refused-source copy (v4.3b), newest/history refresh, failure naming
 the visible scan, upper zoom-cap copy, then `KATX resumes at zoom 7`. Copy remains
 `Refreshing · newest frame`, `Refreshing · frame 4 of 8`, and
-`Couldn't refresh · showing 17:12`. Only a 120ms opacity transition is used,
+`Couldn't refresh · showing 17:12`. The failure copy requires both
+`refresh.state=failed` and a known newest measurement strictly older than two
+`cadenceSec` intervals; one failed pass with fresh newest shows no failure note.
+The visible loop read still names its displayed scan, and AS OF names the newest
+measurement, never fetch completion time. Only a 120ms opacity transition is used,
 disabled for reduced motion. There is no Updating pill, spinner, second note,
 or `aria-busy` write on the interactive plate.
 
@@ -881,7 +919,7 @@ MRMS hour becomes 31 listed / 30 complete, with only the expired oldest removed.
 Every partial-tile publish carries that window; completion updates the newest in
 place. Backfill retains historical `siteScans` exactly, even if fresh per-site
 listings would choose different scan pairs. Site windows slide by actual scan
-stamps. The existing 25-second primary deadline may leave newest pending for a
+stamps. The shared 25-second pass deadline may leave newest pending for a
 retry, but does not collapse history. Cold start and changed geometry still
 publish their first measurement with a new window.
 
