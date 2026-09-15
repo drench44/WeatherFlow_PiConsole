@@ -143,7 +143,7 @@ class _CountingReader(io.RawIOBase):
             raise
         self.conn.response_bytes += count or 0
         if count and getattr(self.conn, "attempt", None):
-            self.conn.attempt.first_byte.set()
+            self.conn.attempt.progress()
         return count
 
     def close(self):

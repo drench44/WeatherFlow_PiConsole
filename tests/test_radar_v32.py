@@ -56,7 +56,7 @@ def test_k3_k4_index_floor_and_coverage():
     for i in range(76, 86):
         coverage = rp._indexed_colors('iem-nexrad-n0b')[i][3]
         assert site.getpixel((i, 0)) == (127,130,149,round(coverage*180/255))
-    assert site.getpixel((86, 0)) == (138,163,198,255)
+    assert site.getpixel((86, 0)) == (118,163,138,255)
     mosaic = rp.remap(tile, 'iem-nexrad-n0b', rp.source_palette('iem-mrms-lcref'))
     assert all(mosaic.getpixel((i, 0))[3] == 0 for i in range(76, 86))
     mrms = rp.remap(indexed('iem-mrms-lcref'), 'iem-mrms-lcref', rp.source_palette('iem-mrms-lcref'))
@@ -90,7 +90,14 @@ def test_k5_opaque_rain_byte_identity(source, mode):
         ('RGBA', 'iem-nexrad-n0b'): '71d9f703997fe5dd01e2759afa54cb7dc13f61d7fe37f0758ec91daae8880287',
         ('RGBA', 'rainviewer'): 'cd9770a6941b20e0c954b6b90b97ff504f4cdb13c24dfa81c782844c3bd3aef9',
     }
-    assert hashlib.sha256(rp.remap(tile, source, rp._RADAR_LUT).tobytes()).hexdigest() == gold[mode, source]
+    legacy = list(rp._RADAR_LUT)
+    bands = [(10,20,'8AA3C6','4E79B4'),(20,25,'2E93A8','227F92'),(25,35,'3FA65E','2A8448')]
+    for i in range(10):
+        dbz = legacy[i][0]
+        lo,hi,a,b = next(b for b in bands if b[0] <= dbz < b[1])
+        t = (dbz-lo)/(hi-lo)
+        legacy[i] = (dbz, tuple(round(a+(b-a)*t) for a,b in zip(bytes.fromhex(a),bytes.fromhex(b)))+(255,))
+    assert hashlib.sha256(rp.remap(tile, source, legacy).tobytes()).hexdigest() == gold[mode, source]
 
 
 

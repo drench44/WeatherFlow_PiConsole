@@ -75,7 +75,7 @@ def payload():
     r.update(frameCount=8,completeFrameCount=8,historySpanSec=840);data['radar']=r;return data
 
 
-def tile_png(color=(138,163,198,255)):
+def tile_png(color=(118,163,138,255)):
     image=Image.new('RGBA',(256,256));d=ImageDraw.Draw(image)
     d.ellipse((35,15,200,150),fill=color);d.polygon([(110,90),(230,160),(200,220),(90,160)],fill=color)
     info=PngInfo();info.add_text('radarRemap',json.dumps(dict(remapped=True,unmatchedColors=0,opaqueColors=1,
@@ -147,8 +147,10 @@ def smoke(browser,server,theme,output):
     requests=server.requests[start:]
     print('MOTION',theme,motion,'requests',requests,flush=True)
     assert motion['paints']>=25,motion
-    assert not any('/wx.json' in u or '/radar/t/' in u for u in requests),requests
-    assert not page.evaluate("audit.fetches.filter(u=>/radar\\/(t|geo)\\//.test(u)).length"),page.evaluate('audit.fetches')
+    # Moving polls are read-only heartbeats; newly exposed geography may load.
+    # Neither is an engine intent or native measurement request.
+    assert not any('/radar/t/' in u or '/wx.json' in u and ('radarCommit=1' in u or 'radarMoving=1' not in u) for u in requests),requests
+    assert not page.evaluate("audit.fetches.filter(u=>/radar\\/t\\//.test(u)).length"),page.evaluate('audit.fetches')
     assert not motion['nodes'] and motion['attrs']<=12*motion['paints'],motion
     # Wall time is diagnostic; only panel measurements establish performance.
     assert page.evaluate('Math.max(...audit.frames.map(f=>f.draws))')<=32
@@ -200,7 +202,7 @@ def smoke(browser,server,theme,output):
       radarGestureCancel();radarRelease();radarView.active=false;radarCamera={...radarView.data.center,lon:radarView.data.center.lon-.8,zoom:8};radarBaseDirty=true;radarBasePaint();radarView.paused=false;
       const ctx=document.getElementById('rad-echo').getContext('2d'),tile=radarTileSet(radarCamera,8)[0],f={ts:946684800,stamp:'200001010000',at:'17:12',siteScans:[]},old={...f,ts:946684740,stamp:'199912312359'};
       radarView.current=f;radarView.good=f;radarView.loaded=[f];radarView.data.observedTs=f.ts;radarView.data.observedAt=f.at;radarOverlayBuild();radarZoomRender();
-      const c=new OffscreenCanvas(256,256),x=c.getContext('2d');x.fillStyle='#8AA3C6';x.fillRect(0,0,256,256);
+      const c=new OffscreenCanvas(256,256),x=c.getContext('2d');x.fillStyle='#76A38A';x.fillRect(0,0,256,256);
       const meta={remapped:true,opaquePixels:65536,unmatchedPixels:0,ambiguousPixels:0};
       const parent=async frame=>{const key=radarTileKey(frame,7,Math.floor(tile.x/2),Math.floor(tile.y/2));radarTileRemember(key,{key,z:7,x:Math.floor(tile.x/2),y:Math.floor(tile.y/2),bitmap:await createImageBitmap(c),meta,hasEcho:true});};
       let p=radarWorldPoint(radarCamera.lat,radarCamera.lon,8),px=Math.round(478+(tile.x+.5)*256-p[0]),py=Math.round(245+(tile.y+.5)*256-p[1]);px=Math.max(2,Math.min(953,px));py=Math.max(2,Math.min(487,py));
@@ -216,7 +218,7 @@ def smoke(browser,server,theme,output):
       radarState();radarUpdateReady();radarView.active=true;radarLoopSync();radarView.active=false;
       return {same,other,unchanged,unexpected,aria:document.getElementById('rad-plate').getAttribute('aria-label'),asof:document.getElementById('rad-asof').textContent,read:document.getElementById('rad-frame-time').textContent};
     }''')
-    assert pixels['same']==[138,163,198,255] and pixels['other']==[0,0,0,0],pixels
+    assert pixels['same']==[118,163,138,255] and pixels['other']==[0,0,0,0],pixels
     assert pixels['unchanged'] and pixels['unexpected']==0 and pixels['aria']=='Reflectivity radar' and pixels['asof']=='17:12' and pixels['read']=='Buffering · 0 of 8',pixels
     assert page.locator('#rad-plate [id*="hatch"], #rad-plate [class*="hatch"], #rad-plate pattern').count()==0
     page.screenshot(path=str(output/f'radar-mid-acquisition-{theme}.png'))
@@ -277,7 +279,9 @@ def extended(page,server,theme,output):
     page.wait_for_function('radarTileBusy===0')
     page.evaluate('radarGestureCancel();radarCameraSet({...radarView.data.center,zoom:8});radarView.paused=true;radarView.current=radarView.good;radarBaseDirty=true;radarEchoDirty=true')
     page.wait_for_function('radarTileBusy===0 && !radarCameraDirty')
-    page.wait_for_timeout(700)
+    # Snapshot native residency only after acquisition and pending reads drain;
+    # otherwise a previously issued read can masquerade as a missing drag GET.
+    page.wait_for_function('radarReady().length===8 && !radarView.holdingWindow && !radarCompositeJob && !radarTileBusy && !radarGeoBusy && !radarTileQueue.length && !radarGeoQueue.length')
     reposition=page.evaluate('''async()=>{
       const start={...radarCamera},resident=new Set(radarTiles.keys()),urls=[];const fetch0=window.fetch;
       window.fetch=(u,...a)=>{if(String(u).includes('radar/t/'))urls.push(String(u));return fetch0(u,...a);};
@@ -363,7 +367,7 @@ def chrome(page,theme,data,output):
     for n in (0,1,2,4,8):
         page.evaluate('n=>{radarView.active=true;radarView.readyFrames=savedReady.slice(-n||8);if(!n)radarView.readyFrames=[];radarView.paused=true;radarLoopSync();radarView.active=false}',n)
         assert page.locator('#rad-loop').bounding_box()==cluster and page.locator('#rad-play').is_enabled()
-        if n<2:assert page.locator('#rad-frame-time').inner_text()==f'Paused · {n} of 8'
+        if n<2:assert page.locator('#rad-frame-time').inner_text()==page.evaluate("'Paused · '+radarFrameLabel(radarView.current)+' · newest'")
         assert page.locator('#rad-frame-time').get_attribute('role') is None
         assert page.locator('#rad-frame-time').get_attribute('aria-live') is None
     page.evaluate('radarView.readyFrames=savedReady;radarView.active=true;radarView.paused=true;radarLoopSync()')
@@ -449,14 +453,14 @@ def chrome(page,theme,data,output):
     page.evaluate('radarSource.desired=null')
     page.evaluate("d=>{radarSource.refused=false;renderRadar(d)}",data)
     # Site legend keeps exactly the same outer and unit geometry.
-    page.evaluate('r=>{radarView.data={...radarView.data,...r};radarView.current=null;radarLegendRender();radarSourceRender()}',dict(sourceId='iem-nexrad-n0b',sourceMode='site',siteId='KATX',legend=dict(ae._RADAR_SITE_RAMP,remapped=True),sites=[dict(id='KATX',contributing=True)]))
+    page.evaluate('r=>{radarView.data={...radarView.data,...r};radarView.current=null;radarLegendRender();radarSourceRender()}',dict(sourceId='iem-nexrad-n0b',sourceMode='site',siteId='KATX',scanCadenceSec=240,scanMode=None,legend=dict(ae._RADAR_SITE_RAMP,remapped=True),sites=[dict(id='KATX',contributing=True)]))
     widths=page.locator('#rad-ramp i').evaluate_all('es=>es.map(e=>e.getBoundingClientRect().width)')
     assert len(widths)==10 and all(abs(a-b)<1 for a,b in zip(widths,[26.6,53.1,26.6,53.1,26.6,26.6,26.6,53.1,53.1,26.6]))
     swatch=page.locator('#rad-ramp i').first.evaluate('e=>({color:getComputedStyle(e).backgroundColor,image:getComputedStyle(e).backgroundImage})')
     assert swatch==dict(color='rgb(159, 159, 170)' if theme=='paper' else 'rgb(93, 96, 110)',image='none'),swatch
     assert page.locator('#rad-legend').bounding_box()['width']==414 and page.locator('.rad-legend-unit').bounding_box()['width']==34
     assert page.locator('#rad-ramp').get_attribute('aria-label')=='Reflectivity scale, 5 to 75 dBZ. Below 10 dBZ in grey: clear-air return, not precipitation.'
-    caption('Camano Island radar, high resolution · 39 mi NE · new scan every ~5 min · IEM / NOAA')
+    caption('Camano Island radar, high resolution · 39 mi NE · new scan every ~4 min · IEM / NOAA')
     assert page.locator('.rad-clear-note').inner_text()=='Grey band: clear air, not rain'
     assert page.locator('#rad-ramp').bounding_box()['width']==372
     legend=page.locator('#rad-legend').bounding_box();clear=page.locator('.rad-clear-note').bounding_box()
@@ -471,21 +475,21 @@ def chrome(page,theme,data,output):
 
     page.evaluate('''()=>{
       const cap=document.getElementById('rad-src-cap');
-      cap.textContent='Camano Island radar · 39 mi NE · new scan every ~5 min · IEM / NOAA';
+      cap.textContent='Camano Island radar · 39 mi NE · new scan every ~4 min · IEM / NOAA';
       cap.style.maxWidth=(cap.scrollWidth+1)+'px';radarSourceRender();
     }''')
-    caption('Camano Island radar · 39 mi NE · new scan every ~5 min · IEM / NOAA')
+    caption('Camano Island radar · 39 mi NE · new scan every ~4 min · IEM / NOAA')
     page.evaluate("document.getElementById('rad-src-cap').style.maxWidth='';radarSourceRender()")
 
     # Independent layer count and label-zone assertions, including dark sites.
     site_rows=[dict(id=i,lat=lat,lon=lon,primary=n==0,contributing=True,reason=None) for n,(i,lat,lon) in enumerate([('KATX',47.65,-122.33),('KLGX',46.98,-123.82),('KRTX',49.2,-122.33)])]
     page.evaluate('sites=>{radarView.active=false;radarCamera={...radarView.data.center,zoom:7};radarView.data.sites=sites;radarOverlayBuild();radarSourceRender()}',site_rows)
     assert page.locator('.rad-site-edge').count()==3
-    caption('Camano Island radar, high resolution + 2 nearby · new scan every ~5 min · IEM / NOAA')
+    caption('Camano Island radar, high resolution + 2 nearby · new scan every ~4 min · IEM / NOAA')
     assert page.locator('#rad-src-site').inner_text()=='KATX +2'
     assert page.locator('#rad-src-site').get_attribute('aria-label')=='KATX and 2 nearby: Camano Island radar, high resolution, 39 mi NE'
     page.evaluate("radarView.data.siteId='KLGX';radarView.data.sites=[{id:'KLGX',contributing:true}];radarSourceRender()")
-    neighbour=caption('Langley Hill radar, high resolution · new scan every ~5 min · IEM / NOAA')
+    neighbour=caption('Langley Hill radar, high resolution · new scan every ~4 min · IEM / NOAA')
     # 'min' necessarily contains 'mi'; test the forbidden distance clause itself.
     assert '39 mi' not in neighbour and ' NE' not in neighbour
     assert page.locator('#rad-src-site').get_attribute('aria-label')=='KATX: Camano Island radar, high resolution, 39 mi NE'
@@ -499,9 +503,9 @@ def chrome(page,theme,data,output):
     assert page.locator('#rad-src-site').inner_text()=='KATX +1'
     assert page.locator('#rad-src-site').get_attribute('aria-label')=='KATX and 1 nearby: Camano Island radar, high resolution, 39 mi NE'
     page.evaluate("radarView.data.sites.push({id:'KOTX',contributing:true});radarSourceRender()")
-    caption('Langley Hill radar, high resolution + 2 nearby · new scan every ~5 min · IEM / NOAA · KATX not reporting')
+    caption('Langley Hill radar, high resolution + 2 nearby · new scan every ~4 min · IEM / NOAA · KATX not reporting')
     page.evaluate("document.getElementById('rad-src-cap').style.maxWidth='500px';radarSourceRender()")
-    caption('Langley Hill radar + 2 nearby · new scan every ~5 min · IEM / NOAA · KATX not reporting')
+    caption('Langley Hill radar + 2 nearby · new scan every ~4 min · IEM / NOAA · KATX not reporting')
     assert page.locator('#rad-src-site').inner_text()=='KATX +2'
     page.screenshot(path=str(output/f'radar-v51-dark-closest-{theme}.png'))
     page.evaluate("window.savedNearest=radarView.data.nexrad;radarView.data.nexrad=null;radarSourceRender()")
@@ -510,35 +514,35 @@ def chrome(page,theme,data,output):
     page.evaluate("radarView.data.nexrad=savedNearest;document.getElementById('rad-src-cap').style.maxWidth=''")
     # Names come from the table first, then nexrad.name, then the callsign.
     page.evaluate("window.savedSiteTable=radarSiteTable;radarSiteTable=[];radarView.data.siteId='KATX';radarView.data.sites=[{id:'KATX',contributing:true}];radarSourceRender()")
-    caption('Camano Island radar, high resolution · 39 mi NE · new scan every ~5 min · IEM / NOAA')
+    caption('Camano Island radar, high resolution · 39 mi NE · new scan every ~4 min · IEM / NOAA')
     page.evaluate("radarView.data.nexrad.name='';radarSourceRender()")
-    caption('KATX radar, high resolution · 39 mi NE · new scan every ~5 min · IEM / NOAA')
+    caption('KATX radar, high resolution · 39 mi NE · new scan every ~4 min · IEM / NOAA')
     page.evaluate("radarSiteTable=[{id:'KATX',name:'Langley Hill Nw Washington'}];radarView.data.nexrad.name='Ignored fallback';radarView.data.sites=['KATX','KLGX','KOTX','KMAX'].map(id=>({id,contributing:true})).concat([{id:'KRTX',contributing:false,reason:'not reporting'}]);radarSourceRender()")
-    worst=caption('Langley Hill Nw Washington radar + 3 nearby · new scan every ~5 min · IEM / NOAA · KRTX not reporting')
+    worst=caption('Langley Hill Nw Washington radar + 3 nearby · new scan every ~4 min · IEM / NOAA · KRTX not reporting')
     # Exercise each overflow reduction independently at a measured box budget.
     # Select widths from the actual embedded font so the tests also catch order.
     fitting=page.evaluate('''()=>{
       const cap=document.getElementById('rad-src-cap'),width=text=>{cap.textContent=text;return cap.scrollWidth;};
       cap.style.maxWidth='none';
       const base='Langley Hill Nw Washington radar',tail=' · IEM / NOAA · KRTX not reporting';
-      const single=base+' · new scan every ~5 min'+tail;
-      const full=base+' + 3 nearby · new scan every ~5 min'+tail;
-      const short=base+' + 3 nearby · every ~5 min'+tail;
-      const bare=base+' · every ~5 min'+tail;
+      const single=base+' · new scan every ~4 min'+tail;
+      const full=base+' + 3 nearby · new scan every ~4 min'+tail;
+      const short=base+' + 3 nearby · every ~4 min'+tail;
+      const bare=base+' · every ~4 min'+tail;
       return {single:width(single),full:width(full),short:width(short),bare:width(bare)};
     }''')
     page.evaluate("w=>{radarView.data.sites=[{id:'KATX',contributing:true},{id:'KRTX',reason:'not reporting'}];document.getElementById('rad-src-cap').style.maxWidth=w+'px';radarSourceRender()}",fitting['single']+1)
-    assert '39 mi' not in caption() and 'new scan every ~5 min' in caption()
+    assert '39 mi' not in caption() and 'new scan every ~4 min' in caption()
     page.evaluate("w=>{radarView.data.sites=['KATX','KLGX','KOTX','KMAX'].map(id=>({id,contributing:true})).concat([{id:'KRTX',reason:'not reporting'}]);document.getElementById('rad-src-cap').style.maxWidth=w+'px';radarSourceRender()}",fitting['short']+1)
-    assert '+ 3 nearby · every ~5 min' in caption()
+    assert '+ 3 nearby · every ~4 min' in caption()
     page.evaluate("w=>{document.getElementById('rad-src-cap').style.maxWidth=w+'px';radarSourceRender()}",fitting['bare']+1)
-    assert '+ 3 nearby' not in caption() and ' · every ~5 min' in caption()
+    assert '+ 3 nearby' not in caption() and ' · every ~4 min' in caption()
     page.evaluate("document.getElementById('rad-src-cap').style.maxWidth='200px';radarView.data.latestOnly=true;radarView.data.scanningSlowly=true;radarView.data.legend.remapped=false;radarSourceRender()")
     tail=caption()
     assert all(flag in tail for flag in ('IEM / NOAA','latest only','scanning slowly','KRTX not reporting','palette incomplete'))
     assert page.locator('#rad-src-cap').evaluate('e=>e.scrollWidth>e.clientWidth')
     page.evaluate("radarView.data.siteId='KATX';radarView.data.sites=[{id:'KLGX',contributing:true},{id:'KATX',reason:'not reporting'},{id:'KRTX',reason:'scan unavailable'},{id:'KOTX',reason:'deferred'},{id:'KMAX',reason:'out of view'}];radarView.data.sourceFallback='site-zoom-floor';radarSourceRender()")
-    assert caption()=='KLGX radar · every ~5 min · IEM / NOAA · latest only · scanning slowly · KRTX scan unavailable · KOTX deferred · KMAX out of view · KATX not reporting · palette incomplete · wider than KATX reaches'
+    assert caption()=='KLGX radar · every ~4 min · IEM / NOAA · latest only · scanning slowly · KRTX scan unavailable · KOTX deferred · KMAX out of view · KATX not reporting · palette incomplete · wider than KATX reaches'
     page.evaluate('radarView.data.legend.floorDbz=10;radarLegendRender()')
     assert page.locator('.rad-clear-note').count()==0
     page.evaluate("document.getElementById('rad-src-cap').style.maxWidth='';radarSiteTable=savedSiteTable")

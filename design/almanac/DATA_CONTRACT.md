@@ -454,10 +454,12 @@ placeholder and invalid responses cannot win. A fast failure retries immediately
 on a fresh connection. A partial-body failure may also retry the immutable tile.
 No third attempt is possible, including through the v4.8 transport retry path.
 
-For newest only, no first response byte after `RADAR_HEDGE_SEC = 2` launches the
+For newest only, no received-byte progress for `RADAR_HEDGE_SEC = 2` launches the
 second attempt only on a reserved warm connection while the first remains eligible to win.
-A received status/header byte suppresses the hedge; slow bodies keep the six-second
-absolute cap per attempt. First valid response wins. The loser is shut down, drained/joined
+Every raw socket read resets inactivity, including partial status lines, headers,
+chunk framing and bodies. A header/body stall is raced just like a silent first
+byte (v5.9); continuing progress postpones admission. Both attempts retain their
+absolute caps and the enclosing batch/pass deadline. First valid response wins. The loser is shut down, drained/joined
 and discarded before cache mutation. At most `floor(len(ctx.tiles)/2)` hedges are
 reserved per source pass, shared by its site layers; every admitted hedge/retry
 uses the rolling rate gate. The cap is conservative for multi-site views (the
@@ -526,7 +528,7 @@ A shared-host outage applies to both IEM products. Paid-for successes stay cache
 **Operator health.** `wx.json.radar.health` is exposed as `/health.radar`:
 
 ```json
-{"lastSuccessTs":1789444700.5,"successRate60s":0.78,"hedges":9,"retries":2,
+{"lastSuccessTs":1789444700.5,"successRate60s":0.78,"hedges":9,"stallHedges":3,"retries":2,
  "discardedHedges":2,"localFailures":3,"hedgeSuspendedSec":0,
  "breaker":"closed","lastError":"radar connection/TLS setup timed out",
  "hosts":{"example.invalid":{"breaker":"closed","samples60s":41,"successRate60s":0.78}}}
@@ -536,10 +538,15 @@ A shared-host outage applies to both IEM products. Paid-for successes stay cache
 partial), not the measurement timestamp. Ratios are 0–1, null without samples.
 `hedges` and `retries` are distinct cumulative admitted second attempts, including
 bounded retry DNS/pool waits. `hedges` counts warm overlapping requests raced after 2 seconds
-without a response byte. `retries` counts second attempts after the first has
+without received-byte progress. `stallHedges` is the subset issued after some
+response bytes arrived; silent-first-byte hedges are only in `hedges`. `retries` counts second attempts after the first has
 failed (including transport recovery). A winning or losing hedge is never a
 retry; either kind consumes the tile's sole second attempt. Denied admission
-increments neither counter. `discardedHedges` counts issued hedges that did not
+increments neither counter and does not consume the second attempt. A warm
+lease may return after the first hedge admission check: the race retries
+admission every 50ms, bounded by the original tile/batch deadline. Receiving
+a response byte rearms the inactivity deadline. No extra connection, request, attempt,
+hedge allowance or deadline is granted. `discardedHedges` counts issued hedges that did not
 win, including failures/deadlines; a primary cancelled by a winning hedge is not
 a discarded hedge. If discarded/issued is greater than 50% in the rolling
 60-second window, suspend new hedges for 300 seconds (`hedgeSuspendedSec`).
@@ -670,7 +677,7 @@ optional deployment choice, not a changed security or preference model.
 ```jsonc
 "geo": {"version":"<sha256-first-12>", "base":"radar/geo/", "sites":"radar/sites-<siteRevision>.json"},
 "tiles": {
-  "base":"radar/t/", "revision":"<renderRevision>", "remapRevision":"native-v3.2-1", "source":"iem-mrms-lcref", "site":"-", "z":8,
+  "base":"radar/t/", "revision":"<renderRevision>", "remapRevision":"native-v5.2-1", "source":"iem-mrms-lcref", "site":"-", "z":8,
   "levels":[7,8,9], "grid":{"x0":39,"y0":88,"w":4,"h":3},
   "newest":{"stamp":"202609141733","mask":"fff","expectedMask":"fff","completeMask":"fff"},
   "frames":[{"ts":1789407180,"at":"10:33","stamp":"202609141733",
@@ -742,7 +749,7 @@ This user decision supersedes P4 and the v4.4 hatch rules.
 
 The reporting timeline owner (`siteId`, station-nearest reporting site) remains
 the caption subject while its tiles are late (the picker stays on `nexrad.id`):
-e.g. `Camano Island radar + 1 nearby · new scan every ~5 min · IEM / NOAA · KATX loading`. Nearby counts
+e.g. `Camano Island radar + 1 nearby · precipitation mode · new scan every ~4 min · IEM / NOAA · KATX loading`. Nearby counts
 count actual other contributors; station distance stays with the nearest site.
 `KATX loading` replaces `timeline KATX` (v4.4 overrides the exception vocabulary
 retained in Fable v4.3 §1.4). A site explicitly marked `not reporting` can still
@@ -853,14 +860,16 @@ contribution and `completeMask` means all required site contributions acquired.
 Outside-range tiles do not block playback, and partial site tiles cannot claim
 complete acquisition or clear conditions.
 
-Playback uses up to eight 956×490 bitmaps (including newest) plus one reusable
+Steady playback uses up to eight 956×490 bitmaps (including newest) plus one reusable
 plate scratch, within the same 40MiB admission cap. Newest tiles remain available
 for acquisition and camera moves. A moving history bitmap exclusively owns its projected rectangle;
 component tiles are clipped outside that rectangle, so alpha/reflectivity never
 double-composites. Its hasEcho/legend metadata remain attached to its pixels.
-Settle/cancellation snaps and clamps the camera, invalidates history and reports
-one settled intent. History work runs only on otherwise unpainted idle frames;
-loop ticks never stack on a camera repaint. Draw-count fences are ≤32 steady,
+Settle/cancellation snaps and clamps the camera and reports one settled intent.
+A geometry change retains the playing composites and their frame deadline while
+acquiring replacement history. Due loop paints also run during camera movement;
+retained composites use the same camera reprojection as gesture previews.
+History work runs only on otherwise unpainted idle frames, after playback. Draw-count fences are ≤32 steady,
 ≤56 degraded. Wall-time target is 4ms on the actual panel, requiring CDP evidence.
 
 One rAF loop targets 30fps. Events mutate camera state; drawing is coalesced.
@@ -875,8 +884,12 @@ still follows `156543.034*cos(lat)/2^zoom`, and settle chooses the largest dista
 
 The graphics budget admits storage **before allocation**, with a shared 40 MiB
 cap across echo and geography jobs. Retained canvases are 3×1,873,760 bytes,
-histories ≤7×1,873,760, echo LRU ≤40×262,144 and basemap LRU ≤36×262,144.
-Four shared decode slots reserve 786,432 bytes each. A 262,144-byte merge scratch
+window composites normally ≤8×1,873,760, echo LRU ≤40×262,144 and basemap LRU
+≤36×262,144. During geometry acquisition the eight-frame cycle can coexist with four incoming
+plates (any separately held aged-out subject stays accounted too); incoming work pauses at four until wrap adoption. Four shared
+fetch slots reserve 786,432 bytes each; native image decodes are serialized and
+admitted at most once per animation frame, after loop paints. The compositor
+also completes at most one plate per animation frame, newest first. A 262,144-byte merge scratch
 is included too, so simultaneous nominal maxima require eviction of at least
 one tile (the delta's 39.87 MiB omitted the scratch).
 History transfers reserve a plate before allocation; if eviction cannot make
@@ -993,11 +1006,11 @@ themes. MRMS and RainViewer publish the following 10 dBZ legend:
 
 ```jsonc
 "legend": {
-  "id":"almanac-reflectivity-v1", "floorDbz":10, "remapped":true,
+  "id":"almanac-reflectivity-v2", "floorDbz":10, "remapped":true,
   "bands":[
-    {"lo":10,"hi":20,"start":"#8AA3C6","end":"#4E79B4"},
-    {"lo":20,"hi":25,"start":"#2E93A8","end":"#227F92"},
-    {"lo":25,"hi":35,"start":"#3FA65E","end":"#2A8448"},
+    {"lo":10,"hi":20,"start":"#76A38A","end":"#50956C"},
+    {"lo":20,"hi":25,"start":"#43A466","end":"#359858"},
+    {"lo":25,"hi":35,"start":"#26AC50","end":"#167F34"},
     {"lo":35,"hi":40,"start":"#C79C14","end":"#B0870D"},
     {"lo":40,"hi":45,"start":"#E5871A","end":"#D2700F"},
     {"lo":45,"hi":50,"start":"#DE5C17","end":"#C94C0C"},
@@ -1027,8 +1040,11 @@ Below the actual source floor is transparent. Stale echo opacity remains .66;
 the canvas has no CSS filter or theme-dependent recolouring. At stale opacity
 the clear-air composite falls to 1.60:1 on plate paper and 1.99:1 on night;
 these floors describe the plate, not the one-pixel basemap hairlines beneath it.
-On paper the clear-air composite has nearly the same luminance as the 10 dBZ
-start, separated by chroma and flatness; a tritanope may confuse those two marks.
+The first three bands are green; bands 4–9, widths, LUT positions, clear-air
+slate and alpha multiplication are unchanged. Computed minima over all 26 rain
+samples are 2.06 on plate paper, 2.20 on page paper and 3.46 at night.
+Clear air is lighter than the new 10 dBZ green on paper (1.09:1 separation)
+and darker at night (2.19:1). The former low-end tritanope disclosure is retired.
 
 The legend stays 414px wide, right:12px, with 8px left padding, a 34px unit cell
 and a 372px ramp. Band widths are proportional to `(hi−lo)` across that full
@@ -1096,9 +1112,9 @@ cadence, and provider:
 
 - MRMS: `Many radars blended · new image every 2 min · IEM / NOAA`.
 - RainViewer: `Worldwide blend · new image every 10 min · RainViewer · reflectivity only`.
-- Nearest single site (when width permits): `Camano Island radar, high resolution · 39 mi NE · new scan every ~5 min · IEM / NOAA`.
-- Neighbours: `Camano Island radar + 2 nearby · new scan every ~5 min · IEM / NOAA`.
-- Closest dark: `Langley Hill radar + 2 nearby · new scan every ~5 min · IEM / NOAA · KATX not reporting`.
+- Nearest single site (when width permits): `Camano Island radar, high resolution · 39 mi NE · precipitation mode · new scan every ~4 min · IEM / NOAA`.
+- Neighbours: `Camano Island radar + 2 nearby · precipitation mode · new scan every ~4 min · IEM / NOAA`.
+- Closest dark: `Langley Hill radar + 2 nearby · precipitation mode · new scan every ~4 min · IEM / NOAA · KATX not reporting`.
 
 The drawn site's site-table name wins, then `nexrad.name` only for the nearest
 site, then its callsign. KLGX's catalog name is `Langley Hill`. Nearest metadata
@@ -1107,6 +1123,37 @@ Only `nexrad.distanceDisp` plus `bearing` supplies the station-relative distance
 Visible distance yields to the neighbour count; the accessible name retains
 it when valid. Mosaic cadence stays derived from `cadenceSec/60`; the site's
 approximate volume cadence keeps its tilde. `#rad-status` alone states freshness.
+
+Site-only operating metadata (independent of the nominal `cadenceSec` poll interval):
+
+```json
+{"scanCadenceSec":240,"scanMode":"precipitation","scanModeSource":"cadence","scanningSlowly":false}
+```
+
+`scanCadenceSec` is the median of the last three gaps in the **primary site's
+listing**, even when fewer frames have been acquired. Neighbour timestamps,
+tile completion, and `frameSpacingSec` cannot change it. One or two gaps still
+produce a measured median but `scanMode:null`; zero gaps produces a null cadence
+and omits the entire cadence phrase. A single site scan carries `latestOnly:true`.
+With three gaps, ≤390 seconds means `precipitation`, 390–540 exclusive means null,
+540–900 inclusive means `clear-air`, and >900 means null. `scanningSlowly` is true
+only for a measured median >900 seconds, including a short listing. Ten-minute
+clear-air operation is normal and never gets that exception.
+
+`scanModeSource` is `cadence` when a mode is inferred, otherwise null. No `vcp`
+field exists. `vcp` and source `vcp` are reserved for an actual upstream VCP
+number; they must never be synthesized from timestamps. Future mapping, only
+when such data exists: 12/112/212/215 → precipitation, 31/32/35 → clear-air,
+unknown → null; the interval remains measured.
+
+Caption: `precipitation mode · new scan every ~4 min`, `clear-air mode · new scan
+every ~10 min`, or `new scan every ~7 min` without a mode word. Minutes are
+`max(1, round(scanCadenceSec/60))` in the page. There is no fixed site interval.
+Mosaic and RainViewer keep their existing `new image every N min` copy.
+The Fable N5 example `[6,6,7] → null` conflicts with M2's median/≤390 rule;
+M2 governs, so that fixture yields precipitation at six minutes. A `[7,7,7]`
+fixture tests the ambiguous range explicitly.
+
 No caption contains NEXRAD, MRMS, mosaic, volumes, or dBZ. Provider remains a
 visible `#rad-attrib` text-only anchor without href, including during switching.
 
@@ -1116,8 +1163,10 @@ Exception wording and ordering after attribution remain as before (including
 `palette incomplete`, `wider than KXXX reaches`). This follows Fable's exact
 RainViewer and dark-neighbour assertions; `· switching` is always last.
 Site subjects add `, high resolution` when width permits. Rendered overflow
-drops that phrase first, then distance, then shortens `new scan every ~5 min` to
-`every ~5 min`, then drops `+ n nearby`. Provider and exception text is never
+drops that phrase first, then distance, then shortens `new scan every ~N min` to
+`every ~N min`, then removes the interval if a mode is present, then drops
+`+ n nearby`. The mode outlives both the interval and nearby count. Without
+a mode, `every ~N min` survives the nearby drop. Provider and exception text is never
 removed. The caption uses `overflow:hidden; text-overflow:ellipsis; white-space:nowrap`
 for any remaining overflow. Its outer maximum is 530px (516px text plus the
 existing 14px padding), satisfying Fable's explicit bounding-box gate; this is
@@ -1176,10 +1225,15 @@ publish their first measurement with a new window.
 **v4.6 playback state machine, with v4.7 reconciliation:** `loaded` contains the
 latest eight listed scans plus previously held scans omitted by a truncated
 manifest while they remain within the incoming newest's hour. An omission alone
-cannot close a composite or remove it from the decoded inventory. Source/site,
-station, tile grid/zoom, render revision or legend changes release the old window.
+cannot close a composite or remove it from the decoded inventory. A station
+change releases the old window. Source/site switches stage their existing
+source transition. Tile grid/zoom, camera pan, render revision and legend changes
+stage a replacement window while keeping playable outgoing composites (v5.9).
 When the complete manifest returns, normal latest-eight selection applies again.
-`readyFrames` is the latest eight decoded composites in time order, and `cycle`
+`readyFrames` is the latest eight decoded incoming composites in time order.
+During geometry acquisition `radarReady()` reports the retained playable window
+until four replacements decode, so readiness cannot become zero while old imagery
+is drawable. `cycle`
 is the fixed playable snapshot for the underway pass. A missing middle
 frame does not exclude older decoded scans. `good` names acquisition's newest;
 `current` names the drawn scan. Acquisition remains newest-first.
@@ -1188,12 +1242,13 @@ frame does not exclude older decoded scans. `good` names acquisition's newest;
 | --- | --- | --- |
 | Cold acquisition | Paint newest as it decodes; start when `min(4, total)` scans are decoded (at least two to animate). | Count decoded composites, not tile coverage or a contiguous suffix. |
 | Playing / manifest or decode arrives | Preserve current scan, blend and deadline; finish the fixed cycle and its old-newest 1100ms hold. | Stage the latest window and decoded arrivals; retain composites with the same frame key. |
-| Wrap | Snapshot all currently decoded scans in the latest window; blend old-newest → slid-oldest, then progress to new-newest and its hold. | Late frames join here. Close aged-out composites once neither cycle, current nor blend needs them. |
+| Geometry change | Continue the current cycle through the camera, without resetting its deadline. Keep naming the displayed scan; corner note says `Refreshing · frame N of M`. | Stage newest-first replacements; wait for four, then adopt at wrap. At four, free already played outgoing prefix scans oldest first (preserve current/blend and the remaining sequence); close the remainder on adoption. Never free a future scan merely to make room. |
+| Wrap | With four replacements ready (otherwise repeat the outgoing cycle), snapshot all currently decoded scans in the latest window; blend old-newest → slid-oldest, then progress to new-newest and its hold. | Late frames join here. Close aged-out composites once neither cycle, current nor blend needs them. |
 | Paused / manifest arrives | Keep the displayed scan; update the window silently. Resume from that scan if retained, otherwise wrap to the slid-oldest. | Retain a displayed aged-out composite until playback leaves it. |
 | Reduced motion | Same wrap adoption, no crossfade. One requested sweep stops at that cycle's newest; another Play uses the updated window. | Same decoded inventory and bitmap lifetime rules. |
 
-`AS OF` updates immediately on the manifest and always names the newest measurement,
-independent of playback or decode progress. Frame identity is render revision +
+`AS OF` and the loop read name the displayed measurement, including retained
+geometry/source imagery; acquisition progress belongs in the corner note. Frame identity is render revision +
 source + the frame's own stamp + site-scan identities; it excludes the manifest's
 newest stamp. Source/revision are captured on each loaded frame so mutable manifest
 fallbacks cannot re-key retained composites. Aging removes only the composite;
@@ -1214,11 +1269,13 @@ content-based disabled-control rules. The 44×44px control uses ▶ and
 `aria-label="Play radar loop"` for paused intent, or ❙❙ and
 `aria-label="Pause radar loop"` for play intent, including buffering/fetching.
 Every press changes the glyph and read immediately and gives a 120ms button
-opacity dip (suppressed for reduced motion). Transport, gesture, stale and
+opacity dip (suppressed for reduced motion). Transport, stale and
 visibility fences still control actual animation, independently of intent.
 
-Before the start threshold, the read is `Buffering · N of M` for play intent or
-`Paused · N of M` for paused intent, including zero. `M` is the actual window
+Without a displayed composite, before the start threshold the read is
+`Buffering · N of M` for play intent or `Paused · N of M` for paused intent,
+including zero. Any retained or decoded displayed composite keeps its time read
+while acquisition continues; there is no buffering read over playable imagery. `M` is the actual window
 inventory (capped at eight), not a hard eight; six scans per hour count as six.
 Once playing, the read follows the drawn `HH:MM · newest` / `HH:MM · −N min`
 without returning to buffering when a new scan arrives. Paused scan reads have
@@ -1293,3 +1350,22 @@ responses for 25 seconds and prints loaded/ready/read once per second. The eight
 retained scans keep cycling and the new scan joins at a later wrap. Engine tests
 (`tests/test_radar_v47.py`) inspect the first and every partial publish for warm
 MRMS and per-site windows, including primary-deadline exit and retry.
+
+### Radar v5.9 local verification
+
+`tests/test_radar_v49.py::test_three_bad_tiles_real_warm_connections` barriers
+three silent/header-only primaries and seven returned healthy leases before a
+separate fake inactivity clock advances. The real TLS body-stall path cannot
+finish before rescue. Its unchanged nine-second batch must deliver ten tiles,
+three winning hedges, zero retries/discards and thirteen wire requests.
+`tests/test_radar_v59.py` proves every header/body chunk postpones the hedge and
+only a full two-second inactivity interval admits it.
+
+`tests/verify_radar_v59.py` exercises stepper zoom, pan and two-level zoom with
+a deterministic Chromium clock in both themes: exact outgoing scan sequence,
+four newest-first decoded replacements, wrap adoption, ordinary paint intervals
+280–420ms (350ms cadence ±20%; the existing 1100ms newest hold is separate),
+and oldest-first bitmap closes. A loopback-only 8→7→6→7→8 sequence at three-second
+spacing measures actual paints, decode admission per RAF and independent bitmap
+ownership against 40MiB. No panel CPU or process RSS claim follows from these
+local raster-storage and paint measurements.

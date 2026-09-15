@@ -62,14 +62,12 @@ def origin(tmp_path, monkeypatch):
             if behavior == 'fail':
                 self.send_error(503)
                 return
-            if behavior == 'slow':
-                state.release.wait(4)
-            if behavior == 'body':
+            if behavior in ('slow', 'body'):
                 self.send_response(200)
                 self.send_header('Content-Length', str(len(state.body)))
                 self.end_headers()
                 self.wfile.flush()
-                state.release.wait(4)
+                state.release.wait(getattr(state, "stall_seconds", 4))
                 try:
                     self.wfile.write(state.body)
                 except OSError:

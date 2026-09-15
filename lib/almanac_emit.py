@@ -884,12 +884,28 @@ def _radar_tile_manifest(source, frames, ctx):
 _RadarResult = namedtuple('_RadarResult',
     'available reason frames ts_frame center zoom mpp bounds scalebar rings nexrad ts_fetch '
     'source_id provider attribution attribution_url cadence stale_sec legend partial_coverage '
-    'max_zoom zoom_desired zoom_auto_level geo source_mode site_id sources scanning_slowly sites sites_considered source_pref source_fallback tiles units',
+    'max_zoom zoom_desired zoom_auto_level geo source_mode site_id sources scanning_slowly sites sites_considered source_pref source_fallback tiles units scan_cadence_sec scan_mode scan_mode_source',
     defaults=('rainviewer', 'rainviewer', 'RainViewer', 'https://www.rainviewer.com/',
               RADAR_RAINVIEWER_FRAME_INTERVAL_SEC, RADAR_RAINVIEWER_STALE_SEC, _RADAR_RAMP, False,
-              7, None, 7, None, 'mosaic', None, (), False, (), 0, 'mosaic', None, None, 'mi'))
+              7, None, 7, None, 'mosaic', None, (), False, (), 0, 'mosaic', None, None, 'mi', None, None, None))
 _RADAR_NONE = _RadarResult(False, 'no data yet', (), None, None, None, None, None,
                            None, None, None, None)
+
+def _radar_scan_cadence(stamps):
+    """Infer only from the primary listing, independent of fetched tile history."""
+    recent = stamps[-4:]
+    gaps = [b-a for a,b in zip(recent, recent[1:])]
+    cadence = median(gaps) if gaps else None
+    mode = None
+    if len(gaps) == 3:
+        if cadence <= 390:
+            mode = 'precipitation'
+        elif 540 <= cadence <= 900:
+            mode = 'clear-air'
+    return dict(scan_cadence_sec=cadence, scan_mode=mode,
+                scan_mode_source='cadence' if mode else None,
+                scanning_slowly=cadence is not None and cadence > 900)
+
 
 _AqiResult = namedtuple('_AqiResult',
                         'aqi category pm25 ts forecast peak peak_time fc_cat trend trend_text')
@@ -1591,7 +1607,7 @@ class AlmanacEmitter:
             with self._radar_health.lock:
                 if attempt is not None and attempt.hedged:
                     attempt.issued = True
-                    self._radar_health.issue_hedge()
+                    self._radar_health.issue_hedge(stall=attempt.stall_hedge)
                 else:
                     self._radar_health.retries += 1
         headers = {'User-Agent': 'WeatherFlow-PiConsole-almanac'}
@@ -2128,6 +2144,7 @@ class AlmanacEmitter:
         source = 'iem-nexrad-n0b'
         now = time.time()
         stamps, deadline = self._radar_site_discover(ctx)
+        ctx.update(_radar_scan_cadence(stamps))
         self._radar_discovery_unchanged(source, stamps[-1], ctx)
         def build(ts, limit):
             layers = []
@@ -2152,8 +2169,6 @@ class AlmanacEmitter:
                 cap = 8 if len(latest.get('acquiredSites',latest.get('siteScans', ()))) >= 2 else 31
                 slots = [t for t in stamps if ts - RADAR_HISTORY_SEC <= t <= ts][-cap:]
                 self._radar_publish_refresh(ctx, frameTotal=len(slots) if ctx['viewed'] else 1)
-                ctx['scanning_slowly'] = len(slots) >= 3 and all(
-                    b-a > 480 for a,b in zip(slots[-3:], slots[-2:]))
                 return self._radar_history(source, ts, stamps[-1], ctx, build, latest, slots)
         raise ValueError('no complete site scan: ' + ctx.get('last_error', 'unavailable'))
 
@@ -2246,7 +2261,9 @@ class AlmanacEmitter:
                 sites=tuple(dict(s, contributing=any(p['id']==s['id'] for p in latest.get('siteScans', ())),
                     reason=None if any(p['id']==s['id'] for p in latest.get('siteScans', ())) else
                     (newest_reasons.get(s['id']) or s.get('reason') or 'scan unavailable')) for s in ctx.get('sites', ())), sites_considered=ctx.get('sites_considered', 0),
-                sources=tuple(dict(s) for s in ctx.get('sources', ())), scanning_slowly=ctx.get('scanning_slowly', False),
+                sources=tuple(dict(s) for s in ctx.get('sources', ())),
+                **({k:ctx.get(k) for k in ('scan_cadence_sec','scan_mode','scan_mode_source','scanning_slowly')}
+                   if source == 'iem-nexrad-n0b' else dict(scanning_slowly=False)),
                 partial_coverage=source == 'iem-mrms-lcref' and any(
                     ctx['bounds'][k] < _RADAR_IEM_DOMAIN[k] if k in ('w', 's') else
                     ctx['bounds'][k] > _RADAR_IEM_DOMAIN[k] for k in ('w', 'e', 's', 'n')))
@@ -2959,7 +2976,8 @@ class AlmanacEmitter:
             refresh=refresh or dict(state='idle',frameIndex=0,frameTotal=0),
             sourcePref=snap.source_pref,sourceFallback=snap.source_fallback,
             sitePreferred=snap.source_pref=='site',siteResumeZoom=RADAR_SITE_MIN_ZOOM,
-            scanningSlowly=snap.scanning_slowly,latestOnly=False,
+            scanningSlowly=snap.scanning_slowly,latestOnly=snap.source_mode=='site' and snap.scan_cadence_sec is None and len(snap.frames)==1,
+            scanCadenceSec=snap.scan_cadence_sec,scanMode=snap.scan_mode,scanModeSource=snap.scan_mode_source,
             sourceId=snap.source_id,attribution=snap.attribution,attributionUrl=snap.attribution_url,
             provider=snap.provider,cadenceSec=snap.cadence,frameSpacingSec=median(gaps) if gaps else None,
             historyGaps=any(g!=snap.cadence for g in gaps),historySpanSec=complete[-1]-complete[0] if complete else 0,

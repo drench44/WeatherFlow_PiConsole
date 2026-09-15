@@ -7,6 +7,30 @@ to shared upstream code that the classic console benefits from too.
 ## 2026-09-15
 
 ### Radar
+- **Radar v5.9 keeps zoom/pan playback alive.** Camera settle and manifest geometry
+  changes retain and reproject the playing cycle until four replacement composites
+  decode, then adopt at the existing wrap. The frame read keeps its timestamp;
+  the corner note reports acquisition. Decode admission is serialized to one per
+  animation frame after paints. Incoming history pauses at four until adoption,
+  with oldest-first outgoing release and the existing 40 MiB admission cap.
+- **Stalled bodies get warm hedges.** Two seconds without received-byte progress
+  now races headers/body stalls as well as silent first bytes. Every received
+  chunk rearms inactivity; `stallHedges` identifies the progressed-response subset.
+  Connection, request, attempt and absolute deadline limits remain unchanged.
+  Real TLS regressions barrier the body stall and drive hedge time explicitly.
+- **Radar v5.4: greener light rain and measured site operating copy.** The first
+  three reflectivity bands now use Fable v5.2 greens; the remaining ramp, clear-air
+  slate, alpha mapping and legend geometry stay unchanged. Legend and remap
+  revisions invalidate previous rendered tiles. Contrast is computed across all
+  26 LUT entries for both themes. Site captions use the primary listing's median
+  of the latest three gaps, infer precipitation/clear-air mode only outside the
+  ambiguous range, and reserve “scanning slowly” for intervals over 15 minutes.
+  Caption fitting drops the interval before the inferred mode.
+- **Warm hedge admission recovers when a lease returns.** A denied hedge check
+  no longer disables hedging for the rest of a tile race. Bounded 50ms checks
+  reuse the original deadline, request cap and sole second attempt. A scripted
+  clock regression reproduces the missing tile on the old race and delivers all
+  ten tiles with healthy second attempts; real loopback TLS coverage remains.
 - **Radar v5.8 removes cache inventory from the worker's filesystem path.** A
   bounded startup worker validates the disk cache once; writes, evictions and
   explicit page damage reports maintain its memory index. Warm hits skip PNG

@@ -16,6 +16,11 @@ class AttemptCancelled(OSError):
     pass
 
 
+def hedge_now():
+    """Separate progress clock; transport and batch keep their absolute deadline."""
+    return time.monotonic()
+
+
 class Attempt:
     def __init__(self, fresh=False, hedged=False, warm_lease=None):
         self.warm_lease = warm_lease
@@ -25,9 +30,16 @@ class Attempt:
         self.waiting_response = False
         self.discarded = False
         self.first_byte = threading.Event()
+        self.last_progress = hedge_now()
+        self.stall_hedge = False
         self.cancelled = threading.Event()
         self.sock = None
         self.lock = threading.Lock()
+
+    def progress(self):
+        with self.lock:
+            self.last_progress = hedge_now()
+            self.first_byte.set()
 
     def check(self):
         if self.cancelled.is_set():
@@ -60,6 +72,7 @@ class HostHealth:
         self.hosts = {}
         self.sources = {}
         self.hedges = self.retries = self.discarded = 0
+        self.stall_hedges = 0
         self.hedge_events = deque()
         self.hedge_until = 0
         self.local_failures = 0
@@ -79,9 +92,10 @@ class HostHealth:
                 self.hedge_events.clear()
             return now >= self.hedge_until
 
-    def issue_hedge(self):
+    def issue_hedge(self, stall=False):
         with self.lock:
             self.hedges += 1
+            self.stall_hedges += int(stall)
             self.hedge_events.append((time.monotonic(), 'issued'))
 
     def discard_hedges(self, count):
@@ -171,7 +185,7 @@ class HostHealth:
             states = {h['breaker'] for h in hosts.values()}
             return dict(lastSuccessTs=self.last_success,
                 successRate60s=sum(samples)/len(samples) if samples else None,
-                hedges=self.hedges, retries=self.retries, discardedHedges=self.discarded,
+                hedges=self.hedges, stallHedges=self.stall_hedges, retries=self.retries, discardedHedges=self.discarded,
                 breaker='open' if 'open' in states else 'half' if 'half' in states else 'closed',
                 lastError=self.last_error, localFailures=self.local_failures, ambiguousFailures=self.ambiguous_failures,
                 hedgeSuspendedSec=max(0, self.hedge_until-time.monotonic()), hosts=hosts)
@@ -182,7 +196,8 @@ def tile_race(request, deadline, hedge, claim_hedge, discarded):
     controls = [Attempt()]
     pool = ThreadPoolExecutor(max_workers=2, thread_name_prefix='radar-attempt')
     pending = {pool.submit(request, controls[0], False): controls[0]}
-    started = time.monotonic()
+    started = hedge_now()
+    next_hedge = started + hedge if hedge is not None else None
     second = False
     error = None
     winner = None
@@ -191,7 +206,7 @@ def tile_race(request, deadline, hedge, claim_hedge, discarded):
             remaining = deadline-time.monotonic()
             if remaining <= 0:
                 raise TimeoutError('radar tile race exceeded deadline')
-            due = started+hedge-time.monotonic() if hedge is not None and not second else remaining
+            due = next_hedge-hedge_now() if hedge is not None and not second else remaining
             done, _ = wait(pending, timeout=max(0, min(remaining, due)), return_when=FIRST_COMPLETED)
             for future in done:
                 control = pending.pop(future)
@@ -203,15 +218,20 @@ def tile_race(request, deadline, hedge, claim_hedge, discarded):
                     error = caught
             if not second:
                 failed = not pending
-                eligible = hedge is not None and not controls[0].first_byte.is_set()
+                now = hedge_now()
+                eligible = (hedge is not None and now >= next_hedge
+                            and now-controls[0].last_progress >= hedge)
                 lease = claim_hedge() if eligible and not failed else None
                 if (failed and error is not None and isinstance(error, OSError) and not isinstance(error, (CircuitOpen, AttemptCancelled))) or lease:
                     second = True
                     control = Attempt(fresh=failed, hedged=not failed, warm_lease=lease)
+                    control.stall_hedge = not failed and controls[0].first_byte.is_set()
                     controls.append(control)
                     pending[pool.submit(request, control, True)] = control
                 elif hedge is not None:
-                    hedge = None
+                    # Every received chunk resets inactivity, including headers
+                    # and partial bodies. Busy warm leases remain retryable.
+                    next_hedge = max(now + .05, controls[0].last_progress + hedge)
         raise error
     finally:
         for control in controls:

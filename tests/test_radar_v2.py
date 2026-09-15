@@ -138,8 +138,8 @@ def test_site_actual_scans_and_restart(make_emitter,hybrid,tmp_path,monkeypatch,
             assert [f['ts'] for f in r['tiles']['frames']]==scans
             assert r['completeFrameCount']==4 and r['siteId']=='KATX'
             assert r['tiles']['z']==7 and r['zoomMin']==4 and r['zoomMax']==10 and not r['zoomCapped']
-            assert r['cadenceSec']==300 and r['scanningSlowly'] and not r['latestOnly']
-            assert r['legend']['id']=='almanac-reflectivity-v1'
+            assert r['cadenceSec']==300 and not r['scanningSlowly'] and r['scanMode']=='clear-air' and r['scanCadenceSec']==600 and not r['latestOnly']
+            assert r['legend']['id']=='almanac-reflectivity-v2'
 
 
 def test_site_failure_reports_disabled_and_falls_back(make_emitter,hybrid,tmp_path,monkeypatch):

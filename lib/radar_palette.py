@@ -10,15 +10,15 @@ from pathlib import Path
 _FILES = {'iem-mrms-lcref': 'ramp_mrms_lcref.csv',
           'iem-nexrad-n0b': 'ramp_n0b.csv',
           'rainviewer': 'rainviewer_api_colors_table.csv'}
-REMAP_REVISION = "native-v3.2-1"
+REMAP_REVISION = "native-v5.2-1"
 _RGB_TOLERANCE = 3  # Euclidean RGB distance; alpha is coverage, not intensity.
 _LOG = logging.getLogger(__name__)
 
 
-_RADAR_RAMP = dict(id='almanac-reflectivity-v1', floorDbz=10, bands=[
+_RADAR_RAMP = dict(id='almanac-reflectivity-v2', floorDbz=10, bands=[
     dict(lo=lo, hi=hi, start=start, end=end) for lo, hi, start, end in (
-        (10,20,'#8AA3C6','#4E79B4'), (20,25,'#2E93A8','#227F92'),
-        (25,35,'#3FA65E','#2A8448'), (35,40,'#C79C14','#B0870D'),
+        (10,20,'#76A38A','#50956C'), (20,25,'#43A466','#359858'),
+        (25,35,'#26AC50','#167F34'), (35,40,'#C79C14','#B0870D'),
         (40,45,'#E5871A','#D2700F'), (45,50,'#DE5C17','#C94C0C'),
         (50,60,'#DD4530','#BC2A1A'), (60,70,'#CE4E88','#A9389B'),
         (70,75,'#8A46C2','#8A46C2'))])
