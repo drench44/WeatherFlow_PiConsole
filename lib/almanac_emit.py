@@ -73,6 +73,7 @@ FORECAST_CHECK_INTERVAL = 3600 # seconds (1 h) — the daily outlook barely move
 FORECAST_RETRY_SEC      = 120  # seconds — boot retry cadence until the FIRST forecast succeeds
 RADAR_FAILURE_LOG_SEC = 5 * DiscoverySchedule.BACKOFF  # ten-minute outage reminders
 RADAR_RETRY_SEC = 120
+RADAR_LOCAL_RETRY_MAX_SEC = 60  # ceiling for the doubling retry after consecutive local failures
 RADAR_HISTORY_SEC = 3600
 RADAR_IEM_FRAME_INTERVAL_SEC = 120
 RADAR_RAINVIEWER_FRAME_INTERVAL_SEC = 600
@@ -987,6 +988,7 @@ class AlmanacEmitter:
         self._radar_emit_pending = None
         self._radar_cooldowns = {}
         self._radar_transport_failures = {}
+        self._radar_local_failure_streak = 0  # consecutive local-failure passes, for retry backoff
         self._radar_source_since = time.monotonic()
         self._radar_switch_reason = None
         self._radar_transport_retries = 0
@@ -1576,7 +1578,7 @@ class AlmanacEmitter:
     def _radar_budget_retry(self, source, needed, min_delay=0, reason='budget'):
         if self._radar_pass["outcome"] != "failed":
             self._radar_pass["outcome"] = "deferred"
-        delay = max(min_delay, self._radar_headroom_delay(source, needed))
+        delay = max(min_delay, self._radar_headroom_delay(source, needed), self._radar_local_backoff())
         # Build/deadline yields with free transport resume on the next watcher.
         delay = delay if delay > 0 else 2
         with self._life_lock:
@@ -1584,6 +1586,17 @@ class AlmanacEmitter:
             self._schedule_retry('radar', self._check_radar, delay, retry_reason=reason)
             with self._radar_lock:
                 self._radar_refresh = dict(self._radar_refresh, pending=dict(self._radar_pending))
+
+    def _radar_local_backoff(self):
+        """Retry floor while consecutive passes fail locally (dead route, dead
+        resolver): 2, 4, 8 ... RADAR_LOCAL_RETRY_MAX_SEC. Local failures never
+        open a host breaker, so nothing else slows the loop during an outage.
+        It is a floor under every scheduled radar retry, not the failed pass's
+        own delay: a partial-frame pass calls _radar_failed_pass and then
+        re-arms its own budget retry, which would otherwise land 2 s later
+        right over the backoff. Zero when the last pass was not a local failure."""
+        streak = self._radar_local_failure_streak
+        return min(RADAR_LOCAL_RETRY_MAX_SEC, 2 ** min(streak, 6)) if streak else 0
 
     def _radar_note_source(self, source, ctx):
         old = self._radar_result
@@ -1998,7 +2011,7 @@ class AlmanacEmitter:
                         raise error
                     if error is not None:
                         if failure_class(error) != 'host':
-                            ctx['local_failure'] = True
+                            ctx[failure_class(error)+'_failure'] = True
                         ctx['last_error'] = str(error)
                         ctx['missing_tiles'] = True
                     for _ in done:
@@ -2840,12 +2853,26 @@ class AlmanacEmitter:
         """Only consecutive provider failures may advance the fallback chain."""
         self._radar_pass["outcome"] = "failed"
         self._radar_log_failure(source, error)
-        local = (failure_class(error) != 'host' or ctx.get('local_failure')
-                 or self._radar_health.local_failures > ctx.get('local_failure_start', self._radar_health.local_failures))
+        outcome, health = failure_class(error), self._radar_health
+        # The pass error is often a synthetic TimeoutError ("visible newest
+        # incomplete"); the tile loop's per-class flags and the health counters
+        # say what actually failed underneath it.
+        truly_local = (outcome == 'local' or ctx.get('local_failure')
+                       or health.local_failures > ctx.get('local_failure_start', health.local_failures))
+        ambiguous = (outcome == 'ambiguous' or ctx.get('ambiguous_failure')
+                     or health.ambiguous_failures > ctx.get('ambiguous_failure_start', health.ambiguous_failures))
+        local = truly_local or ambiguous  # neither may advance the fallback chain
         if local:
             self._radar_transport_failures.pop(source, None)
         else:
             self._radar_transport_failures[source] = self._radar_transport_failures.get(source, 0)+1
+        # A dead route or resolver never opens a host breaker (HostHealth.record
+        # returns before sampling), so without its own backoff a network outage
+        # would rerun a doomed pass every two seconds for as long as it lasts.
+        # The streak feeds _radar_local_backoff, the floor under EVERY scheduled
+        # radar retry. Ambiguous failures (a reused socket that got no bytes) may
+        # be the provider stalling, so they end the streak and keep 2 s.
+        self._radar_local_failure_streak = self._radar_local_failure_streak+1 if truly_local else 0
         if not local and self._radar_transport_failures[source] >= 3:
             return True
         self._radar_retained_refresh('failed')
@@ -3041,8 +3068,9 @@ class AlmanacEmitter:
             errors = []
             for source, adapter in adapters:
                 self._radar_pass.update(source=source, site=site["id"] if source == "iem-nexrad-n0b" and site else None)
-                ctx.pop('local_failure', None)
-                ctx['local_failure_start'] = self._radar_health.local_failures
+                for kind in ('local', 'ambiguous'):
+                    ctx.pop(kind+'_failure', None)
+                    ctx[kind+'_failure_start'] = getattr(self._radar_health, kind+'_failures')
                 ctx.pop('staging_source', None)
                 ctx['switch_reason'] = 'user source/zoom selection' if not same_mode else 'initial source selection'
                 if errors:
@@ -3130,6 +3158,7 @@ class AlmanacEmitter:
                         if self._radar_pass['outcome'] != 'deferred':
                             self._radar_pass['outcome'] = 'ok'
                         self._radar_transport_failures.pop(source, None)
+                        self._radar_local_failure_streak = 0
                     try:
                         self._radar_prune(previous)
                     except OSError as error:
@@ -3149,6 +3178,7 @@ class AlmanacEmitter:
                     if source in self._radar_pass['validated']:
                         self._radar_pass['recovered'].add((source, 'pass'))
                     self._radar_transport_failures.pop(source, None)
+                    self._radar_local_failure_streak = 0
                     self._radar_retained_refresh('idle')
                     return
                 except _RadarSuperseded:

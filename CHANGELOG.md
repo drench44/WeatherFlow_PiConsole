@@ -4,6 +4,19 @@ Changes in Weather Almanac, newest first. The upstream WeatherFlow
 PiConsole keeps its own release notes; entries under **Core** below are fixes
 to shared upstream code that the classic console benefits from too.
 
+## 2026-09-16
+
+### Radar
+- **Local failures back off.** A dead route or resolver is never the provider's
+  fault, so it never opens a host breaker, and each failed pass retried after a
+  flat two seconds for as long as the network stayed down. Consecutive local
+  failures now double the retry from 2 s to a 60 s ceiling; a completed pass, an
+  unchanged discovery or any other kind of failure resets it. The backoff is a
+  floor under every scheduled radar retry, so a partial-frame pass cannot re-arm
+  a two-second retry over it. Ambiguous stalls on a reused socket are classified
+  apart from local failures: they still never advance the fallback chain, but
+  they keep the two-second retry. The fallback chain itself is unchanged.
+
 ## 2026-09-15
 
 ### Radar
