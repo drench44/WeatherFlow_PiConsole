@@ -11,7 +11,7 @@ _FILES = {'iem-mrms-lcref': 'ramp_mrms_lcref.csv',
           'iem-nexrad-n0b': 'ramp_n0b.csv',
           'rainviewer': 'rainviewer_api_colors_table.csv'}
 REMAP_REVISION = "native-v5.2-1"
-SMOOTH_REVISION = "field-bilinear-2x-v56-1"
+SMOOTH_REVISION = "field-bilinear-2x-box-256-v61-1"
 _RGB_TOLERANCE = 3  # Euclidean RGB distance; alpha is coverage, not intensity.
 _LOG = logging.getLogger(__name__)
 
@@ -256,11 +256,12 @@ def remap(image, source, palette):
 
 
 def smooth_remap(image, source, palette):
-    """2x pixel-centred bilinear reflectivity, then the discrete legend LUT.
+    """2x pixel-centred bilinear field, box reduced to native size, then LUT.
 
     Zero coverage / unknown / suppressed gates contribute no intensity. Normalize
     the weighted field by valid coverage; interpolate coverage independently. A
-    one-gate transparent gap cannot carry intensity from one side to the other.
+    zero-support output stays transparent. Reduction averages weighted field and
+    coverage, never RGB or already-quantized legend colours.
     Edge samples clamp inside this native tile (no invented neighbouring gates).
     All raster arithmetic runs in Pillow; no Python pixel loop or numpy required.
     """
@@ -282,6 +283,11 @@ def smooth_remap(image, source, palette):
     weighted = calculate('field * weight', field=field, weight=weight)
     weighted = weighted.resize(size, Image.Resampling.BILINEAR)
     weight = weight.resize(size, Image.Resampling.BILINEAR)
+    # Area-average each 2x2 group before normalization/quantization. This keeps
+    # the 2x field's softened gate edges in a native-sized tile without RGB
+    # mixtures, extra page pixels or a half-pixel directional shift.
+    weighted = weighted.resize(image.size, Image.Resampling.BOX)
+    weight = weight.resize(image.size, Image.Resampling.BOX)
     codes = calculate('convert(value / (weight + (weight == 0)), "L")',
                           value=weighted, weight=weight)
     floors = [floor for floor, _ in palette]

@@ -36,10 +36,12 @@ def main():
                         image.load();start=time.thread_time()
                         with remap(image,source,rp.source_palette(source)) as mapped:
                             cost=time.thread_time()-start
+                            assert mapped.size == (256,256)
+                            output_size = mapped.size
                             out=io.BytesIO();mapped.save(out,'PNG')
                     if i>=5:timings.append((time.thread_time()-begin)*1000);raster.append(cost*1000)
                 row['smooth' if smooth else 'nearest']=dict(remapMedianMs=statistics.median(raster),
-                    totalMedianMs=statistics.median(timings),totalP95Ms=sorted(timings)[75],pngBytes=len(out.getvalue()))
+                    totalMedianMs=statistics.median(timings),totalP95Ms=sorted(timings)[75],pngBytes=len(out.getvalue()),outputSize=output_size)
             row['extraCpuMs']=row['smooth']['totalMedianMs']-row['nearest']['totalMedianMs'];results.append(row)
     print(json.dumps(dict(iterations=80,clock='thread_time',results=results),indent=2))
 

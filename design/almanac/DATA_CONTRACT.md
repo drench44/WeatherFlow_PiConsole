@@ -354,7 +354,7 @@ never invents a measurement.
 The page owns one `{lat,lon,zoom}` Mercator camera. Pointer events move that camera;
 no gesture waits for a request, payload acknowledgement or server image. The
 emitter acquires and validates native 256×256 XYZ tiles, then publishes immutable
-256×256 remaps (Smooth off) or 512×512 field-interpolated remaps (Smooth on). It no longer
+256×256 remaps for both Smooth off and Smooth on (v6.1). It no longer
 allocates viewport RGBA canvases, per-site RGBA layers, crops or basemap SVGs.
 `lib/data/radar-natural-earth.bin` remains the sole bundled geographic source.
 Attribution remains text; no provider origin is added to Chromium's URL policy.
@@ -703,7 +703,7 @@ are atomic. `radarRemap` PNG tEXt has exactly `remapped`, `unmatchedColors`,
 A separate `radarVisiblePixels` tEXt integer records nontransparent output pixels
 after remapping (native opaque pixels can be below the displayed floor). This
 avoids client readback allocation while keeping clear-state decisions exact.
-Cache hits decode and verify variant dimensions (256×256 or 512×512), revision, counts and LUT colours,
+Cache hits decode and verify 256×256 variant dimensions, revision, counts and LUT colours,
 including the supplemental output-alpha count.
 Invalid entries are removed and rebuilt. Native bytes retain their separate
 400-entry LRU and transport lifecycle; no RGBA layer cache replaces it.
@@ -936,19 +936,30 @@ still follows `156543.034*cos(lat)/2^zoom`, and settle chooses the largest dista
 The graphics budget admits storage **before allocation**, with a shared 40 MiB
 cap across echo and geography jobs. Retained canvases are 3×1,873,760 bytes,
 window composites normally ≤8×1,873,760, echo LRU ≤40 entries (262,144 bytes
-native, 1,048,576 bytes Smooth) and basemap LRU
-≤36×262,144. During geometry acquisition the eight-frame cycle can coexist with four incoming
+for either preference) and basemap LRU
+≤36×262,144. During geometry or Smooth-preference acquisition the eight-frame cycle can coexist with four incoming
 plates (any separately held aged-out subject stays accounted too); incoming work pauses at four until wrap adoption. Four shared
-fetch slots reserve 786,432 bytes for native/geography or 3,145,728 for Smooth; native image decodes are serialized and
+fetch slots each reserve 786,432 bytes for either radar variant or geography; native image decodes are serialized and
 admitted at most once per animation frame, after loop paints. The compositor
 also completes at most one plate per animation frame, newest first. The shared
-merge scratch is included at its actual dimensions (262,144 or 1,048,576 bytes), so simultaneous nominal maxima require eviction of at least
-one tile (the delta's 39.87 MiB omitted the scratch).
+merge scratch remains 256×256 (262,144 bytes), including with Smooth on.
+Simultaneous nominal maxima require eviction; the cap is unchanged.
 History transfers reserve a plate before allocation; if eviction cannot make
 room, admission blocks. Merging has no getImageData/readback buffer. Compressed
-responses are bounded at 128 KiB for native/geography and 512 KiB for Smooth;
+responses are bounded at 128 KiB for both radar variants and geography;
 oversize tiles follow the unavailable path. Visible geography is protected before
-evicting echo tiles under pressure, so Smooth acquisition cannot erase the map.
+evicting echo tiles under pressure. Smooth introduces no larger allocation.
+A job transfers 262,144 bytes of its existing reservation to a retained tile;
+its `finally` returns the remainder on success, 404, deadline, cancellation,
+decode failure or a cap exception. Busy/pending ownership is cleared before
+memory diagnostics, so a diagnostic throw cannot strand a slot. Admission also
+rolls back its reservation if its own post-admission diagnostic throws.
+
+A refused tile pump records the memory ledger at refusal and performs no further
+admission iterations while that ledger is unchanged. Releases, evictions and
+frame retirement let the next frame or queue event retry; a manifest poll also
+rearms it. Rebuilding a queue or advancing animation frames alone does not retry.
+This bounds acquisition work, while the animation clock continues playing.
 This accounting covers owned graphics and bounded decode working storage,
 not Chromium process RSS, driver internals or its HTTP cache. The harness also
 tracks bitmap creation/close and canvas dimensions independently.
@@ -1047,7 +1058,7 @@ retain the displayed-source caption plus `· switching` after the grace while di
 publication orders timestamps within source/primary identity, so a site volume
 older than the displayed mosaic can still publish immediately.
 
-### Smooth preference (v5.6)
+### Smooth preference (v6.1; persistence introduced in v5.6)
 
 The quiet **SMOOTH** button beside zoom reset uses the existing control colours,
 `aria-pressed` and a 64×44px target. Default is **off**. The active loopback camera
@@ -1063,16 +1074,22 @@ The emitter watches this marker even when an ordered `radar_intent` exists;
 changed preference supersedes in-flight work at the existing tile checkpoints.
 
 **Interpolation is in reflectivity, not colour.** Smooth converts each native
-256×256 field to 512×512 using pixel-centred bilinear weights in linear half-dBZ
+256×256 field to an engine-only 512×512 intermediate using pixel-centred bilinear weights in linear half-dBZ
 index space: N0B `i/2−33`, MRMS `i/2−32`. Verified palettes retain numeric indices;
 RGBA/RainViewer use the existing native inverse and ambiguity diagnostics.
 Reserved, unknown, zero-alpha, below-floor and explicitly suppressed gates have
 zero weight. The interpolated weighted index is divided by interpolated valid
-coverage, so a missing gate cannot pull reflectivity toward zero or carry a
-value across a transparent gap. Coverage interpolates separately; the chosen
+coverage, so a missing gate cannot supply intensity or pull it toward zero.
+Before that division, a BOX reduction averages each 2×2 group of weighted field
+and coverage back to 256×256. It never averages RGB or quantized legend colours.
+At an interior output gate the combined separable weights are 1/8, 3/4, 1/8;
+tile-edge weights clamp to 7/8, 1/8. A missing output gate between two valid
+neighbours can average their covered subpixels, with 1/4 coverage; it does not
+claim a full-coverage measurement there. A zero-support output stays transparent.
+Coverage interpolates separately; the chosen
 legend alpha multiplies coverage, rounded once. Tile edges clamp to the native
 edge; no neighbouring tile or extra fetch is required. This is a 2× bilinear
-resample, not a Gaussian convolution.
+field resample followed by area reduction, not a Gaussian convolution.
 
 The interpolated value is quantized to the existing discrete legend LUT. Every
 nontransparent **tile RGB** is a LUT entry; fractional edge alpha is coverage,
@@ -1083,9 +1100,39 @@ off retains nearest-neighbour scaling. Browser scaling, alpha composition and
 temporal frame blends can mix display colours; their pixels are not additional
 dBZ samples. Geography colours, geometry, legend and camera policy are unchanged.
 
+On a 1024×600 panel the radar canvas is 956×490 physical pixels. Native
+256px tiles display 1:1 at each integer camera zoom within the provider's range.
+Smooth therefore softens gate edges at zoom 7; it adds no measured resolution.
+The button explanation says this explicitly. The same limitation applies at
+other integer zooms; enlarged capped-source views spread those softened edges:
+
+| Camera zoom | Region / IEM MRMS (cap 9) | Site / N0B (7–10) | Worldwide / RainViewer (cap 7) |
+|---|---|---|---|
+| 4, 5, 6 | 256px / 1:1 | Region fallback | 256px / 1:1 |
+| 7 | 256px / 1:1: softened gate edges | 256px / 1:1 | 256px / 1:1 |
+| 8 | 256px / 1:1 | 256px / 1:1 | 512px / 2:1 |
+| 9 | 256px / 1:1 | 256px / 1:1 | 1024px / 4:1 |
+| 10 | 512px / 2:1 | 256px / 1:1 | 2048px / 8:1 |
+
+Widths above are displayed tile widths; emitted tiles always remain 256px.
+Fractional zoom scales by `2**(cameraZoom-nativeLevel)`. A temporary same-stamp
+ancestor can enlarge further. Browser scaling does not create new measurements.
+
+Both preference directions use the v5.9 retained-window handoff. Publication of
+a new render revision aborts superseded tile jobs and advances the echo epoch;
+it retains outgoing cycle plates, subject and playback deadline. Four incoming
+decoded frames permit adoption at the existing wrap. Before four, every playing
+plate survives; afterward only already-passed outgoing prefixes may retire.
+The incoming `loaded` list counts the new variant; outgoing owned plates are in
+`retired`/`cycle` and must be included when auditing retained memory. At adoption
+the playing count may become four and grow to eight, just as with a zoom step.
+The v6.0 copy is shared: “Playing previous view · sharpening N of M.” The count
+is incoming decoded plates, never outgoing ones. Rapid reversals also retain the
+currently playing cycle and fence cancelled job completions by epoch/revision.
+
 `radar.smooth` and `radar.tiles.smooth` describe the published variant;
-`radar.tiles.tileSize` is 256 or 512. `tiles.revision` has a distinct Smooth
-hash and `tiles.remapRevision` is `field-bilinear-2x-v56-1` when on. Frames retain
+`radar.tiles.tileSize` is always 256. `tiles.revision` has a distinct Smooth
+hash and `tiles.remapRevision` is `field-bilinear-2x-box-256-v61-1` when on. Frames retain
 that identity through asynchronous decode, source switches and retained playback.
 The server admits the two installed immutable revision trees, via
 `.tile-revision` and `.smooth-revision`. Both share **one 8,000-file / 64,000,000-byte
@@ -1094,7 +1141,7 @@ Startup validates both trees within the shared entry budget. Native byte LRU
 identity is unchanged: toggling can remap cached native bytes without a provider
 request, and returning to an existing variant can reuse its rendered PNGs.
 Remap diagnostics count native pixels (≤65,536); `radarVisiblePixels` counts
-output pixels (≤262,144 for Smooth), including interpolated coverage edges.
+output pixels (≤65,536 for either variant), including interpolated coverage edges.
 
 Prewarm, prefetch and acquisition tiers, request limits and deadlines are unchanged.
 `tools/benchmark_radar_smooth.py` measures offline transform and decode/encode CPU
@@ -1102,7 +1149,11 @@ cost on deterministic native P/RGBA storm fields. `tests/test_radar_v56.py` chec
 field/LUT/boundary invariants, durable loopback writes, variant reuse and restart;
 `tests/verify_radar_v56.py` checks real loopback PNG acquisition, both themes,
 reload persistence, fractional scaling flags, unchanged geography and independent
-bitmap/canvas accounting under 40 MiB.
+bitmap/canvas accounting under 40 MiB. `tests/test_radar_v61.py` drives four
+concurrent jobs through every cleanup outcome with explicit barriers and a
+manual deadline clock. `tests/verify_radar_v61.py` checks both preference
+handoffs in both themes, retained plate ownership, the 600-frame admission
+refusal fence, release/poll retries, and before/after memory tables (`--baseline`).
 
 ### Shared reflectivity palette
 
@@ -1202,7 +1253,7 @@ Site selection, real scan listings, nearest reporting station-timeline primary,
 230km spherical range intersection, four-site cap and farthest-first stacking
 survive. Each secondary scan is real, no later than the primary and no more than
 900s older. Tile failures preserve other successful tiles; the page combines
-aligned site tiles using one scratch (256px off, 512px Smooth), never four viewport layers.
+aligned site tiles using one 256px scratch for either preference, never four viewport layers.
 
 The site picker always names the closest site (`nexrad.id`), falling back to the
 caption's primary only when `nexrad` is null. It retains the number of actual
@@ -1342,7 +1393,7 @@ source transition. Tile grid/zoom, camera pan, render revision and legend change
 stage a replacement window while keeping playable outgoing composites (v5.9).
 When the complete manifest returns, normal latest-eight selection applies again.
 `readyFrames` is the latest eight decoded incoming composites in time order.
-During geometry acquisition `radarReady()` reports the retained playable window
+During geometry or Smooth-preference acquisition `radarReady()` reports the retained playable window
 until four replacements decode, so readiness cannot become zero while old imagery
 is drawable. `cycle`
 is the fixed playable snapshot for the underway pass. A missing middle

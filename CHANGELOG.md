@@ -7,6 +7,23 @@ to shared upstream code that the classic console benefits from too.
 ## 2026-09-15
 
 ### Radar
+- **Radar v6.1 keeps Smooth within the native page memory model.** The engine
+  interpolates weighted reflectivity/coverage at 2×, then area-reduces to 256px
+  before applying the legend LUT. Tiles, merge scratch, 128 KiB response limits
+  and 786,432-byte job reservations now match Smooth off; the 40 MiB cap stays.
+  A new Smooth revision prevents old 512px caches from aliasing. At zoom 7 the
+  effect is softened gate edges at 1:1, as the button and contract explain.
+- **Reservations have one cleanup owner.** Radar and geography jobs transfer
+  retained-tile ownership from their existing slot and return the remainder in
+  `finally`; busy/pending cleanup precedes diagnostics, including cap throws.
+  Preference publication cancels superseded work and fences late completions
+  while preserving the v5.9 playing cycle until four replacements and wrap.
+  The note retains v6.0’s “Playing previous view · sharpening N of M” wording.
+- **Refused admission waits for changed memory or a poll.** Queue rebuilds and
+  animation frames cannot restart an unchanged refusal. Deterministic four-job
+  lifecycle tests and both-theme headless handoff/memory/scheduler checks cover
+  the regression. Local Mac Smooth decode/remap/encode medians are 6.82–8.62 ms
+  per tile, +3.16–3.71 ms over off; these are not panel performance measurements.
 - **Radar v6.0 carries closest-site evidence into the picker.** `nexrad` adds
   `reporting`, `newestTs`, `ageSec`, `reason`, `checkedTs`, `checkedAt`,
   `nextCheckTs` and `nextCheckAt` from the last listing and existing discovery
@@ -32,8 +49,8 @@ to shared upstream code that the classic console benefits from too.
   Smooth upsamples native reflectivity 2× with valid-coverage bilinear weights,
   then applies the legend LUT; missing/below-floor gates never supply intensity.
   Echo scaling follows the selected variant. Both rendered revisions share the
-  existing disk cap, and browser accounting includes larger tiles while preserving
-  visible geography and the 40 MiB cap. Native byte reuse and warming tiers remain
+  existing disk cap. v6.1 supersedes its larger browser tiles with native-sized
+  output under the same 40 MiB cap. Native byte reuse and warming tiers remain
   unchanged. Offline field/persistence tests and both-theme browser checks cover
   the toggle; an offline benchmark reports per-tile CPU cost.
 - **Radar v5.9 keeps zoom/pan playback alive.** Camera settle and manifest geometry

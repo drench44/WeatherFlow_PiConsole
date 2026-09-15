@@ -19,7 +19,7 @@ def smooth_fixtures(server):
     with rp.smooth_remap(native,source,rp.source_palette(source)) as mapped:
         info=PngInfo();meta={k:mapped.info[k] for k in ('remapped','unmatchedColors','opaqueColors','unmatchedPixels','opaquePixels','ambiguousPixels')}
         meta['revision']=rp.SMOOTH_REVISION
-        info.add_text('radarRemap',json.dumps(meta));info.add_text('radarVisiblePixels',str(512*512-mapped.getchannel('A').histogram()[0]))
+        info.add_text('radarRemap',json.dumps(meta));info.add_text('radarVisiblePixels',str(mapped.width*mapped.height-mapped.getchannel('A').histogram()[0]))
         out=io.BytesIO();mapped.save(out,'PNG',pnginfo=info)
     master=None
     old=root/'t'/ae._radar_render_revision()
@@ -33,7 +33,7 @@ def publish(server,smooth):
     # Simulate the asynchronous emitter publication AFTER the real HTTP handler
     # persists the marker. Engine/native reuse/restart is tested in pytest.
     r=server.data['radar'];r['smooth']=smooth
-    r['tiles'].update(smooth=smooth,tileSize=512 if smooth else 256,
+    r['tiles'].update(smooth=smooth,tileSize=256,
         revision=ae._radar_render_revision(smooth),remapRevision=rp.SMOOTH_REVISION if smooth else rp.REMAP_REVISION)
     temp=server.root/'wx.tmp';temp.write_text(json.dumps(server.data));temp.replace(server.root/'wx.json')
 

@@ -759,7 +759,7 @@ def _radar_tile_metadata(path, source):
     from PIL import Image
     with Image.open(path) as image:
         smooth = len(path.parents) > 5 and path.parents[5].name == _radar_render_revision(True)
-        if image.format != 'PNG' or image.size != ((512,512) if smooth else (256,256)):
+        if image.format != 'PNG' or image.size != (256,256):
             raise ValueError('invalid cached tile')
         image.load()
         meta=json.loads(image.info['radarRemap'])
@@ -871,7 +871,7 @@ def _radar_tile_manifest(source, frames, ctx):
     width=math.ceil(grid['w']*grid['h']/4)
     return dict(base='radar/t/',revision=_radar_render_revision(ctx.get('smooth',False)),
                 remapRevision=SMOOTH_REVISION if ctx.get('smooth') else REMAP_REVISION,
-                smooth=ctx.get('smooth',False), tileSize=512 if ctx.get('smooth') else 256,
+                smooth=ctx.get('smooth',False), tileSize=256,
                 source=source,site=ctx.get('site_id') or '-',z=ctx['zoom'],levels=levels,grid=grid,
                 camera=dict(ctx['center'], zoom=ctx.get('camera_zoom', ctx['zoom'])),
                 geometry=[list(ctx.get('station', ctx['center'].values())), ctx['center'], ctx.get('camera_zoom',ctx['zoom']), ctx['zoom'], source, ctx.get('site_id')],

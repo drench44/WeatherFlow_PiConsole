@@ -25,13 +25,13 @@ def test_two_gate_step_is_reflectivity_then_lut(source):
     offset = 66 if source.endswith('n0b') else 64
     image = gates(source, [offset+40, offset+120])  # 20 and 60 dBZ
     result = rp.smooth_remap(image, source, rp.source_palette(source))
-    assert result.size == (4,2)
-    expected = [dict(rp.source_palette(source))[dbz] for dbz in (20,30,50,60)]
-    assert list(result.getdata()) == expected*2
+    assert result.size == (2,1)
+    expected = [dict(rp.source_palette(source))[dbz] for dbz in (25,55)]
+    assert list(result.getdata()) == expected
     allowed = {color[:3] for _, color in rp.source_palette(source)}
     assert all(color[:3] in allowed for color in result.getdata())
     # RGB bilinear would create these colours; our result is categorically different.
-    assert result.tobytes() != rp.remap(image, source, rp.source_palette(source)).resize((4,2), Image.Resampling.BILINEAR).tobytes()
+    assert result.tobytes() != rp.remap(image, source, rp.source_palette(source)).resize((2,1), Image.Resampling.BILINEAR).tobytes()
 
 
 @pytest.mark.parametrize('source', rp.INDEX_DBZ)
@@ -40,12 +40,12 @@ def test_transparent_gap_never_blends_opposite_gates(source, missing):
     offset = 66 if source.endswith('n0b') else 64
     image = gates(source, [offset+40, missing, missing, offset+120])
     result = rp.smooth_remap(image, source, rp.source_palette(source))
-    row = [result.getpixel((x,0)) for x in range(8)]
+    row = [result.getpixel((x,0)) for x in range(4)]
     low, high = (dict(rp.source_palette(source))[d] for d in (20,60))
-    assert row[0] == low and row[-1] == high
-    assert all(c[:3] == low[:3] for c in row[:3])
-    assert all(c[:3] == high[:3] for c in row[-3:])
-    assert [c[3] for c in row] == [255,191,64,0,0,64,191,255]
+    assert row[0][:3] == low[:3] and row[-1][:3] == high[:3]
+    assert all(c[:3] == low[:3] for c in row[:2])
+    assert all(c[:3] == high[:3] for c in row[-2:])
+    assert [c[3] for c in row] == [223,32,32,223]
 
 
 @pytest.mark.parametrize('source', rp._FILES)
@@ -55,7 +55,7 @@ def test_unknown_rgba_and_partial_coverage(source):
     result = rp.smooth_remap(image,source,rp.source_palette(source))
     low = dict(rp.source_palette(source))[20][:3]
     assert all(c[:3] == low for c in result.getdata() if c[3])
-    assert [result.getpixel((x,0))[3] for x in range(6)] == [128,96,32,0,0,0]
+    assert [result.getpixel((x,0))[3] for x in range(3)] == [112,16,0]
     assert result.info['unmatchedPixels'] == 1 and result.info['remapped'] is False
 
 
@@ -112,7 +112,7 @@ def test_engine_variants_reuse_native_bytes_and_restart(make_emitter,hybrid,tmp_
     (tmp_path/'radar_smooth').write_text('on')
     hybrid.calls.clear();emitter._do_radar()
     new=emitter._radar_result.tiles
-    assert new['smooth'] is True and new['tileSize']==512
+    assert new['smooth'] is True and new['tileSize']==256
     assert new['revision'] != old['revision']
     assert new['geometry']==old['geometry'] and emitter._build_payload()['radar']['smooth'] is True
     assert not any('/tile.py/' in c[2] for c in hybrid.calls)
@@ -159,11 +159,11 @@ def test_engine_invalid_or_absent_defaults_off(make_emitter,hybrid,tmp_path,raw)
 
 
 def test_high_mrms_index_not_clipped_before_interpolation():
-    # 95.5 dBZ and 10.5 dBZ interpolate to 74.25 and 31.75. Use a diagnostic
+    # 95.5 and 10.5 dBZ average back to 84.875 and 21.125. Use a diagnostic
     # half-dBZ LUT so saturation in the ordinary legend cannot hide a lost index.
     palette=[(i/2-32,(i,0,0,255)) for i in range(256)]
     result=rp.smooth_remap(gates('iem-mrms-lcref',[255,85]),'iem-mrms-lcref',palette)
-    assert [result.getpixel((x,0))[0] for x in range(4)]==[255,212,127,85]
+    assert [result.getpixel((x,0))[0] for x in range(2)]==[233,106]
 
 
 @pytest.mark.parametrize('source', rp.INDEX_DBZ)
@@ -173,10 +173,13 @@ def test_bilinear_four_gate_field_and_single_gate_gap(source):
     palette=[(i/2-offset/2,(i,0,0,255)) for i in range(256)]
     result=rp.smooth_remap(gates(source,values,(2,2)),source,palette)
     # Independent bilinear oracle in native index space, including edge clamping.
-    for y,ty in enumerate((0,.25,.75,1)):
-        for x,tx in enumerate((0,.25,.75,1)):
+    for y,ty in enumerate((.125,.875)):
+        for x,tx in enumerate((.125,.875)):
             expected=int(values[0]*(1-tx)*(1-ty)+values[1]*tx*(1-ty)+values[2]*(1-tx)*ty+values[3]*tx*ty)
             assert result.getpixel((x,y))==(expected,0,0,255)
     gap=rp.smooth_remap(gates(source,[offset+40,0,offset+120]),source,rp.source_palette(source))
     colors=dict(rp.source_palette(source))
-    assert [gap.getpixel((x,0))[:3] for x in range(6)]==[colors[20][:3]]*3+[colors[60][:3]]*3
+    # Box reduction can combine the covered halves of a missing output gate;
+    # no missing sample supplies intensity. Its quarter coverage stays honest.
+    assert [gap.getpixel((x,0)) for x in range(3)]==[
+        colors[20][:3]+(223,),colors[40][:3]+(64,),colors[60][:3]+(223,)]
