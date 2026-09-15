@@ -7,6 +7,15 @@ to shared upstream code that the classic console benefits from too.
 ## 2026-09-15
 
 ### Radar
+- **Radar v5.6 adds durable Smooth.** A quiet 44px-target toggle beside zoom reset
+  defaults off and persists through the loopback-only `radar_smooth` marker.
+  Smooth upsamples native reflectivity 2× with valid-coverage bilinear weights,
+  then applies the legend LUT; missing/below-floor gates never supply intensity.
+  Echo scaling follows the selected variant. Both rendered revisions share the
+  existing disk cap, and browser accounting includes larger tiles while preserving
+  visible geography and the 40 MiB cap. Native byte reuse and warming tiers remain
+  unchanged. Offline field/persistence tests and both-theme browser checks cover
+  the toggle; an offline benchmark reports per-tile CPU cost.
 - **Radar v5.9 keeps zoom/pan playback alive.** Camera settle and manifest geometry
   changes retain and reproject the playing cycle until four replacement composites
   decode, then adopt at the existing wrap. The frame read keeps its timestamp;

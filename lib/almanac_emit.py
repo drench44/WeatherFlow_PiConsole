@@ -129,7 +129,7 @@ RADAR_RAINVIEWER_COLOR = 2
 RADAR_RAINVIEWER_TILE_OPTS = "0_0"
 RADAR_RAINVIEWER_MANIFEST_URL = "https://api.rainviewer.com/public/weather-maps.json"
 RADAR_DIR = os.environ.get("WFP_RADAR_DIR", os.path.expanduser("~/almanac_web/radar"))
-from lib.radar_palette import _RADAR_RAMP, _RADAR_LUT, _RADAR_SITE_RAMP, REMAP_REVISION, remap, source_palette
+from lib.radar_palette import _RADAR_RAMP, _RADAR_LUT, _RADAR_SITE_RAMP, REMAP_REVISION, SMOOTH_REVISION, remap, smooth_remap, source_palette
 _RADAR_SOURCES = {
     'iem-nexrad-n0b': dict(provider='iem', attribution='IEM / NOAA',
         attribution_url='https://mesonet.agron.iastate.edu/GIS/ridge.phtml',
@@ -735,29 +735,35 @@ def _radar_revision_digest(remap_revision,basemap_revision,native_revision):
                           repr(_RADAR_SITE_RAMP)+pixels+native_revision+basemap_revision).encode()).hexdigest()[:12]
 
 
-def _radar_render_revision():
+def _radar_render_revision(smooth=False):
     from lib.radar_basemap import version
-    return _radar_revision_digest(REMAP_REVISION,version(),_radar_native_table_revision())
+    return _radar_revision_digest(REMAP_REVISION + (SMOOTH_REVISION if smooth else ""),version(),_radar_native_table_revision())
 
 
 def _radar_sites_revision():
     return hashlib.sha256(json.dumps(_NEXRAD_SITES,sort_keys=True).encode()).hexdigest()[:12]
 
 
-def _radar_tile_path(source, site, stamp, zoom, x, y):
+def _radar_tile_path(source, site, stamp, zoom, x, y, smooth=False):
     if isinstance(stamp, (int, float)):
         stamp = datetime.fromtimestamp(stamp, timezone.utc).strftime('%Y%m%d%H%M')
-    return Path(RADAR_DIR) / 't' / _radar_render_revision() / source / (site or '-') / stamp / str(zoom) / str(x % 2**zoom) / f'{y}.png'
+    return Path(RADAR_DIR) / 't' / _radar_render_revision(smooth) / source / (site or '-') / stamp / str(zoom) / str(x % 2**zoom) / f'{y}.png'
+
+
+def _radar_disk_key(source, site, stamp, zoom, x, y, smooth=False):
+    key = (source, site, _radar_stamp_text(stamp), zoom, x % 2**zoom, y)
+    return key + (True,) if smooth else key
 
 
 def _radar_tile_metadata(path, source):
     from PIL import Image
     with Image.open(path) as image:
-        if image.format != 'PNG' or image.size != (256,256):
+        smooth = len(path.parents) > 5 and path.parents[5].name == _radar_render_revision(True)
+        if image.format != 'PNG' or image.size != ((512,512) if smooth else (256,256)):
             raise ValueError('invalid cached tile')
         image.load()
         meta=json.loads(image.info['radarRemap'])
-        if meta['revision'] != REMAP_REVISION or type(meta['remapped']) is not bool:
+        if meta['revision'] != (SMOOTH_REVISION if smooth else REMAP_REVISION) or type(meta['remapped']) is not bool:
             raise ValueError('cached tile revision')
         for key in ('unmatchedColors','opaqueColors','unmatchedPixels','opaquePixels','ambiguousPixels'):
             if type(meta[key]) is not int or meta[key]<0: raise ValueError('cached tile counts')
@@ -767,11 +773,11 @@ def _radar_tile_metadata(path, source):
             raise ValueError('cached tile honesty')
         allowed={color[:3] for _,color in source_palette(source)}
         with image.convert('RGBA') as rgba:
-            colors=rgba.getcolors(65536)
+            colors=rgba.getcolors(image.width*image.height)
             if any(color[3] and color[:3] not in allowed for _,color in colors): raise ValueError('cached tile palette')
             visible=sum(n for n,color in colors if color[3])
             if int(image.info['radarVisiblePixels'])!=visible:raise ValueError('cached tile visibility count')
-            if visible>meta['opaquePixels']-meta['unmatchedPixels']:
+            if not smooth and visible>meta['opaquePixels']-meta['unmatchedPixels']:
                 raise ValueError('cached tile visibility')
         return meta
 
@@ -807,7 +813,7 @@ def _radar_stamp_text(stamp):
 
 def _radar_present(ctx, source, site, stamp, zoom, x, y):
     inventory = ctx['inventory']  # missing ownership is a bug, never a disk probe
-    return (source,site,_radar_stamp_text(stamp),zoom,x % 2**zoom,y) in inventory
+    return _radar_disk_key(source,site,stamp,zoom,x,y,ctx.get('smooth',False)) in inventory
 
 
 def _radar_tile_manifest(source, frames, ctx):
@@ -828,7 +834,7 @@ def _radar_tile_manifest(source, frames, ctx):
         pairs=[(p['id'],p['ts']) for p in frame.get('siteScans',())] or [(None,frame['ts'])]
         cache = ctx.get('manifest_cache')
         index = ctx.get('inventory')
-        key = (source, tuple(pairs), z, tuple(tiles))
+        key = (source, tuple(pairs), z, tuple(tiles), ctx.get('smooth',False))
         versions = tuple(index.groups.get((source,site,_radar_stamp_text(stamp),z),0) for site,stamp in pairs) if hasattr(index,'groups') else None
         if cache is not None and versions is not None:
             cached = cache.get(key)
@@ -863,7 +869,9 @@ def _radar_tile_manifest(source, frames, ctx):
     grid_tiles=[(x,y) for y in range(y0,y0+grid['h']) for x in range(x0,x0+grid['w'])]
     mask,expected,complete=inventory(result[-1],ctx['zoom'],grid_tiles) if result else (0,0,0)
     width=math.ceil(grid['w']*grid['h']/4)
-    return dict(base='radar/t/',revision=_radar_render_revision(),remapRevision=REMAP_REVISION,
+    return dict(base='radar/t/',revision=_radar_render_revision(ctx.get('smooth',False)),
+                remapRevision=SMOOTH_REVISION if ctx.get('smooth') else REMAP_REVISION,
+                smooth=ctx.get('smooth',False), tileSize=512 if ctx.get('smooth') else 256,
                 source=source,site=ctx.get('site_id') or '-',z=ctx['zoom'],levels=levels,grid=grid,
                 camera=dict(ctx['center'], zoom=ctx.get('camera_zoom', ctx['zoom'])),
                 geometry=[list(ctx.get('station', ctx['center'].values())), ctx['center'], ctx.get('camera_zoom',ctx['zoom']), ctx['zoom'], source, ctx.get('site_id')],
@@ -1295,7 +1303,7 @@ class AlmanacEmitter:
     def _radar_stamp_names(self):
         """Which marker files carry intent right now (one JSON parse)."""
         record = self._radar_read_intent()
-        return ('radar_intent',) if record is not None else ('radar_zoom', 'radar_source', 'radar_center', 'radar_intent')
+        return ('radar_intent', 'radar_smooth') if record is not None else ('radar_zoom', 'radar_source', 'radar_center', 'radar_intent', 'radar_smooth')
 
     def _radar_preference_stamp(self, names=None):
         # Supersede checkpoints run at every tile boundary. A pass hands them the file
@@ -1440,7 +1448,7 @@ class AlmanacEmitter:
                             lat,lon,_=_NEXRAD_SITES[site];n,w=world_inverse(x*256,y*256,snap.zoom);south,e=world_inverse((x+1)*256,(y+1)*256,snap.zoom)
                             if not circle_intersects_bounds(lat,lon,RADAR_SITE_RANGE_METERS,dict(n=n,s=south,w=w,e=e)):continue
                         expected=True
-                        if (snap.source_id,site,_radar_stamp_text(stamp),snap.zoom,x % 2**snap.zoom,y) not in self._radar_disk_inventory:return False
+                        if _radar_disk_key(snap.source_id,site,stamp,snap.zoom,x,y,snap.tiles.get('smooth',False)) not in self._radar_disk_inventory:return False
             if not expected:return False
         return True
 
@@ -1733,8 +1741,8 @@ class AlmanacEmitter:
 
         def fetch(tile):
             tx, ty, _, _ = tile
-            target = _radar_tile_path(source, site, stamp, ctx['zoom'], tx, ty)
-            disk_key = (source,site,_radar_stamp_text(stamp),ctx['zoom'],tx % 2**ctx['zoom'],ty)
+            target = _radar_tile_path(source, site, stamp, ctx['zoom'], tx, ty, ctx.get('smooth',False))
+            disk_key = _radar_disk_key(source,site,stamp,ctx['zoom'],tx,ty,ctx.get('smooth',False))
             if disk_key in self._radar_disk_inventory:
                 return tile, None  # bytes/metadata already validated; page decodes
             # Native IEM bytes have no dependency on our remapping revision.
@@ -1772,13 +1780,13 @@ class AlmanacEmitter:
                     if not members: self._radar_native_groups.pop(group,None)
             from PIL.PngImagePlugin import PngInfo
             with Image.open(io.BytesIO(raw)) as native_tile:
-                with remap(native_tile, source, source_palette(source)) as mapped:
+                with (smooth_remap if ctx.get('smooth') else remap)(native_tile, source, source_palette(source)) as mapped:
                     metadata = {k:mapped.info[k] for k in ('remapped','unmatchedColors','opaqueColors',
                         'unmatchedPixels','opaquePixels','ambiguousPixels')}
-                    metadata['revision'] = REMAP_REVISION
+                    metadata['revision'] = SMOOTH_REVISION if ctx.get('smooth') else REMAP_REVISION
                     info = PngInfo(); info.add_text('radarRemap',json.dumps(metadata,separators=(',',':')))
                     with mapped.getchannel('A') as alpha:
-                        info.add_text('radarVisiblePixels',str(65536-alpha.histogram()[0]))
+                        info.add_text('radarVisiblePixels',str(mapped.width*mapped.height-alpha.histogram()[0]))
                     encoded = io.BytesIO()
                     mapped.save(encoded, format='PNG', pnginfo=info)
                     rendered = encoded.getvalue()
@@ -1824,7 +1832,7 @@ class AlmanacEmitter:
         missing = []
         for tile in _radar_site_tiles(ctx, site):
             tx,ty,_,_ = tile
-            if (source,site,_radar_stamp_text(stamp),ctx['zoom'],tx % 2**ctx['zoom'],ty) in self._radar_disk_inventory:
+            if _radar_disk_key(source,site,stamp,ctx['zoom'],tx,ty,ctx.get('smooth',False)) in self._radar_disk_inventory:
                 yield tile, None
             else:
                 missing.append(tile)
@@ -1878,7 +1886,7 @@ class AlmanacEmitter:
                 snap.zoom != ctx['zoom'] or snap.bounds != ctx['bounds'] or
                 snap.center != dict(lat=ctx['station'][0], lon=ctx['station'][1]) or
                 snap.legend != _RADAR_SOURCES[source]['legend'] or
-                not snap.tiles or snap.tiles.get('revision') != _radar_render_revision()):
+                not snap.tiles or snap.tiles.get('revision') != (_radar_render_revision(True) if ctx.get('smooth') else _radar_render_revision())):
             return {}
         return {f['ts']: dict(f) for f in snap.frames
                 if max(newest, snap.ts_frame or newest) - RADAR_HISTORY_SEC <= f['ts']}
@@ -2553,7 +2561,7 @@ class AlmanacEmitter:
                 for pair in frame.get('siteScans') or [dict(id=None, ts=frame['ts'])]:
                     for y in range(grid.get('y0',0), grid.get('y0',0)+grid.get('h',0)):
                         for x in range(grid.get('x0',0), grid.get('x0',0)+grid.get('w',0)):
-                            pinned.add((snap.source_id,pair['id'],_radar_stamp_text(pair['ts']),snap.zoom,x % 2**snap.zoom,y))
+                            pinned.add(_radar_disk_key(snap.source_id,pair['id'],pair['ts'],snap.zoom,x,y,snap.tiles.get('smooth',False)))
         cache.evict(pinned, incoming_size, incoming_files)
         self._radar_disk_files=len(cache);self._radar_disk_bytes=cache.bytes
 
@@ -2588,11 +2596,11 @@ class AlmanacEmitter:
                 if not isinstance(relative,str):
                     continue
                 parts = relative.split('/')
-                if len(parts) != 9 or parts[:2] != ['radar','t'] or parts[2] != _radar_render_revision():
+                if len(parts) != 9 or parts[:2] != ['radar','t'] or parts[2] not in (_radar_render_revision(), _radar_render_revision(True)):
                     continue
                 _,_,_,source,site,scan,z,x,y = parts
                 try:
-                    key = (source,None if site=='-' else site,scan,int(z),int(x),int(y[:-4]))
+                    key = _radar_disk_key(source,None if site=='-' else site,scan,int(z),int(x),int(y[:-4]),parts[2]==_radar_render_revision(True))
                     with self._radar_lock:
                         record = self._radar_disk_inventory.records.get(key)
                         if record is None:
@@ -2616,6 +2624,15 @@ class AlmanacEmitter:
                 try:
                     self._radar_migrate_cache(str(root))
                     self._radar_disk_inventory.scan(root/'t'/_radar_render_revision(), _radar_tile_metadata)
+                    smooth_root = root/'t'/_radar_render_revision(True)
+                    if self._radar_disk_inventory.writable and smooth_root.is_dir():
+                        first = self._radar_disk_inventory.startup
+                        self._radar_disk_inventory.scan(smooth_root, _radar_tile_metadata, suffix=(True,),
+                            entry_limit=self._radar_disk_inventory.MAX_ENTRIES-first['entries'])
+                        second = self._radar_disk_inventory.startup
+                        self._radar_disk_inventory.startup = {k:first[k]+second[k] for k in
+                            ('entries','files','invalid','wallSec','cpuSec')}
+                        self._radar_disk_inventory.startup['bounded'] = first['bounded'] or second['bounded']
                     self._radar_disk_files=len(self._radar_disk_inventory)
                     self._radar_disk_bytes=self._radar_disk_inventory.bytes
                 except OSError as error:
@@ -2638,6 +2655,12 @@ class AlmanacEmitter:
             for obsolete in root.glob('sites-*.json'):
                 if obsolete!=site_path:obsolete.unlink()
             (root/'sites.json').unlink(missing_ok=True)
+        smooth_revision = _radar_render_revision(True)
+        for obsolete in (root/'t').glob('*'):
+            if (obsolete.name not in (_radar_render_revision(),smooth_revision)
+                    and obsolete.is_dir() and not obsolete.is_symlink()):
+                shutil.rmtree(obsolete)
+        (root/'.smooth-revision').write_text(smooth_revision)
         revision=root/'.tile-revision'
         if revision.exists() and revision.read_text()==_radar_render_revision():return
         for name in ('basemap','t',*{s['legend']['id'] for s in _RADAR_SOURCES.values()}):
@@ -2745,7 +2768,13 @@ class AlmanacEmitter:
             viewed = self._radar_is_viewed()
             unit = _radar_distance_unit(config)
             # One budget spans both attempts; geometry is source-specific, intent is not.
-            ctx = dict(center=center, nexrad=_radar_nexrad(station_lat, station_lon, unit), viewed=viewed,
+            try:
+                with Path(self.output_path).with_name('radar_smooth').open() as preference:
+                    raw = preference.read(128)
+                smooth = len(raw) < 128 and raw.strip() == 'on'
+            except (OSError, UnicodeError):
+                smooth = False
+            ctx = dict(smooth=smooth, center=center, nexrad=_radar_nexrad(station_lat, station_lon, unit), viewed=viewed,
                 desired=desired, auto_zoom=auto_zoom, builds=0, station=station, unit=unit, previous_result=previous,
                 preference_stamp=stamp, stamp_names=stamp_names, intent_triggered=intent_triggered, discovery=discovery,
                 deadline=pass_deadline, pass_deadline=pass_deadline, inventory=self._radar_disk_inventory, manifest_cache=self._radar_manifest_cache)
@@ -2982,6 +3011,7 @@ class AlmanacEmitter:
             provider=snap.provider,cadenceSec=snap.cadence,frameSpacingSec=median(gaps) if gaps else None,
             historyGaps=any(g!=snap.cadence for g in gaps),historySpanSec=complete[-1]-complete[0] if complete else 0,
             completeFrameCount=len(complete),partialCoverage=snap.partial_coverage,center=snap.center,
+            smooth=(snap.tiles or {}).get('smooth',False),
             zoomAuto=snap.zoom_desired is None,zoomAutoLevel=snap.zoom_auto_level,
             zoomMin=RADAR_MIN_ZOOM,zoomMax=snap.max_zoom,
             zoomSource='MRMS' if snap.source_id=='iem-mrms-lcref' else 'NEXRAD' if snap.source_mode=='site' else 'RainViewer',

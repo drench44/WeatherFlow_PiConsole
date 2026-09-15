@@ -137,7 +137,7 @@ def _write_radar_source(values):
 
 def _write_radar_preference(name, values):
     """Caller holds _count_lock and has checked loopback. Polling cannot fail here."""
-    if name not in ('radar_zoom', 'radar_source', 'radar_center') or len(values) != 1:
+    if name not in ('radar_zoom', 'radar_source', 'radar_center', 'radar_smooth') or len(values) != 1:
         return
     value = values[0]
     if name == 'radar_center':
@@ -149,6 +149,9 @@ def _write_radar_preference(name, values):
                 return
             # Keep canonical floats in the decimal grammar (str() can emit 1e-10).
             value = ','.join(format(Decimal(str(n)), 'f') for n in (lat, lon))
+    elif name == 'radar_smooth':
+        if value not in ('on', 'off'):
+            return
     elif name == 'radar_source':
         if value not in ('mosaic', 'site'):
             return
@@ -390,6 +393,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                     ordered = 'radarSession' in params
                     accepted = _camera_transaction(_radar_activity(params), params) if ordered and camera_report else not ordered and _radar_owner is None
                     if accepted:
+                        _write_radar_preference('radar_smooth', params.get('radarSmooth', []))
                         _write_radar_viewing(viewed_radar)
                     if camera_report and accepted:
                         marker=os.path.join(os.path.dirname(DATA),'radar_activity');tmp=marker+'.tmp'
@@ -439,7 +443,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             try:
                 with open(os.path.join(WEB,'radar','.'+kind+'-revision')) as f:return f.read()==value
             except OSError:return False
-        immutable=bool(tile and revision('tile',tile[1]) and 4<=int(tile[4])<=10 and int(tile[5])<2**int(tile[4]) and int(tile[6])<2**int(tile[4]) or
+        immutable=bool(tile and (revision('tile',tile[1]) or revision('smooth',tile[1])) and 4<=int(tile[4])<=10 and int(tile[5])<2**int(tile[4]) and int(tile[6])<2**int(tile[4]) or
                        geo and revision('geo',geo[1]) and 4<=int(geo[3])<=10 and int(geo[4])<2**int(geo[3]) and int(geo[5])<2**int(geo[3]) or
                        sites and revision('sites',sites[1]))
         self._immutable_radar=immutable and os.path.isfile(local)
@@ -454,6 +458,12 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             with _count_lock:
                 record = _read_radar_intent()
                 owner = _radar_owner or dict(session=record.get('session', ''), generation=record.get('generation', 0))
+                try:
+                    with open(os.path.join(os.path.dirname(DATA), 'radar_smooth')) as stream:
+                        smooth = stream.read(128).strip() == 'on'
+                except (OSError, UnicodeError):
+                    smooth = False
+                self.send_header('X-Radar-Smooth', 'on' if smooth else 'off')
                 self.send_header('X-Radar-Intent', json.dumps(dict(intent=record, acceptedGeneration=owner['generation'], **owner), separators=(',', ':')))
         if getattr(self, '_immutable_radar', False):
             self.send_header('Cache-Control', 'public, max-age=31536000, immutable')

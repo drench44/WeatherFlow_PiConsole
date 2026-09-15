@@ -621,6 +621,8 @@
   .rad-zoom-mode { color: var(--ink); font-weight: 800; }
   .rad-reset { margin-left: auto; width: 44px; height: 44px; border: 1px solid var(--rule);
     background: none; color: var(--ink-soft); font: 17px var(--sans); border-radius: 2px; cursor: pointer; }
+  .rad-smooth { width: 64px; min-width: 44px; padding: 0 9px; font: 600 10px var(--sans); letter-spacing: .06em; }
+  .rad-smooth[aria-pressed="true"] { border-color: var(--ink); text-decoration: underline; text-underline-offset: 4px; }
   .rad-reset[hidden] { display: none; }
   .rad-reset:active { opacity: .5; }
   .rad-zoom[data-state="pending"] .rad-zoom-read { opacity: .45; }
@@ -1177,6 +1179,7 @@
             <span class="rad-zoom-mode" id="rad-zoom-mode" aria-live="polite">Auto</span></span>
           <button class="rad-step" id="rad-zoom-in" type="button" aria-label="Zoom in — closer">+</button>
           <button class="rad-reset" id="rad-zoom-reset" type="button" aria-label="Reset zoom to automatic" hidden>&#8635;</button>
+          <button class="rad-reset rad-smooth" id="rad-smooth" type="button" aria-label="Smooth reflectivity" aria-pressed="false">SMOOTH</button>
         </div>
         <div id="rad-note" role="status" aria-live="polite" data-shown="false"></div>
         <div class="rad-legend" id="rad-legend"></div>
@@ -2693,7 +2696,7 @@
   var RAD_MAX_LAT=85.05112878, RAD_CONTROLS='.rad-src,.rad-src-cap,.rad-legend,.rad-loop,.rad-zoom,.rad-recenter';
   var radarView={data:null,active:false,loaded:[],readyFrames:[],cycle:[],retired:[],started:false,current:null,good:null,paused:false,
     singleSweep:false,clear:false,refresh:{state:'idle'},legendKey:null,nextAt:0};
-  var radarCamera=null, radarSource={desired:null}, radarZoom={auto:true};
+  var radarCamera=null, radarSource={desired:null}, radarZoom={auto:true}, radarSmooth={value:null,pending:null};
   var radarIntent={session:crypto.randomUUID(),generation:0,owner:null,owned:false,heartbeat:0,preferredMode:null,localSeq:0,ready:false,timer:null,postedAt:0};
   var radarSwitch=null, RAD_SWITCH_MS=20000, RAD_TILE_MS=2500, radarJobs=new Set();
   function radarTrace(phase,extra={}){var row={phase,at:performance.now(),generation:radarIntent.generation,...extra};(radarMetrics.path||(radarMetrics.path=[])).push(row);if(radarMetrics.path.length>256)radarMetrics.path.shift();}
@@ -2716,13 +2719,17 @@
     try{await radarAwait(new Promise(start=>{entry.start=start;radarDecodeQueue.push(entry);radarWake();}),job);return await radarDecodeImage(buf,job);}
     finally{if(entry.admitted)radarDecodeActive=false;radarWake();}
   }
+  function radarTileSurface(size){
+    if(radarTileScratch.width!==size){var extra=Math.max(0,size*size*4-radarTileScratch.width*radarTileScratch.height*4);if(extra&&!radarAdmit(extra))throw Error('tile scratch admission');radarTileScratch.width=radarTileScratch.height=size;if(extra)radarUnreserve(extra);}
+    return radarTileScratch.getContext('2d',{willReadFrequently:true});
+  }
   async function radarDecodeImage(buf,job){
     // HTML image ownership can be cancelled by clearing src. Unlike an orphaned
     // createImageBitmap promise, it does not retain an unbounded decode queue.
     var img=new Image(),url=URL.createObjectURL(new Blob([buf],{type:'image/png'}));
     var cancel=()=>{img.src='';};job.controller.signal.addEventListener('abort',cancel,{once:true});
-    try{img.src=url;await radarAwait(img.decode(),job);if(img.naturalWidth!==256||img.naturalHeight!==256)throw Error('tile dimensions');
-      var ctx=radarTileScratch.getContext('2d');ctx.clearRect(0,0,256,256);ctx.drawImage(img,0,0);return radarTileScratch.transferToImageBitmap();}
+    try{img.src=url;await radarAwait(img.decode(),job);var size=job.f?.smooth?512:256;if(img.naturalWidth!==size||img.naturalHeight!==size)throw Error('tile dimensions');
+      var ctx=radarTileSurface(size);ctx.imageSmoothingEnabled=false;ctx.clearRect(0,0,size,size);ctx.drawImage(img,0,0);return radarTileScratch.transferToImageBitmap();}
     finally{job.controller.signal.removeEventListener('abort',cancel);img.src='';URL.revokeObjectURL(url);}
   }
   function radarJobEnd(job){radarJobs.delete(job);}
@@ -2742,8 +2749,8 @@
   function radarReduced() { return window.matchMedia('(prefers-reduced-motion: reduce)').matches; }
   var RAD_TILE_BYTES=262144, RAD_PLATE_BYTES=1873760, RAD_MEMORY_CAP=41943040;
   function radarMemory() {
-    radarMetrics.memoryBytes=RAD_PLATE_BYTES*3+RAD_TILE_BYTES+
-      (radarTiles.size+radarGeoTiles.size)*RAD_TILE_BYTES+new Set(radarView.loaded.concat(radarView.retired,radarView.pendingSource?.frames||[]).filter(f=>f.bitmap).map(f=>f.bitmap)).size*RAD_PLATE_BYTES+radarReserved;
+    radarMetrics.memoryBytes=RAD_PLATE_BYTES*3+radarTileScratch.width*radarTileScratch.height*4+
+      [...radarTiles.values()].reduce((n,t)=>n+t.bitmap.width*t.bitmap.height*4,0)+radarGeoTiles.size*RAD_TILE_BYTES+new Set(radarView.loaded.concat(radarView.retired,radarView.pendingSource?.frames||[]).filter(f=>f.bitmap).map(f=>f.bitmap)).size*RAD_PLATE_BYTES+radarReserved;
     radarMetrics.peakMemoryBytes=Math.max(radarMetrics.peakMemoryBytes||0,radarMetrics.memoryBytes);
     if(radarMetrics.memoryBytes>RAD_MEMORY_CAP)throw Error('radar raster memory cap');
     return radarMetrics.memoryBytes;
@@ -2758,7 +2765,7 @@
       // A cached newest composite no longer touches its component tiles on each
       // paint. Protect its warm camera margin explicitly, including at admission.
       var protectedKeys=radarProtectedTiles(),key=[...radarTiles.keys()].find(k=>!protectedKeys.has(k)),pool=radarTiles;
-      if(key===undefined){pool=radarGeoTiles.size?radarGeoTiles:radarTiles;key=pool.keys().next().value;}
+      if(key===undefined){var geoKeys=new Set(radarCamera?radarTileSet(radarCamera,radarBasemapLevel()).map(t=>radarGeoKey(t.z,t.x,t.y)):[]);pool=radarGeoTiles;key=[...pool.keys()].find(k=>!geoKeys.has(k));if(key===undefined){pool=radarTiles.size?radarTiles:radarGeoTiles;key=pool.keys().next().value;}}
       if(key===undefined)return false;pool.get(key).bitmap.close();pool.delete(key);
     }
     radarReserved+=bytes;radarMemory();return true;
@@ -2789,11 +2796,12 @@
     radarPumpTiles();
   }
   async function radarReadPNG(response,job){
-    if(Number(response.headers.get('Content-Length'))>131072)throw Error('tile size');
-    var bytes=new Uint8Array(131072),used=0,reader=response.body.getReader();
+    var limit=job.f?.smooth?524288:131072;
+    if(Number(response.headers.get('Content-Length'))>limit)throw Error('tile size');
+    var bytes=new Uint8Array(limit),used=0,reader=response.body.getReader();
     try{while(true){var part=await radarAwait(reader.read(),job);if(part.done)break;if(used+part.value.byteLength>bytes.length)throw Error('tile size');bytes.set(part.value,used);used+=part.value.byteLength;}}
     catch(error){reader.cancel().catch(()=>{});throw error;}finally{reader.releaseLock();}
-    var view=new DataView(bytes.buffer);if(used<24||view.getUint32(0)!==0x89504e47||view.getUint32(16)!==256||view.getUint32(20)!==256)throw Error('tile dimensions');
+    var view=new DataView(bytes.buffer),size=job.f?.smooth?512:256;if(used<24||view.getUint32(0)!==0x89504e47||view.getUint32(16)!==size||view.getUint32(20)!==size)throw Error('tile dimensions');
     return bytes.subarray(0,used);
   }
   async function radarFetchGeo(job){
@@ -2846,28 +2854,29 @@
     for(var y=y0;y<=y1;y++)for(var x=x0;x<=x1;x++)out.push({x,y,z,d:Math.hypot(x+.5-p[0]/256,y+.5-p[1]/256)});return out.sort((a,b)=>a.d-b.d);
   }
   function radarLevel() {return clamp(Math.floor(radarCamera.zoom+1e-9),radarView.data.zoomMin,radarView.data.zoomMax);}
-  function radarTileURL(source,site,stamp,z,x,y) {
+  function radarTileURL(source,site,stamp,z,x,y,revision) {
     if(!['iem-mrms-lcref','iem-nexrad-n0b','rainviewer'].includes(source)||!/^(-|K[A-Z0-9]{3}|P[A-Z0-9]{3}|T[A-Z0-9]{3}|R[A-Z0-9]{3})$/.test(site)||!/^\d{12}$/.test(stamp))throw Error('tile identity');
-    var rev=radarView.pendingSource?.data.tiles.revision||radarView.data.tiles.revision;if(!/^[a-f0-9]{12}$/.test(rev))throw Error('render revision');
+    var rev=revision||radarView.pendingSource?.data.tiles.revision||radarView.data.tiles.revision;if(!/^[a-f0-9]{12}$/.test(rev))throw Error('render revision');
     return 'radar/t/'+rev+'/'+source+'/'+site+'/'+stamp+'/'+z+'/'+radarWrap(x,z)+'/'+y+'.png';
   }
   function radarStamp(ts) {return new Date(ts*1000).toISOString().slice(0,16).replace(/[-T:]/g,'');}
-  function radarPNGMeta(buffer) {
+  function radarPNGMeta(buffer,frame) {
     var a=buffer instanceof Uint8Array?buffer:new Uint8Array(buffer),v=new DataView(a.buffer,a.byteOffset,a.byteLength),pos=8;
     if(a.length<24||v.getUint32(0)!==0x89504e47)throw Error('tile PNG');
     var meta=null,visible=null;
     while(pos+12<=a.length){var len=v.getUint32(pos),type=String.fromCharCode(...a.subarray(pos+4,pos+8));if(pos+12+len>a.length)throw Error('tile chunk');
       if(type==='tEXt'){var text=new TextDecoder().decode(a.subarray(pos+8,pos+8+len));if(text.startsWith('radarRemap\0'))meta=JSON.parse(text.slice(11));if(text.startsWith('radarVisiblePixels\0'))visible=Number(text.slice(19));}pos+=len+12;}
-    if(!meta||typeof meta.remapped!=='boolean'||meta.revision!==(radarView.pendingSource?.data.tiles.remapRevision||radarView.data.tiles.remapRevision))throw Error('tile metadata');
+    if(!meta||typeof meta.remapped!=='boolean'||meta.revision!==(frame?.remapRevision||radarView.pendingSource?.data.tiles.remapRevision||radarView.data.tiles.remapRevision))throw Error('tile metadata');
     for(var k of ['unmatchedColors','opaqueColors','unmatchedPixels','opaquePixels','ambiguousPixels'])if(!Number.isInteger(meta[k])||meta[k]<0)throw Error('tile counts');
-    if(meta.unmatchedPixels>meta.opaquePixels||meta.opaquePixels>65536||meta.ambiguousPixels>meta.opaquePixels||meta.remapped!==(meta.unmatchedPixels<=.02*meta.opaquePixels&&!meta.ambiguousPixels))throw Error('tile honesty');if(!Number.isInteger(visible)||visible<0||visible>65536)throw Error('tile visibility');meta.visiblePixels=visible;return meta;
+    if(meta.unmatchedPixels>meta.opaquePixels||meta.opaquePixels>65536||meta.ambiguousPixels>meta.opaquePixels||meta.remapped!==(meta.unmatchedPixels<=.02*meta.opaquePixels&&!meta.ambiguousPixels))throw Error('tile honesty');if(!Number.isInteger(visible)||visible<0||visible>(frame?.smooth?262144:65536))throw Error('tile visibility');meta.visiblePixels=visible;return meta;
   }
   function radarTileRemember(key,tile) {
     var old=radarTiles.get(key);if(old&&old.bitmap!==tile.bitmap)old.bitmap.close();radarTiles.delete(key);
     var protectedKeys=radarProtectedTiles();
     while(radarTiles.size>=40){var victim=[...radarTiles.keys()].find(k=>!protectedKeys.has(k))||radarTiles.keys().next().value;radarTiles.get(victim).bitmap.close();radarTiles.delete(victim);}
-    if(!radarAdmit(RAD_TILE_BYTES)){tile.bitmap.close();return;}
-    radarTiles.set(key,tile);radarUnreserve(RAD_TILE_BYTES);
+    var bytes=tile.bitmap.width*tile.bitmap.height*4;
+    if(!radarAdmit(bytes)){tile.bitmap.close();return;}
+    radarTiles.set(key,tile);radarUnreserve(bytes);
   }
   function radarAcceptSource(){
     var pending=radarView.pendingSource;if(!pending)return;
@@ -2895,10 +2904,11 @@
   }
   function radarPumpTiles(){
     while(radarTileBusy+radarGeoBusy<4&&(radarTileQueue.length||radarGeoQueue.length)){
-      if(!radarAdmit(786432))break;
+      var nextJob=radarTileQueue[0], reservation=nextJob?.f.smooth?3145728:786432;
+      if(!radarAdmit(reservation))break;
       // Geography first on a cold map, then measurement acquisition.
       if(radarGeoQueue.length&&!radarTileQueue.length){var job=radarGeoQueue.shift();radarJobStart(job);radarGeoBusy++;radarGeoPending.add(job.key);radarFetchGeo(job);}
-      else{var job=radarTileQueue.shift();radarJobStart(job);radarTileBusy++;radarTilePending.add(job.key);radarFetchTile(job);}
+      else{var job=radarTileQueue.shift();job.reservation=reservation;radarJobStart(job);radarTileBusy++;radarTilePending.add(job.key);radarFetchTile(job);}
     }
   }
   function radarExpected(f,t){return !f.siteScans?.length||f.siteScans.some(s=>radarSiteCovers(s.id,t.z,t.x,t.y));}
@@ -2919,10 +2929,10 @@
     try {
       for(var scan of scans) {
         if(!radarSiteCovers(scan.id,job.z,job.x,job.y))continue;
-        var url=radarTileURL(job.source,scan.id,radarStamp(scan.ts),job.z,job.x,job.y),res=await radarAwait(fetch(url,{signal:job.controller.signal}),job);
-        if(!res.ok){if(res.status===404)fetch('radar-bad-tile',{method:'POST',body:url}).catch(()=>{});partial=true;continue;}var buf=await radarReadPNG(res,job);var m=radarPNGMeta(buf);
-        var next=await radarDecode(buf,job);if(next.width!==256||next.height!==256){next.close();throw Error('tile size');}
-        var cx=radarTileScratch.getContext('2d',{willReadFrequently:true});cx.imageSmoothingEnabled=false;cx.clearRect(0,0,256,256);if(bitmap)cx.drawImage(bitmap,0,0);cx.drawImage(next,0,0);next.close();if(bitmap)bitmap.close();
+        var url=radarTileURL(job.source,scan.id,radarStamp(scan.ts),job.z,job.x,job.y,job.f.revision),res=await radarAwait(fetch(url,{signal:job.controller.signal}),job);
+        if(!res.ok){if(res.status===404)fetch('radar-bad-tile',{method:'POST',body:url}).catch(()=>{});partial=true;continue;}var buf=await radarReadPNG(res,job);var m=radarPNGMeta(buf,job.f);
+        var next=await radarDecode(buf,job),size=job.f.smooth?512:256;if(next.width!==size||next.height!==size){next.close();throw Error('tile size');}
+        var cx=radarTileSurface(size);cx.imageSmoothingEnabled=false;cx.clearRect(0,0,size,size);if(bitmap)cx.drawImage(bitmap,0,0);cx.drawImage(next,0,0);next.close();if(bitmap)bitmap.close();
         // One shared scratch, synchronous merge/transfer: never four RGBA site layers.
         hasEcho=hasEcho||m.visiblePixels>0;
         bitmap=radarTileScratch.transferToImageBitmap();if(scan.id!=='-')actualSites.push(scan);for(var k of ['opaquePixels','unmatchedPixels','ambiguousPixels','opaqueColors','unmatchedColors'])meta[k]+=m[k];
@@ -2930,36 +2940,36 @@
       if(!bitmap)throw Error('tile absent');
       meta.remapped=meta.unmatchedPixels<=.02*meta.opaquePixels&&!meta.ambiguousPixels;
       if(job.epoch!==radarEchoEpoch||!radarView.active){bitmap.close();bitmap=null;return;}
-      radarUnreserve(786432);job.released=true;
+      radarUnreserve(job.reservation);job.released=true;
       radarTileRemember(job.key,{bitmap,meta,hasEcho,z:job.z,x:job.x,y:job.y,key:job.key,sites:actualSites,partial,retryAt:performance.now()+2000});bitmap=null;
       if(radarView.pendingSource&&job.transition===radarView.transition&&radarFrameKey(job.f)===radarFrameKey(radarView.pendingSource.frame)){
         radarTrace('firstVisibleTile');
       }
       if(radarView.current&&!radarView.current.bitmap&&radarFrameKey(job.f)===radarFrameKey(radarView.current)){radarTileDamage.push({x:job.x,y:job.y,z:job.z});radarEchoDirty=true;}radarWake();
     } catch(e){if(bitmap)bitmap.close();if(url&&!job.controller.signal.aborted&&e.name!=='AbortError')fetch('radar-bad-tile',{method:'POST',body:url}).catch(()=>{});radarTileAbsent.set(job.key,performance.now()+2000);}
-    finally {radarJobEnd(job);if(!job.released)radarUnreserve(786432);radarTileBusy--;radarTilePending.delete(job.key);radarMemory();radarPumpTiles();}
+    finally {radarJobEnd(job);if(!job.released)radarUnreserve(job.reservation);radarTileBusy--;radarTilePending.delete(job.key);radarMemory();radarPumpTiles();}
   }
   function radarFindTile(f,z,x,y) {
     for(var delta=0;delta<=2;delta++){var factor=2**delta,level=z-delta;if(level<0)break;var key=radarTileKey(f,level,Math.floor(x/factor),Math.floor(y/factor)),t=radarTiles.get(key);
-      if(t){radarTiles.delete(key);radarTiles.set(key,t);return {tile:t,sx:((x%factor+factor)%factor)*256/factor,sy:(y%factor)*256/factor,size:256/factor};}}
+      if(t){radarTiles.delete(key);radarTiles.set(key,t);return {tile:t,sx:((x%factor+factor)%factor)*t.bitmap.width/factor,sy:(y%factor)*t.bitmap.height/factor,size:t.bitmap.width/factor};}}
     return null;
   }
   function radarEchoPaint(f,ctx=$('rad-echo').getContext('2d')) {
     if(!f){ctx.clearRect(0,0,956,490);return;}
     if(f.bitmap&&JSON.stringify(f.camera)===JSON.stringify(radarCamera)){
-      ctx.clearRect(0,0,956,490);ctx.imageSmoothingEnabled=false;ctx.drawImage(f.bitmap,0,0);
+      ctx.clearRect(0,0,956,490);ctx.imageSmoothingEnabled=!!f.smooth;ctx.drawImage(f.bitmap,0,0);
       $('rad-plate').setAttribute('aria-label','Reflectivity radar'+(f.siteScans?.length?' · '+f.siteScans.map(s=>s.id).join(', '):''));
       radarView.clear=f.ready&&!f.hasEcho&&f.legend?.remapped!==false&&radarTileSet(radarCamera,radarLevel()).every(t=>radarExpected(f,t));return;
     }
     var z=radarLevel(),p=radarWorldPoint(radarCamera.lat,radarCamera.lon,z),s=2**(radarCamera.zoom-z),drawn=[],hasEcho=false;
-    ctx.clearRect(0,0,956,490);ctx.imageSmoothingEnabled=false;
+    ctx.clearRect(0,0,956,490);ctx.imageSmoothingEnabled=!!f.smooth;
     // A playing history scan has a measured plate bitmap, even after its tiles
     // leave the LRU. Reproject that retained region while missing tiles load.
     var retained=f.bitmap&&f.camera&&JSON.stringify(f.camera)!==JSON.stringify(radarCamera);
-    if(retained){hasEcho=f.hasEcho;var origin=radarWorldPoint(f.camera.lat,f.camera.lon,radarCamera.zoom),cp=radarWorldPoint(radarCamera.lat,radarCamera.lon,radarCamera.zoom),rs=2**(radarCamera.zoom-f.camera.zoom);ctx.imageSmoothingEnabled=false;ctx.drawImage(f.bitmap,Math.round(478+origin[0]-cp[0]-478*rs),Math.round(245+origin[1]-cp[1]-245*rs),Math.round(956*rs),Math.round(490*rs));ctx.save();ctx.beginPath();ctx.rect(0,0,956,490);ctx.rect(Math.round(478+origin[0]-cp[0]-478*rs),Math.round(245+origin[1]-cp[1]-245*rs),Math.round(956*rs),Math.round(490*rs));ctx.clip('evenodd');}
+    if(retained){hasEcho=f.hasEcho;var origin=radarWorldPoint(f.camera.lat,f.camera.lon,radarCamera.zoom),cp=radarWorldPoint(radarCamera.lat,radarCamera.lon,radarCamera.zoom),rs=2**(radarCamera.zoom-f.camera.zoom);ctx.imageSmoothingEnabled=!!f.smooth;ctx.drawImage(f.bitmap,Math.round(478+origin[0]-cp[0]-478*rs),Math.round(245+origin[1]-cp[1]-245*rs),Math.round(956*rs),Math.round(490*rs));ctx.save();ctx.beginPath();ctx.rect(0,0,956,490);ctx.rect(Math.round(478+origin[0]-cp[0]-478*rs),Math.round(245+origin[1]-cp[1]-245*rs),Math.round(956*rs),Math.round(490*rs));ctx.clip('evenodd');}
     var counts={opaquePixels:0,unmatchedPixels:0,ambiguousPixels:0};
     for(var t of radarTileSet(radarCamera,z)) {var x=Math.round(478+(t.x*256-p[0])*s),y=Math.round(245+(t.y*256-p[1])*s),right=Math.round(478+((t.x+1)*256-p[0])*s),bottom=Math.round(245+((t.y+1)*256-p[1])*s),found=radarFindTile(f,z,t.x,t.y);
-      if(found){ctx.imageSmoothingEnabled=false;ctx.drawImage(found.tile.bitmap,found.sx,found.sy,found.size,found.size,x,y,right-x,bottom-y);drawn.push(found.tile);hasEcho=hasEcho||found.tile.hasEcho;}
+      if(found){ctx.imageSmoothingEnabled=!!f.smooth;ctx.drawImage(found.tile.bitmap,found.sx,found.sy,found.size,found.size,x,y,right-x,bottom-y);drawn.push(found.tile);hasEcho=hasEcho||found.tile.hasEcho;}
     }
     if(retained)ctx.restore();
     var unique=new Set(drawn);for(var t of unique)for(var k of Object.keys(counts))counts[k]+=t.meta[k];
@@ -2981,7 +2991,7 @@
     if(!radarCompositeJob){var f=(pending?pending.frames:radarView.loaded).slice().reverse().find(f=>!f.bitmap&&performance.now()>=(f.compositeRetry||0)&&f.levels[String(z)]===true);if(!f)return;
       radarCompositeJob={f,progressAt:performance.now(),revision:radarCameraRevision,tiles:radarTileSet(radarCamera,z).filter(t=>radarExpected(f,t)),done:new Set(),sites:new Map(),hasEcho:false,meta:{opaquePixels:0,unmatchedPixels:0,ambiguousPixels:0}};radarScratch.getContext('2d').clearRect(0,0,956,490);radarQueueTiles();}
     var job=radarCompositeJob,ctx=radarScratch.getContext('2d'),p=radarWorldPoint(radarCamera.lat,radarCamera.lon,z);
-    ctx.imageSmoothingEnabled=false;
+    ctx.imageSmoothingEnabled=!!job.f.smooth;
     for(var t of job.tiles){var id=t.x+'/'+t.y;if(job.done.has(id))continue;var tile=radarTiles.get(radarTileKey(job.f,z,t.x,t.y));if(!tile||tile.partial)continue;
       var scale=2**(radarCamera.zoom-z);ctx.drawImage(tile.bitmap,Math.round(478+(t.x*256-p[0])*scale),Math.round(245+(t.y*256-p[1])*scale),Math.ceil(256*scale),Math.ceil(256*scale));job.done.add(id);for(var site of tile.sites||[])job.sites.set(site.id,site);job.progressAt=performance.now();job.hasEcho=job.hasEcho||tile.hasEcho;for(var k of Object.keys(job.meta))job.meta[k]+=tile.meta[k];}
     if(job.done.size===job.tiles.length){if(!radarAdmit(RAD_PLATE_BYTES))return;var completed=radarScratch.transferToImageBitmap();radarReserved-=RAD_PLATE_BYTES;job.f.bitmap=completed;job.f.camera={...radarCamera};job.f.ready=true;job.f.hasEcho=job.hasEcho;job.f.drawnSites=[...job.sites.values()];job.f.legend={remapped:job.meta.unmatchedPixels<=.02*job.meta.opaquePixels&&!job.meta.ambiguousPixels};radarCompositeJob=null;radarTrace('decoded',{stamp:job.f.stamp});radarRetirePassed();radarNoteRender();if(pending)radarAcceptSource();else{radarUpdateReady();radarLoopSync();}radarMemory();radarQueueTiles();}
@@ -3035,7 +3045,7 @@
     var windowKey=radarWindowKey(r);if(radarView.windowKey&&radarView.windowKey!==windowKey&&(!radarView.holdingWindow||radarView.good?.revision!==r.tiles.revision)){radarRetarget();}radarView.windowKey=windowKey;
     var incoming=r.tiles&&r.tiles.frames||[],frames=incoming.slice(-8),newest=r.observedTs??incoming.at(-1)?.ts??radarView.good?.ts,
       listed=new Set(incoming.map(f=>f.stamp)),have=new Map(radarView.loaded.map(f=>[radarFrameKey(f),f]));
-    radarView.loaded=frames.map(f=>{var identity={...f,sourceId:r.sourceId,revision:r.tiles.revision},key=radarFrameKey(identity),old=have.get(key);if(old){Object.assign(old,identity);have.delete(key);return old;}return {...identity,ready:false,hasEcho:false};});
+    radarView.loaded=frames.map(f=>{var identity={...f,sourceId:r.sourceId,revision:r.tiles.revision,smooth:!!r.tiles.smooth,remapRevision:r.tiles.remapRevision},key=radarFrameKey(identity),old=have.get(key);if(old){Object.assign(old,identity);have.delete(key);return old;}return {...identity,ready:false,hasEcho:false};});
     // An omitted scan is not a deletion. A truncated publish can arrive while
     // newest is pending; retain its decoded history until the hour expires.
     have.forEach(f=>{if(!listed.has(f.stamp)&&f.ts>=newest-3600&&f.ts<=newest)radarView.loaded.push(f);else radarView.retired.push(f);});
@@ -3112,7 +3122,8 @@
     if(!radarIntent.preferredMode)radarIntent.preferredMode=radarView.data?.sourcePref||'mosaic';
     if(radarSwitch){radarSwitch.generation=radarIntent.generation;radarSwitch.committed=true;}
     radarIntent.timer=setTimeout(()=>{poll(immediate);},immediate?0:120);}
-  function radarZoomRender(){var r=radarView.data,rail=$('rad-zoom');rail.hidden=!r;if(!r||!radarCamera)return;var z=Math.round(radarCamera.zoom);rail.dataset.mode=radarZoom.auto?'auto':'manual';rail.dataset.state='confirmed';rail.setAttribute('aria-busy','false');$('rad-zoom-mode').textContent=radarZoom.auto?'Auto':String(z);$('rad-zoom-reset').hidden=radarZoom.auto;$('rad-zoom-out').disabled=z<=r.zoomMin;$('rad-zoom-in').disabled=z>=10;radarView.zoomNote=z>r.zoomMax?r.zoomSource+' reaches zoom '+r.zoomMax+' — scaled to this view.':'';radarNoteRender();}
+  $('rad-smooth').addEventListener('click',()=>{radarSmooth.value=radarSmooth.pending=!radarSmooth.value;radarZoomRender();poll(true);});
+  function radarZoomRender(){var r=radarView.data,rail=$('rad-zoom');rail.hidden=!r;if(!r||!radarCamera)return;$('rad-smooth').setAttribute('aria-pressed',String(!!radarSmooth.value));var z=Math.round(radarCamera.zoom);rail.dataset.mode=radarZoom.auto?'auto':'manual';rail.dataset.state='confirmed';rail.setAttribute('aria-busy','false');$('rad-zoom-mode').textContent=radarZoom.auto?'Auto':String(z);$('rad-zoom-reset').hidden=radarZoom.auto;$('rad-zoom-out').disabled=z<=r.zoomMin;$('rad-zoom-in').disabled=z>=10;radarView.zoomNote=z>r.zoomMax?r.zoomSource+' reaches zoom '+r.zoomMax+' — scaled to this view.':'';radarNoteRender();}
   function radarNoteRender(){var r=radarView.data,f=radarView.refresh,note=$('rad-note'),copy='';clearTimeout(radarIntent.noteTimer);if(!r)return;var elapsed=Date.now()-radarIntent.postedAt;if(elapsed<600){note.dataset.shown='false';radarIntent.noteTimer=setTimeout(radarSourceRender,601-elapsed);return;}if(radarSwitch?.retry)copy='Retrying · '+(r.nextRetry?'next attempt '+Math.max(0,Math.ceil(r.nextRetry-Date.now()/1000))+'s':'building visible loop')+' · showing '+radarFrameLabel(radarView.current||{});else if(radarSource.refused)copy="Couldn't switch · showing "+radarSourceSubject(r).subject;else if((radarView.holdingWindow||radarView.current?.bitmap&&radarView.loaded.some(f=>!f.bitmap))&&f.state!=='failed')copy='Refreshing · frame '+radarView.loaded.filter(f=>f.bitmap).length+' of '+Math.min(8,Math.max(radarView.loaded.length,r.frameCount||0));else if(f.state==='newest')copy='Refreshing · newest frame';else if(f.state==='history')copy='Refreshing · frame '+f.frameIndex+' of '+f.frameTotal;else if(f.state==='failed')copy="Couldn't refresh · showing "+radarFrameLabel(radarView.current||{});if(!copy)copy=radarView.zoomNote||'';if(!copy&&r.sourceFallback==='site-zoom-floor'&&radarSource.desired!=='mosaic'){var site=(r.sources||[]).find(s=>s.mode==='site');if(site&&site.siteId)copy=site.siteId+' resumes at zoom '+r.siteResumeZoom;}note.textContent=copy;note.dataset.shown=String(!!copy);}
   function radarState(){var r=radarView.data;if(!r)return;var elapsed=(performance.now()-(radarView.receivedAt||performance.now()))/1000;r.stale=(radarView.receivedAge||0)+elapsed>=r.staleSec;var f=radarView.current,state=r.stale||r.refresh&&r.refresh.state==='failed'?'stale':radarView.clear?'clear':'current';$('rad-status').dataset.state=state;$('rad-plate').dataset.state=state;var status=$('rad-status');status.replaceChildren(document.createTextNode('As of '));var at=document.createElement('span');at.id='rad-asof';at.textContent=f?radarFrameLabel(f):'—';status.append(at);var age=f?Math.max(0,(radarView.receivedAge||0)+(performance.now()-(radarView.receivedAt||performance.now()))/1000+(r.observedTs-f.ts)):r.ageSec||0;if(age>=.8*r.staleSec)status.append(document.createTextNode(' · '+Math.floor(age/60)+' min old'));}
   function radarActivate(){if(!radarView.data)return;radarMetrics.activationAt=performance.now();radarMetrics.firstPaintMs=null;if(!radarCamera){var r=radarView.data,saved=null;try{saved=JSON.parse(sessionStorage.getItem('radarCamera'));}catch(e){}var accepted=radarIntent.accepted;if(accepted?.center&&accepted.center!=='station')saved={...accepted.center,zoom:accepted.zoom==='auto'?r.zoomAutoLevel:accepted.zoom,auto:accepted.zoomPolicy==='auto'||accepted.zoom==='auto'};else if(accepted?.zoom!==undefined)saved={...r.center,zoom:accepted.zoom==='auto'?r.zoomAutoLevel:accepted.zoom,auto:accepted.zoomPolicy==='auto'||accepted.zoom==='auto'};radarCamera=saved&&isNum(saved.lat)&&isNum(saved.lon)&&isNum(saved.zoom)?{lat:clamp(saved.lat,-RAD_MAX_LAT,RAD_MAX_LAT),lon:clamp(saved.lon,-180,180),zoom:clamp(saved.zoom,r.zoomMin,10)}:{...r.center,zoom:clamp(r.zoomAuto?r.zoomAutoLevel:r.zoomDesired,r.zoomMin,10)};radarZoom.auto=saved&&typeof saved.auto==='boolean'?saved.auto:r.zoomAuto;radarCamera=radarClampCamera(radarCamera);radarIntent.cameraKey=JSON.stringify(radarCamera);radarIntent.policy=radarZoom.auto?'auto':'manual';}
@@ -3129,10 +3140,10 @@
     var old=radarView.data,changed=old&&(old.sourceId!==r.sourceId||old.siteId!==r.siteId||JSON.stringify(old.center)!==JSON.stringify(r.center));
     if(old&&!changed&&r.observedTs&&old.observedTs>r.observedTs){old.ageSec=Math.max(old.ageSec||0,d.ts-old.observedTs);old.stale=old.ageSec>=old.staleSec;radarState();return;}
     if(changed&&radarSource.desired&&(r.sourcePref||r.sourceMode)!==radarSource.desired){radarView.refresh=r.refresh||{state:'idle'};radarNoteRender();return;}
-    if(radarView.pendingSource&&radarFrameKey(radarView.pendingSource.frame)===radarFrameKey({...r.tiles?.frames?.at(-1),sourceId:r.sourceId,revision:r.tiles?.revision})){radarView.pendingSource.data=r;var heldFrames=new Map(radarView.pendingSource.frames.map(f=>[f.stamp,f]));radarView.pendingSource.frames=r.tiles.frames.slice(-8).map(f=>Object.assign(heldFrames.get(f.stamp)||{},f,{sourceId:r.sourceId,revision:r.tiles.revision}));radarView.refresh=r.refresh||{state:'idle'};radarNoteRender();radarQueueTiles();return;}
+    if(radarView.pendingSource&&radarFrameKey(radarView.pendingSource.frame)===radarFrameKey({...r.tiles?.frames?.at(-1),sourceId:r.sourceId,revision:r.tiles?.revision})){radarView.pendingSource.data=r;var heldFrames=new Map(radarView.pendingSource.frames.map(f=>[f.stamp,f]));radarView.pendingSource.frames=r.tiles.frames.slice(-8).map(f=>Object.assign(heldFrames.get(f.stamp)||{},f,{sourceId:r.sourceId,revision:r.tiles.revision,smooth:!!r.tiles.smooth,remapRevision:r.tiles.remapRevision}));radarView.refresh=r.refresh||{state:'idle'};radarNoteRender();radarQueueTiles();return;}
     if(radarView.pendingSource){radarView.pendingSource=null;radarView.transition=(radarView.transition||0)+1;}
     if(changed&&old&&JSON.stringify(old.center)===JSON.stringify(r.center)&&!radarView.acceptingSource){
-      var newest=r.tiles&&r.tiles.frames&&r.tiles.frames.at(-1);if(newest&&radarView.good){radarView.transition=(radarView.transition||0)+1;radarCancelJobs();radarCompositeJob=null;radarView.pendingSource={data:r,frame:{...newest,sourceId:r.sourceId,revision:r.tiles.revision},frames:r.tiles.frames.slice(-8).map(f=>({...f,sourceId:r.sourceId,revision:r.tiles.revision}))};radarView.refresh=r.refresh||{state:'idle'};radarNoteRender();radarQueueTiles();return;}
+      var newest=r.tiles&&r.tiles.frames&&r.tiles.frames.at(-1);if(newest&&radarView.good){radarView.transition=(radarView.transition||0)+1;radarCancelJobs();radarCompositeJob=null;radarView.pendingSource={data:r,frame:{...newest,sourceId:r.sourceId,revision:r.tiles.revision,smooth:!!r.tiles.smooth,remapRevision:r.tiles.remapRevision},frames:r.tiles.frames.slice(-8).map(f=>({...f,sourceId:r.sourceId,revision:r.tiles.revision,smooth:!!r.tiles.smooth,remapRevision:r.tiles.remapRevision}))};radarView.refresh=r.refresh||{state:'idle'};radarNoteRender();radarQueueTiles();return;}
     }
     if(changed&&!radarView.acceptingSource){radarRelease();if(JSON.stringify(old.center)!==JSON.stringify(r.center)){radarCamera=null;try{sessionStorage.removeItem('radarCamera');}catch(e){}}}
     if(old&&old.geo&&r.geo&&old.geo.version!==r.geo.version){radarGeoClear();radarBaseDirty=true;}
@@ -3361,17 +3372,19 @@
     if(!radarIntent.owned&&radarIntent.owner!==null)zoomQuery+='&radarClaim='+encodeURIComponent(radarIntent.owner);
     if(posting&&radarIntent.owned)zoomQuery+='&radarCommit=1&radarPolicy='+(radarZoom.auto?'auto':'manual')+'&radarSource='+radarIntent.preferredMode;
     var geoQuery=radarActive&&radarCamera?'&radarGeoZoom='+clamp(Math.round(radarCamera.zoom),4,10)+'&radarGeoCenter='+encodeURIComponent(radarCamera.lat.toFixed(10)+','+(((radarCamera.lon+180)%360+360)%360-180).toFixed(10)):'';
-    fetch("wx.json?_=" + started + (ack ? "&r=1" : "") + (radarActive ? "&view=radar&radarTheme="+radarBaseStyle.theme+"&radarMoving="+(radarGesture.state!=='idle'?1:0) + geoQuery + zoomQuery : ""), opts)
+    fetch("wx.json?_=" + started + (ack ? "&r=1" : "") + (radarActive ? "&view=radar&radarTheme="+radarBaseStyle.theme+"&radarMoving="+(radarGesture.state!=='idle'?1:0) + geoQuery + zoomQuery + (radarSmooth.pending===null?"":"&radarSmooth="+(radarSmooth.pending?"on":"off")) : ""), opts)
       .then(function (r) {
         if (!r.ok) throw new Error("HTTP " + r.status);
         var srv = Date.parse(r.headers.get("Date") || "");   /* the producer's clock, 1 s resolution */
-        return r.json().then(function (d) { return { d: d, srvMs: srv, ack:JSON.parse(r.headers.get('X-Radar-Intent')||'null') }; });
+        return r.json().then(function (d) { return { d: d, srvMs: srv, ack:JSON.parse(r.headers.get('X-Radar-Intent')||'null'), smooth:r.headers.get('X-Radar-Smooth') }; });
       })
       .then(function (x) {
         if (gen !== pollGen) return;              /* superseded; this one was abandoned */
         var d = x.d;
         if (!validPayload(d)) throw new Error("bad payload");
         if(x.ack){radarIntent.owner=x.ack.session;if(!radarIntent.owned){radarIntent.accepted=x.ack.intent;if(!radarIntent.edited)radarIntent.preferredMode=x.ack.intent.source||radarIntent.preferredMode;radarIntent.owned=x.ack.session===radarIntent.session;if(radarIntent.owned&&!radarIntent.edited&&x.ack.intent.zoom!==undefined&&radarCamera){var r=radarView.data,c=x.ack.intent.center==='station'?r.center:x.ack.intent.center,z=x.ack.intent.zoom==='auto'?r.zoomAutoLevel:x.ack.intent.zoom;radarZoom.auto=x.ack.intent.zoomPolicy==='auto'||x.ack.intent.zoom==='auto';if(Math.abs(radarCamera.lat-c.lat)>1e-8||Math.abs(radarCamera.lon-c.lon)>1e-8||radarCamera.zoom!==z){radarCameraSet({...c,zoom:z});radarSettle();}if(x.ack.intent.source!==r.sourceMode)radarSource.desired=x.ack.intent.source;}}if(x.ack.session===radarIntent.session&&x.ack.generation===sentIntentGeneration){radarIntent.ready=false;radarTrace('accepted');}}
+        if(x.smooth==='on'||x.smooth==='off'){var smooth=x.smooth==='on';if(radarSmooth.pending===smooth)radarSmooth.pending=null;if(radarSmooth.pending===null)radarSmooth.value=smooth;}
+        else if(radarSmooth.value===null)radarSmooth.value=!!d.radar?.smooth;
         render(d);                                /* may throw — book success AFTER it */
 
         lastRenderMs = Date.now();

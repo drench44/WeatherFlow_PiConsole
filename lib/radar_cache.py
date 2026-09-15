@@ -75,23 +75,24 @@ class TileInventory:
                 self.directories.discard(str(parent))
                 parent = parent.parent
 
-    def scan(self, root, validate):
+    def scan(self, root, validate, suffix=(), entry_limit=None):
         """At most 40k directory entries / 8k files / 64MB, in 32-file quanta.
 
         Only the installed revision is passed in. Unindexed files are misses and
         may be overwritten normally. No symlinks are followed.
         """
+        limit = self.MAX_ENTRIES if entry_limit is None else max(0,entry_limit)
         started, cpu = time.perf_counter(), time.thread_time()
         visited = loaded = invalid = 0
         stack = [(Path(root), 0)]
         try:
-            while stack and visited < self.MAX_ENTRIES and len(self) < self.MAX_FILES and self.bytes < self.MAX_BYTES:
+            while stack and visited < limit and len(self) < self.MAX_FILES and self.bytes < self.MAX_BYTES:
                 directory, depth = stack.pop()
                 try:
                     with os.scandir(directory) as entries:
                         for entry in entries:
                             visited += 1
-                            if visited > self.MAX_ENTRIES:
+                            if visited > limit:
                                 break
                             if entry.is_dir(follow_symlinks=False) and depth < 5:
                                 stack.append((Path(entry.path), depth+1))
@@ -99,7 +100,7 @@ class TileInventory:
                                 path = Path(entry.path)
                                 try:
                                     source, site, stamp, z, x, y = path.relative_to(root).parts
-                                    key = (source, None if site == '-' else site, stamp, int(z), int(x), int(y[:-4]))
+                                    key = (source, None if site == '-' else site, stamp, int(z), int(x), int(y[:-4])) + suffix
                                     length = entry.stat(follow_symlinks=False).st_size
                                     if length > 2*1024*1024 or self.bytes+length > self.MAX_BYTES:
                                         continue
@@ -118,5 +119,5 @@ class TileInventory:
         finally:
             self.startup = dict(entries=visited, files=loaded, invalid=invalid,
                 wallSec=time.perf_counter()-started, cpuSec=time.thread_time()-cpu,
-                bounded=bool(stack) or visited >= self.MAX_ENTRIES)
+                bounded=bool(stack) or visited >= limit)
             self.writable = not self.startup['bounded']

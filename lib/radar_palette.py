@@ -11,6 +11,7 @@ _FILES = {'iem-mrms-lcref': 'ramp_mrms_lcref.csv',
           'iem-nexrad-n0b': 'ramp_n0b.csv',
           'rainviewer': 'rainviewer_api_colors_table.csv'}
 REMAP_REVISION = "native-v5.2-1"
+SMOOTH_REVISION = "field-bilinear-2x-v56-1"
 _RGB_TOLERANCE = 3  # Euclidean RGB distance; alpha is coverage, not intensity.
 _LOG = logging.getLogger(__name__)
 
@@ -251,4 +252,50 @@ def remap(image, source, palette):
     if unknown_pixels:
         _LOG.warning('radar palette %s: %d unknown pixels (%d colours) made transparent',
                      source, unknown_pixels, unknown_colors)
+    return result
+
+
+def smooth_remap(image, source, palette):
+    """2x pixel-centred bilinear reflectivity, then the discrete legend LUT.
+
+    Zero coverage / unknown / suppressed gates contribute no intensity. Normalize
+    the weighted field by valid coverage; interpolate coverage independently. A
+    one-gate transparent gap cannot carry intensity from one side to the other.
+    Edge samples clamp inside this native tile (no invented neighbouring gates).
+    All raster arithmetic runs in Pillow; no Python pixel loop or numpy required.
+    """
+    from PIL import Image, ImageChops, ImageMath
+    calculate = getattr(ImageMath, 'unsafe_eval', None) or ImageMath.eval
+    mapped = remap(image, source, palette)
+    # Half-dBZ linear codes preserve verified N0B/MRMS indices. The same native
+    # inverse rules apply to RGBA and RainViewer; no intensity is inferred from
+    # an already-rendered legend colour. Preserve each source's full range.
+    offset = 33 if source == 'iem-nexrad-n0b' else 32
+    numeric_palette = [(i / 2 - offset, (i, i, i, 255)) for i in range(256)]
+    numeric = remap(image, source, numeric_palette)
+    coverage = ImageChops.multiply(numeric.getchannel('A'),
+                                  mapped.getchannel('A').point([0] + [255]*255))
+    size = (image.width*2, image.height*2)
+    weight = coverage.convert('F')
+    field = numeric.getchannel('R').convert('F')
+    # Fixed, internal expressions, compatible with the Pi's Pillow as well.
+    weighted = calculate('field * weight', field=field, weight=weight)
+    weighted = weighted.resize(size, Image.Resampling.BILINEAR)
+    weight = weight.resize(size, Image.Resampling.BILINEAR)
+    codes = calculate('convert(value / (weight + (weight == 0)), "L")',
+                          value=weighted, weight=weight)
+    floors = [floor for floor, _ in palette]
+    targets = []
+    for i in range(256):
+        stop = bisect_right(floors, i/2-offset)-1
+        targets.append(palette[stop][1] if stop >= 0 else (0,0,0,0))
+    result = codes.convert('P')
+    result.putpalette([v for color in targets for v in color], rawmode='RGBA')
+    result = result.convert('RGBA')
+    alpha = calculate('convert(coverage * opacity / 255 + 0.5, "L")',
+                          coverage=weight, opacity=result.getchannel('A').convert('F'))
+    result.putalpha(alpha)
+    result.paste((0,0,0,0), mask=alpha.point([255]+[0]*255))
+    result.info.update(mapped.info, smooth=True)
+    mapped.close(); numeric.close()
     return result
