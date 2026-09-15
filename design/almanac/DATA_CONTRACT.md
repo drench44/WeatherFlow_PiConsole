@@ -372,8 +372,8 @@ the actual aligned source timestamps in stacking order.
 The existing source, attribution, cadence, stale, observed/fetched time,
 partialCoverage, frame count/spacing/gap, site-reporting, source preference and
 fallback fields survive. `frameCount` counts candidate slots;
-`completeFrameCount` describes completed sets. The page's contiguous ready suffix
-reflects decoded coverage at its own current camera, not those server counters.
+`completeFrameCount` describes completed sets. The page's decoded inventory
+(including frames on either side of a gap) reflects decoded coverage at its own current camera, not those server counters.
 
 `frameSpacingSec` is median
 completed-set spacing, not a promise of fixed scan cadence. `observedAt` is
@@ -823,17 +823,38 @@ station accent is unchanged. Ramp colours are confined to echo data and its scal
 Playback draws pre-decoded ImageBitmaps onto one canvas. The visible canvas has
 no `src`; a tick neither fetches nor decodes. A monotonic requestAnimationFrame
 clock uses **350ms** steps and an **1100ms** newest hold. RainViewer short loops
-use `clamp(2400/frameCount,110,180) * 200/110` ms, scaling the existing formula.
+use `clamp(2400/frameCount,110,180) * 350/110` ms, scaling the existing formula.
 Each transition (including loop wrap) blends two real cached scans linearly for
 120ms: previous weight `1-a`, next weight `a`. Two `drawImage` calls per composite
 paint use nearest-neighbour sampling. Premultiplied additive composition preserves
 translucent echo alpha; ordinary source-over would not give a linear mixture.
-The blend is **temporal**, never spatial smoothing or a fabricated scan. Once the eight-frame inventory is ready, the loop read names the frame whose
-weight is ≥0.5 (next wins the tie). There is no rewind
-dip. Reduced motion hard-cuts and keeps the existing opt-in single sweep. A contiguous ready suffix
-ending at newest starts as soon as two frames are decoded and extends as older
-frames arrive. Play intent survives all acquisition/buffering fences; the second
-frame starts playback without another press.
+The blend is **temporal**, never spatial smoothing or a fabricated scan. The read
+names the frame whose weight is ≥0.5 (next wins the tie). Reduced motion uses
+hard cuts and an opt-in single sweep.
+
+**v4.6 playback state machine (page-only; no new wire fields):** `loaded` is the
+latest manifest window, `readyFrames` is every decoded composite in time order,
+and `cycle` is the fixed playable snapshot for the underway pass. A missing middle
+frame does not exclude older decoded scans. `good` names acquisition's newest;
+`current` names the drawn scan. Acquisition remains newest-first.
+
+| State / event | Display and next transition | Inventory / lifetime |
+| --- | --- | --- |
+| Cold acquisition | Paint newest as it decodes; start when `min(4, total)` scans are decoded (at least two to animate). | Count decoded composites, not tile coverage or a contiguous suffix. |
+| Playing / manifest or decode arrives | Preserve current scan, blend and deadline; finish the fixed cycle and its old-newest 1100ms hold. | Stage the latest window and decoded arrivals; retain composites with the same frame key. |
+| Wrap | Snapshot all currently decoded scans in the latest window; blend old-newest → slid-oldest, then progress to new-newest and its hold. | Late frames join here. Close aged-out composites once neither cycle, current nor blend needs them. |
+| Paused / manifest arrives | Keep the displayed scan; update the window silently. Resume from that scan if retained, otherwise wrap to the slid-oldest. | Retain a displayed aged-out composite until playback leaves it. |
+| Reduced motion | Same wrap adoption, no crossfade. One requested sweep stops at that cycle's newest; another Play uses the updated window. | Same decoded inventory and bitmap lifetime rules. |
+
+`AS OF` updates immediately on the manifest and always names the newest measurement,
+independent of playback or decode progress. Frame identity is render revision +
+source + the frame's own stamp + site-scan identities; it excludes the manifest's
+newest stamp. Source/revision are captured on each loaded frame so mutable manifest
+fallbacks cannot re-key retained composites. Aging removes only the composite;
+resident native tiles remain subject to the existing LRU. A wrap performs no fetch
+or decode; a resident-native new scan requires compositing only. Newly unavailable
+native inputs still require normal newest-first acquisition.
+
 The loop cluster at left:12px/bottom:12px keeps its box through play, clear,
 buffering, zoom, source swaps and frame staging; only an inactive radar tab or
 no radar hides it. The 220×1px rail is permanent. Its 2px marker has `display:none`
@@ -850,23 +871,22 @@ Every press changes the glyph and read immediately and gives a 120ms button
 opacity dip (suppressed for reduced motion). Transport, gesture, stale and
 visibility fences still control actual animation, independently of intent.
 
-With fewer than eight ready frames, or an incomplete displayed scan, the read
-is `Buffering · N of 8` for play intent or `Paused · N of 8` for paused intent,
-including zero frames. Playback can still run the contiguous ready suffix from
-two frames onward; the read retains the inventory count while history arrives.
-With all eight ready it follows the drawn `HH:MM · newest` / `HH:MM · −N min`,
-prefixed by `Paused · ` when paused. Complete clear history reads
-`No echoes · clear`, likewise prefixed when paused. The read has neither status
-role nor aria-live; the corner note describes pass progress and owns that live
-region and its existing 600ms suppression. The scan inventory retains its actual
-oldest time; no duplicate/padded scans. The browser retains up to eight scan
-composites and live newest tiles.
-
-With a complete inventory, station-local `HH:MM · −N min` / `HH:MM · newest`
-follows the drawn scan, with a hairline progress track. One supplied frame is static; clear data
-keeps the cluster visible and enabled. Hidden pages idle. Reduced
-motion shows newest with a Play button; a tap runs one complete sweep and stops
-on newest, with wrap dip and track transition disabled. The loop never changes `#rad-base`.
+Before the start threshold, the read is `Buffering · N of M` for play intent or
+`Paused · N of M` for paused intent, including zero. `M` is the actual window
+inventory (capped at eight), not a hard eight; six scans per hour count as six.
+Once playing, the read follows the drawn `HH:MM · newest` / `HH:MM · −N min`
+without returning to buffering when a new scan arrives. Paused scan reads have
+`Paused · ` prefixed. Complete clear history reads `No echoes · clear`, likewise
+prefixed when paused. The tick tracks position in the cycle's ready set; newly
+decoded frames change those positions only at the wrap. While paused it tracks
+the updated decoded set, clamped to the oldest position if the held scan aged out.
+The read has neither status role nor aria-live; the corner note describes pass
+progress and owns that live region and its existing 600ms suppression. No scans
+are duplicated or padded. The browser retains up to eight window composites,
+plus outgoing frames still needed by a cycle/display/blend; all count against the
+existing 40MiB graphics cap and are closed when released. One supplied frame is
+static; clear data keeps the cluster visible and enabled. Hidden pages idle.
+The loop never changes `#rad-base`.
 
 The loop never changes geography. Leaving the tab or hiding the document closes
 all echo bitmaps and cancels gesture/idle work; decoded basemap tiles remain.
@@ -895,8 +915,16 @@ acquisition acknowledgement and stale-versus-new refresh failures.
 `tests/verify_radar_v45.py`: all missing fractions, transparent acquired tiles,
 site/MRMS boundaries, RainViewer, unknown masks, cached composites, and delayed
 mid-acquisition stills in both themes must show no hatch element or pigment.
+`tests/verify_radar_v46.py` drives the real renderer with a deterministic monotonic
+clock in both themes: manifest during a blend, old/new newest holds, slid wrap,
+resident-native stamp advances with zero tile fetches, bitmap retention/closure,
+late middle decode, paused updates/resume, cold newest, read/tick/AS OF and reduced
+motion single sweeps. `tests/test_radar_v46.py` covers identity and readiness in
+the offline suite. Existing v4.4/v4.5 blend/pixel checks remain in force.
 `tests/verify_radar_picker.py` preserves the real touch, click, keyboard, immediate
-intent, 20-second polling-bound and integrated warm emitter-to-canvas checks;
+intent, 20-second polling-bound and integrated warm emitter-to-canvas checks,
+including a Region return that refills the decoded loop with zero additional
+native provider tile requests;
 first-frame captions describe the old source and acquire `switching` after 600ms. Independent instrumentation
 tracks canvas/bitmap allocation and draw calls. Headless wall times are reported,
 not treated as Pi acceptance. The cold-outage fixture has no measurement frames.

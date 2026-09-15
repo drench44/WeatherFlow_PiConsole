@@ -28,9 +28,9 @@ def test_radar_has_no_hatch_machinery_or_token():
 def test_incomplete_inventory_is_visible_even_with_partial_echoes(count, paused):
     script = function('radarLoopSync') + '''
 const nodes=new Map(),$=id=>{if(!nodes.has(id))nodes.set(id,{dataset:{},style:{},setAttribute(){},removeAttribute(){}});return nodes.get(id);};
-const frames=Array.from({length:COUNT},()=>({ready:true,hasEcho:true}));
-const radarView={data:{observedTs:1,frameCount:COUNT},active:true,paused:PAUSED,current:{ts:1,ready:true},nextAt:0,loaded:frames};
-const radarReady=()=>frames,radarReduced=()=>false,radarCouldLoop=()=>false,radarWake=()=>{},radarFrameLabel=()=>'17:12';
+const frames=Array.from({length:COUNT},()=>({ready:true,hasEcho:true,bitmap:{}}));
+const radarView={data:{observedTs:1,frameCount:COUNT},active:true,paused:PAUSED,current:{ts:1,ready:true,bitmap:{}},nextAt:0,loaded:frames,cycle:[]};
+const radarPlayback=()=>frames,radarPruneFrames=()=>{},radarReady=()=>frames,radarReduced=()=>false,radarCouldLoop=()=>false,radarWake=()=>{},radarFrameLabel=()=>'17:12';
 radarLoopSync();console.log(JSON.stringify($('rad-frame-time').textContent));
 '''.replace('COUNT', str(count)).replace('PAUSED', json.dumps(paused))
     result = subprocess.run(['node', '-e', script], check=True, capture_output=True, text=True)

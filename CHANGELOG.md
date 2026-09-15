@@ -7,6 +7,17 @@ to shared upstream code that the classic console benefits from too.
 ## 2026-09-14
 
 ### Radar
+- **Radar v4.6 slides the window at the wrap.** Manifest updates keep the running
+  scan, 120ms crossfade and deadline intact. After the old-newest 1100ms hold,
+  playback wraps to the slid window's oldest decoded scan and reaches the new
+  newest at the existing 350ms cadence. Decoded frames on both sides of a gap
+  count; late frames join at the next wrap. Playback now enforces the four-scan
+  start shown by the buffering read. Paused updates preserve the displayed scan;
+  cold acquisition shows newest immediately and AS OF follows the manifest.
+  Stable frame identities retain composites; aged-out bitmaps close after their
+  last display/blend use. Native acquisition order and cache reuse are preserved.
+  Deterministic both-theme checks cover wraps, zero resident-native refetches,
+  late decode, paused/cold states, reads and reduced-motion single sweeps.
 - **The loop breathes: 350 ms between scans, and the read tells the truth.** After 200 ms
   the user asked for a longer pause; scans now advance every 350 ms (newest hold and
   crossfade unchanged, hard cuts under reduced motion). The inventory read measured

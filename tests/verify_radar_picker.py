@@ -177,6 +177,21 @@ def engine_warm(browser,server,theme):
             assert elapsed<=1000 and not listings,(elapsed,listings)
             wait_ack(page,'site');assert not errors,errors
             print('ENGINE WARM',theme,json.dumps(dict(tapToSiteEchoMs=elapsed,listingRequests=len(listings),postMs=page.evaluate('pickerAudit.posts[0].at-pickerAudit.start'))),flush=True)
+            # v4.6: returning to the retained Region window may read/decode local
+            # PNGs, but must not acquire native provider tiles again.
+            page.wait_for_function("radarView.data.refresh.state==='idle'")
+            native_count=lambda:sum('mrms::' in u or 'ridge::' in u for _,u in calls)
+            before=native_count()
+            page.locator('#rad-src-mosaic').tap();wait_ack(page,'mosaic')
+            try:
+                page.wait_for_function("radarView.data.sourceMode==='mosaic' && radarReady().length>=2 && radarReady().length===radarView.loaded.filter(f=>f.levels[String(radarLevel())]).length && radarTileBusy===0 && radarTileQueue.length===0",timeout=20000)
+            except Exception:
+                print('REGION DEBUG',theme,page.evaluate('({data:radarView.data,ready:radarReady().length,job:radarCompositeJob&&{done:radarCompositeJob.done.size,total:radarCompositeJob.tiles.length},pending:radarTileBusy,absent:[...radarTileAbsent]})'),calls,errors,flush=True)
+                raise
+            after=native_count()
+            assert after==before,(before,after,calls)
+            assert not errors,errors
+            print('REGION NATIVE REUSE',theme,json.dumps(dict(before=before,after=after,decoded=page.evaluate('radarReady().length'))),flush=True)
         finally:
             enabled.clear();stop.set();worker.join(3)
             deadline=time.monotonic()+10
