@@ -2693,7 +2693,7 @@
   var RAD_MAX_LAT=85.05112878, RAD_CONTROLS='.rad-src,.rad-src-cap,.rad-legend,.rad-loop,.rad-zoom,.rad-recenter';
   var radarView={data:null,active:false,loaded:[],readyFrames:[],cycle:[],retired:[],started:false,current:null,good:null,paused:false,
     singleSweep:false,clear:false,refresh:{state:'idle'},legendKey:null,nextAt:0};
-  var radarCamera=null, radarSource={desired:null}, radarZoom={auto:true,requested:null};
+  var radarCamera=null, radarSource={desired:null}, radarZoom={auto:true};
   var radarIntent={localSeq:0,ready:false,timer:null,postedAt:0};
   var radarGesture={state:'idle',pointers:new Map(),samples:[],idleTimer:null,animation:null,inertia:null};
   var radarBaseStyle={}, radarGeoTiles=new Map(), radarGeoQueue=[], radarGeoBusy=0, radarReserved=0, radarGeoPending=new Set(), radarGeoAbsent=new Map();
@@ -2839,7 +2839,7 @@
   function radarAcceptSource(){radarView.windowKey=null;radarView.blend=null;
     var next=radarView.pendingSource.data;radarView.pendingSource=null;
     radarView.loaded.concat(radarView.retired).forEach(f=>{if(f.bitmap)f.bitmap.close();});radarView.loaded=[];radarView.readyFrames=[];radarView.cycle=[];radarView.retired=[];radarView.started=false;radarView.nextAt=0;radarView.good=radarView.current=null;radarCompositeJob=null;
-    radarView.acceptingSource=true;renderRadar({radar:next});radarView.acceptingSource=false;radarCamera.zoom=clamp(radarCamera.zoom,next.zoomMin,next.zoomMax);radarCameraDirty=true;radarBaseDirty=true;radarEchoDirty=true;radarWake();
+    radarView.acceptingSource=true;renderRadar({radar:next});radarView.acceptingSource=false;radarCameraDirty=true;radarBaseDirty=true;radarEchoDirty=true;radarWake();
   }
   function radarQueueTiles() {
     radarTileQueue=[];if(!radarView.active||!radarCamera||!radarView.good)return;
@@ -3015,9 +3015,9 @@
   function radarBegin(){radarView.blend=null;clearTimeout(radarIntent.timer);radarGesture.animation=null;radarGesture.inertia=null;radarGesture.state='gesturing';radarView.nextAt=0;radarCompositeJob=null;radarIdleSync(true);}
   function radarSettle(){radarGesture.state='idle';radarGesture.animation=null;radarGesture.inertia=null;radarCameraSet(radarClampCamera(radarCamera));radarBaseDirty=true;radarCameraRevision++;radarCompositeJob=null;
     radarView.cycle=[];radarView.started=false;radarView.current=radarView.good;radarPruneFrames();radarView.loaded.forEach(f=>{if(f.bitmap){f.bitmap.close();delete f.bitmap;}f.ready=false;delete f.compositeFailed;});radarUpdateReady();
-    try{sessionStorage.setItem('radarCamera',JSON.stringify({...radarCamera,auto:radarZoom.auto,requested:radarZoom.requested}));}catch(e){}radarOverlayBuild();radarGeoRequest();radarQueueTiles();radarZoomRender();radarPostIntent();radarIdleSync(true);radarMemory();}
+    try{sessionStorage.setItem('radarCamera',JSON.stringify({...radarCamera,auto:radarZoom.auto}));}catch(e){}radarOverlayBuild();radarGeoRequest();radarQueueTiles();radarZoomRender();radarPostIntent();radarIdleSync(true);radarMemory();}
   function radarEase(target,duration,focal){radarBegin();if(radarReduced()){radarCameraSet(target);radarSettle();return;}radarGesture.animation={from:{...radarCamera},target,duration,start:performance.now(),focal};radarWake();}
-  function radarZoomChange(step,focal={x:478,y:245}){if(!radarView.active||!radarCamera)return;var r=radarView.data,z=step===0?clamp(r.zoomAutoLevel,r.zoomMin,r.zoomMax):clamp(Math.round(radarCamera.zoom)+step,r.zoomMin,r.zoomMax);radarZoom.auto=step===0;radarZoom.requested=step===0?null:z;radarEase(radarFocal(radarCamera,z,focal),160,focal);}
+  function radarZoomChange(step,focal={x:478,y:245}){if(!radarView.active||!radarCamera)return;var r=radarView.data,z=step===0?clamp(r.zoomAutoLevel,r.zoomMin,10):clamp(Math.round(radarCamera.zoom)+step,r.zoomMin,10);radarZoom.auto=step===0;radarEase(radarFocal(radarCamera,z,focal),160,focal);}
   function radarRecenter(){if(radarView.active&&radarCamera)radarEase({...radarView.data.center,zoom:radarCamera.zoom},280);}
   function radarIdleSync(reset){if(reset){clearTimeout(radarGesture.idleTimer);radarGesture.idleTimer=null;}if(!radarView.active||document.hidden||!radarCamera)return;var home=radarView.data.center,away=Math.hypot(radarCamera.lat-home.lat,radarCamera.lon-home.lon)>1e-8;$('rad-recenter').hidden=!away;if(away&&radarGesture.state==='idle'&&!radarGesture.idleTimer)radarGesture.idleTimer=setTimeout(radarRecenter,90000);}
   function radarGestureCancel(){
@@ -3025,13 +3025,13 @@
     for(var id of ids)if($('rad-plate').hasPointerCapture(id))$('rad-plate').releasePointerCapture(id);
     radarGesture.animation=null;radarGesture.inertia=null;radarGesture.pinchEnded=false;radarGesture.state='idle';
     clearTimeout(radarGesture.idleTimer);radarGesture.idleTimer=null;
-    if(moved&&radarCamera&&radarView.data){var z=clamp(Math.round(radarCamera.zoom),radarView.data.zoomMin,radarView.data.zoomMax);radarCameraSet(radarFocal(radarCamera,z,radarGesture.focal||{x:478,y:245}));radarSettle();}
+    if(moved&&radarCamera&&radarView.data){var z=clamp(Math.round(radarCamera.zoom),radarView.data.zoomMin,10);radarCameraSet(radarFocal(radarCamera,z,radarGesture.focal||{x:478,y:245}));radarSettle();}
   }
   function radarPointer(e){var b=$('rad-plate').getBoundingClientRect();return {x:(e.clientX-b.left-$('rad-plate').clientLeft)*956/$('rad-plate').clientWidth,y:(e.clientY-b.top-$('rad-plate').clientTop)*490/$('rad-plate').clientHeight};}
   function radarPointerMode(){var g=radarGesture,pts=[...g.pointers.values()];g.start={camera:{...radarCamera},point:pts[0]};g.mode=pts.length>1?'pinch':'pan';g.samples=[{...pts[0],t:performance.now()}];if(pts.length>1){g.start.distance=Math.hypot(pts[1].x-pts[0].x,pts[1].y-pts[0].y);g.start.mid={x:(pts[0].x+pts[1].x)/2,y:(pts[0].y+pts[1].y)/2};}}
   $('rad-plate').addEventListener('pointerdown',e=>{if(!radarView.active||!radarCamera||e.target.closest(RAD_CONTROLS)||radarGesture.pointers.size>=2||(e.pointerType==='mouse'&&e.button!==0))return;e.preventDefault();radarBegin();radarGesture.pointers.set(e.pointerId,radarPointer(e));try{$('rad-plate').setPointerCapture(e.pointerId);}catch(e){}radarPointerMode();});
   $('rad-plate').addEventListener('pointermove',e=>{var g=radarGesture;if(!g.pointers.has(e.pointerId))return;e.preventDefault();g.pointers.set(e.pointerId,radarPointer(e));var pts=[...g.pointers.values()],st=g.start;
-    if(g.mode==='pinch'){var mid={x:(pts[0].x+pts[1].x)/2,y:(pts[0].y+pts[1].y)/2},z=clamp(st.camera.zoom+Math.log2(Math.hypot(pts[1].x-pts[0].x,pts[1].y-pts[0].y)/Math.max(1,st.distance)),radarView.data.zoomMin,radarView.data.zoomMax);g.focal=mid;radarZoom.auto=false;radarZoom.requested=Math.round(z);radarCameraSet(radarFocal(st.camera,z,st.mid,mid));}
+    if(g.mode==='pinch'){var mid={x:(pts[0].x+pts[1].x)/2,y:(pts[0].y+pts[1].y)/2},z=clamp(st.camera.zoom+Math.log2(Math.hypot(pts[1].x-pts[0].x,pts[1].y-pts[0].y)/Math.max(1,st.distance)),radarView.data.zoomMin,10);g.focal=mid;radarZoom.auto=false;radarCameraSet(radarFocal(st.camera,z,st.mid,mid));}
     else {var p=radarWorldPoint(st.camera.lat,st.camera.lon,st.camera.zoom),q=radarWorldInverse(p[0]-(pts[0].x-st.point.x),p[1]-(pts[0].y-st.point.y),st.camera.zoom);radarCameraSet(radarClampCamera({...q,zoom:st.camera.zoom},true));var now=performance.now();g.samples.push({...pts[0],t:now});g.samples=g.samples.filter(p=>now-p.t<=60);}
   },{passive:false});
   $('rad-plate').addEventListener('pointerup',e=>{var g=radarGesture;if(!g.pointers.has(e.pointerId))return;var pinch=g.mode==='pinch';g.pointers.delete(e.pointerId);if($('rad-plate').hasPointerCapture(e.pointerId))$('rad-plate').releasePointerCapture(e.pointerId);
@@ -3050,10 +3050,10 @@
   document.addEventListener('visibilitychange',()=>{if(document.hidden){radarGestureCancel();radarRelease();}else if(radarView.active)radarActivate();});
   window.matchMedia('(prefers-reduced-motion: reduce)').addEventListener('change',()=>{radarView.blend=null;radarView.singleSweep=false;radarView.current=radarView.good;radarEchoDirty=true;if(radarGesture.inertia)radarSettle();radarLoopSync();});
   function radarPostIntent(immediate=false){clearTimeout(radarIntent.timer);radarIntent.postedAt=Date.now();radarIntent.timer=setTimeout(()=>{if(radarGesture.state==='idle'){radarIntent.generation=(radarIntent.generation||0)+1;radarIntent.ready=true;poll(immediate);}},immediate?0:120);}
-  function radarZoomRender(){var r=radarView.data,rail=$('rad-zoom');rail.hidden=!r;if(!r||!radarCamera)return;var z=Math.round(radarCamera.zoom);rail.dataset.mode=radarZoom.auto?'auto':'manual';rail.dataset.state='confirmed';rail.setAttribute('aria-busy','false');$('rad-zoom-mode').textContent=radarZoom.auto?'Auto':String(z);$('rad-zoom-reset').hidden=radarZoom.auto;$('rad-zoom-out').disabled=z<=r.zoomMin;$('rad-zoom-in').disabled=z>=r.zoomMax;radarView.zoomNote=r.zoomCapped&&r.zoomDesired>r.zoomMax?'Set closer than '+r.zoomSource+' reaches — showing its closest.':z>=r.zoomMax?'Closest view for '+r.zoomSource:'';radarNoteRender();}
+  function radarZoomRender(){var r=radarView.data,rail=$('rad-zoom');rail.hidden=!r;if(!r||!radarCamera)return;var z=Math.round(radarCamera.zoom);rail.dataset.mode=radarZoom.auto?'auto':'manual';rail.dataset.state='confirmed';rail.setAttribute('aria-busy','false');$('rad-zoom-mode').textContent=radarZoom.auto?'Auto':String(z);$('rad-zoom-reset').hidden=radarZoom.auto;$('rad-zoom-out').disabled=z<=r.zoomMin;$('rad-zoom-in').disabled=z>=10;radarView.zoomNote=z>r.zoomMax?r.zoomSource+' reaches zoom '+r.zoomMax+' — scaled to this view.':'';radarNoteRender();}
   function radarNoteRender(){var r=radarView.data,f=radarView.refresh,note=$('rad-note'),copy='';clearTimeout(radarIntent.noteTimer);if(!r)return;var elapsed=Date.now()-radarIntent.postedAt;if(elapsed<600){note.dataset.shown='false';radarIntent.noteTimer=setTimeout(radarSourceRender,601-elapsed);return;}if(radarSource.refused)copy="Couldn't switch · showing "+radarSourceSubject(r).subject;else if(f.state==='newest')copy='Refreshing · newest frame';else if(f.state==='history')copy='Refreshing · frame '+f.frameIndex+' of '+f.frameTotal;else if(f.state==='failed'&&r.observedTs!=null&&Date.now()/1000-r.observedTs>2*r.cadenceSec)copy="Couldn't refresh · showing "+radarFrameLabel(radarView.current||{});if(!copy)copy=radarView.zoomNote||'';if(!copy&&r.sourceFallback==='site-zoom-floor'&&radarSource.desired!=='mosaic'){var site=(r.sources||[]).find(s=>s.mode==='site');if(site&&site.siteId)copy=site.siteId+' resumes at zoom '+r.siteResumeZoom;}note.textContent=copy;note.dataset.shown=String(!!copy);}
   function radarState(){var r=radarView.data;if(!r)return;var f=radarView.current,state=r.stale||r.refresh&&r.refresh.state==='failed'?'stale':radarView.clear?'clear':'current';$('rad-status').dataset.state=state;$('rad-plate').dataset.state=state;var status=$('rad-status');status.replaceChildren(document.createTextNode('As of '));var at=document.createElement('span');at.id='rad-asof';at.textContent=r.observedAt||'—';status.append(at);var age=r.ageSec||0;if(age>=.8*r.staleSec)status.append(document.createTextNode(' · '+Math.floor(age/60)+' min old'));}
-  function radarActivate(){if(!radarView.data)return;radarMetrics.activationAt=performance.now();radarMetrics.firstPaintMs=null;if(!radarCamera){var r=radarView.data,saved=null;try{saved=JSON.parse(sessionStorage.getItem('radarCamera'));}catch(e){}radarCamera=saved&&isNum(saved.lat)&&isNum(saved.lon)&&isNum(saved.zoom)?{lat:clamp(saved.lat,-RAD_MAX_LAT,RAD_MAX_LAT),lon:clamp(saved.lon,-180,180),zoom:clamp(saved.zoom,r.zoomMin,r.zoomMax)}:{...r.center,zoom:clamp(r.zoomAuto?r.zoomAutoLevel:r.zoomDesired,r.zoomMin,r.zoomMax)};radarZoom.auto=saved&&typeof saved.auto==='boolean'?saved.auto:r.zoomAuto;radarZoom.requested=radarZoom.auto?null:(saved?.requested??r.zoomDesired??radarCamera.zoom);radarCamera=radarClampCamera(radarCamera);}
+  function radarActivate(){if(!radarView.data)return;radarMetrics.activationAt=performance.now();radarMetrics.firstPaintMs=null;if(!radarCamera){var r=radarView.data,saved=null;try{saved=JSON.parse(sessionStorage.getItem('radarCamera'));}catch(e){}radarCamera=saved&&isNum(saved.lat)&&isNum(saved.lon)&&isNum(saved.zoom)?{lat:clamp(saved.lat,-RAD_MAX_LAT,RAD_MAX_LAT),lon:clamp(saved.lon,-180,180),zoom:clamp(saved.zoom,r.zoomMin,10)}:{...r.center,zoom:clamp(r.zoomAuto?r.zoomAutoLevel:r.zoomDesired,r.zoomMin,10)};radarZoom.auto=saved&&typeof saved.auto==='boolean'?saved.auto:r.zoomAuto;radarCamera=radarClampCamera(radarCamera);}
     if(!Object.keys(radarBaseStyle).length)radarResolveStyle();radarCameraDirty=true;radarOverlayBuild();radarGeoRequest();radarPreload(radarView.data);radarZoomRender();radarPostIntent();radarWake();
     if(!radarSiteTable.length)fetch(radarView.data.geo.sites).then(r=>r.ok?r.json():[]).then(s=>{radarSiteTable=s.filter(p=>/^[A-Z0-9]{4}$/.test(p.id)&&isNum(p.lat)&&isNum(p.lon));if(radarGesture.state==='idle')radarOverlayBuild();radarSourceRender();}).catch(()=>{});
   }
@@ -3072,7 +3072,7 @@
     }
     if(changed&&!radarView.acceptingSource){radarRelease();if(JSON.stringify(old.center)!==JSON.stringify(r.center)){radarCamera=null;try{sessionStorage.removeItem('radarCamera');}catch(e){}}}
     if(old&&old.geo&&r.geo&&old.geo.version!==r.geo.version){radarGeoClear();radarBaseDirty=true;}
-    radarView.data=r;if(radarCamera&&radarGesture.state==='idle'&&old&&(old.zoomMax!==r.zoomMax||old.sourceId!==r.sourceId)){var effective=clamp(radarZoom.auto?r.zoomAutoLevel:radarZoom.requested??radarCamera.zoom,r.zoomMin,r.zoomMax);if(effective!==radarCamera.zoom){radarCamera.zoom=effective;radarSettle();}}radarView.refresh=r.refresh||{state:'idle'};
+    radarView.data=r;radarView.refresh=r.refresh||{state:'idle'};
     if(radarSource.desired&&(r.sourcePref||r.sourceMode)===radarSource.desired){
       var showing=r.sourceMode===radarSource.desired,busy=['newest','history'].includes(radarView.refresh.state);
       if(showing||!busy){radarSource.refused=showing?false:radarSource.desired;radarSource.desired=null;}
@@ -3090,7 +3090,7 @@
     if(!radarSource.desired&&radarView.data.sourceMode===mode)return;
     radarGestureCancel();radarSource.refused=false;radarSource.lastRefresh=radarView.refresh.state;radarSource.desired=mode;radarSource.fastUntil=Date.now()+20000;
     if(radarView.pendingSource){radarView.pendingSource=null;radarView.transition=(radarView.transition||0)+1;}
-    if(mode==='site'&&radarCamera.zoom<7){radarZoom.auto=false;radarZoom.requested=7;radarCameraSet({...radarCamera,zoom:7});radarSettle();}
+    if(mode==='site'&&radarCamera.zoom<7){radarZoom.auto=false;radarCameraSet({...radarCamera,zoom:7});radarSettle();}
     radarPostIntent(true);radarSourceRender();radarNoteRender();
   }
   ['mosaic','site'].forEach(mode=>{var b=$('rad-src-'+mode);
@@ -3287,14 +3287,10 @@
     var ack = reportRender; reportRender = false;
     var radarActive = $("s-radar").classList.contains("active") && !document.hidden;
     var sentIntentGeneration=radarIntent.generation,zoomQuery = "", posting=radarIntent.ready && radarActive && radarGesture.state==='idle' && radarCamera;
-    if(posting){var r=radarView.data,c=radarCamera;
-      // A wall-clock-derived monotonic generation survives reloads without a
-      // pixel acknowledgement. The durable grammar is deliberately unchanged.
-      var seq=Math.max(radarIntent.localSeq+1,Math.floor(Date.now()/10));radarIntent.localSeq=seq;
-      zoomQuery='&radarZoom='+(radarZoom.auto?'auto':(radarZoom.requested??Math.round(c.zoom)))+'&radarSource='+(radarSource.desired||r.sourcePref||'mosaic')+
-        '&radarCenter='+encodeURIComponent(c.lat.toFixed(10)+','+(((c.lon+180)%360+360)%360-180).toFixed(10))+'&radarSeq='+seq;
-    }
-    var geoQuery=radarActive&&radarCamera?'&radarGeoZoom='+radarLevel()+'&radarGeoCenter='+encodeURIComponent(radarCamera.lat.toFixed(10)+','+(((radarCamera.lon+180)%360+360)%360-180).toFixed(10)):'';
+    // Every settled camera report is intent, including restored and activity-only
+    // camera changes. No second zoom/requested/auto value travels to the engine.
+    zoomQuery=radarActive&&radarCamera?'&radarSource='+(radarSource.desired||radarView.data.sourcePref||'mosaic'):'';
+    var geoQuery=radarActive&&radarCamera?'&radarGeoZoom='+clamp(Math.round(radarCamera.zoom),4,10)+'&radarGeoCenter='+encodeURIComponent(radarCamera.lat.toFixed(10)+','+(((radarCamera.lon+180)%360+360)%360-180).toFixed(10)):'';
     fetch("wx.json?_=" + started + (ack ? "&r=1" : "") + (radarActive ? "&view=radar&radarTheme="+radarBaseStyle.theme+"&radarMoving="+(radarGesture.state!=='idle'?1:0) + geoQuery + zoomQuery : ""), opts)
       .then(function (r) {
         if (!r.ok) throw new Error("HTTP " + r.status);

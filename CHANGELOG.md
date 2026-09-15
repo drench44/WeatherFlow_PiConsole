@@ -4,6 +4,24 @@ Changes in this fork's Almanac work, newest first. The upstream WeatherFlow
 PiConsole keeps its own release notes; entries under **Core** below are fixes
 to shared upstream code that the classic console benefits from too.
 
+## 2026-09-15
+
+### Radar
+- **Radar v5.3 uses one settled camera intent.** Activity reports supply runtime
+  zoom and centre; durable zoom follows after a debounce and is used only for
+  cold start. Stepper, pinch and restored cameras share this path. Provider zoom
+  caps select native tile resolution without moving the camera.
+- **Connection setup is bounded per host.** Hedges reserve warm pooled sockets
+  and cannot open connections. At most two connections perform TCP/TLS setup at
+  once; shared TLS contexts reuse session tickets. Client setup/pool timeouts and
+  cancelled attempts do not lower host health. Losing more than half of issued
+  hedges in 60 seconds suspends hedging for five minutes. A tile retains its
+  two-attempt, six-second total budget, including sequential stale-socket recovery.
+- **Source transitions retain the displayed loop.** Three consecutive provider
+  failures are required for fallback; local failures cannot trigger it. A new
+  source builds at least four complete frames before publication, and recovery
+  waits for a five-minute dwell. Every source switch logs its reason.
+
 ## 2026-09-14
 
 ### Radar

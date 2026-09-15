@@ -5,6 +5,7 @@ import socket
 import threading
 import time
 from urllib.parse import urlsplit
+from lib.radar_http import LocalTransportError
 
 
 class CircuitOpen(OSError):
@@ -16,9 +17,13 @@ class AttemptCancelled(OSError):
 
 
 class Attempt:
-    def __init__(self, fresh=False, hedged=False):
+    def __init__(self, fresh=False, hedged=False, warm_lease=None):
+        self.warm_lease = warm_lease
         self.fresh = fresh
         self.hedged = hedged
+        self.issued = False
+        self.waiting_response = False
+        self.discarded = False
         self.first_byte = threading.Event()
         self.cancelled = threading.Event()
         self.sock = None
@@ -33,8 +38,11 @@ class Attempt:
             self.check()
             self.sock = sock
 
-    def cancel(self):
+    def cancel(self, discarded=True):
+        if self.warm_lease is not None:
+            self.warm_lease.close()
         with self.lock:
+            self.discarded = discarded
             self.cancelled.set()
             if self.sock is not None:
                 try:
@@ -52,8 +60,34 @@ class HostHealth:
         self.hosts = {}
         self.sources = {}
         self.hedges = self.retries = self.discarded = 0
+        self.hedge_events = deque()
+        self.hedge_until = 0
+        self.local_failures = 0
         self.last_success = None
         self.last_error = None
+
+    def hedge_allowed(self):
+        with self.lock:
+            now = time.monotonic()
+            while self.hedge_events and now-self.hedge_events[0][0] >= self.WINDOW:
+                self.hedge_events.popleft()
+            issued = sum(kind == 'issued' for _, kind in self.hedge_events)
+            lost = sum(kind == 'discarded' for _, kind in self.hedge_events)
+            if now >= self.hedge_until and issued and lost / issued > .5:
+                self.hedge_until = now + 300
+                self.hedge_events.clear()
+            return now >= self.hedge_until
+
+    def issue_hedge(self):
+        with self.lock:
+            self.hedges += 1
+            self.hedge_events.append((time.monotonic(), 'issued'))
+
+    def discard_hedges(self, count):
+        with self.lock:
+            self.discarded += count
+            self.hedge_events.extend((time.monotonic(), 'discarded') for _ in range(count))
+            self.hedge_allowed()
 
     def _host(self, source, url):
         host = urlsplit(url).netloc
@@ -87,9 +121,16 @@ class HostHealth:
 
     def record(self, source, url, success, error=None, probe=False):
         with self.lock:
+            if isinstance(error, AttemptCancelled):
+                return
             s = self._host(source, url)
             if error is not None:
                 self.last_error = str(error) or type(error).__name__
+            if isinstance(error, LocalTransportError):
+                self.local_failures += 1
+                if probe:
+                    s['probe'] = False
+                return
             if probe:
                 s['probe'] = False
                 s['until'] = 0 if success else time.monotonic()+self.COOLDOWN
@@ -128,44 +169,50 @@ class HostHealth:
                 successRate60s=sum(samples)/len(samples) if samples else None,
                 hedges=self.hedges, retries=self.retries, discardedHedges=self.discarded,
                 breaker='open' if 'open' in states else 'half' if 'half' in states else 'closed',
-                lastError=self.last_error, hosts=hosts)
+                lastError=self.last_error, localFailures=self.local_failures,
+                hedgeSuspendedSec=max(0, self.hedge_until-time.monotonic()), hosts=hosts)
 
 
 def tile_race(request, deadline, hedge, claim_hedge, discarded):
     """At most two attempts; winning bytes alone leave this function."""
     controls = [Attempt()]
-    with ThreadPoolExecutor(max_workers=2, thread_name_prefix='radar-attempt') as pool:
-        pending = {pool.submit(request, controls[0], False)}
-        started = time.monotonic()
-        second = False
-        error = None
-        try:
-            while pending:
-                remaining = deadline-time.monotonic()
-                if remaining <= 0:
-                    raise TimeoutError('radar tile race exceeded deadline')
-                due = started+hedge-time.monotonic() if hedge is not None and not second else remaining
-                done, pending = wait(pending, timeout=max(0, min(remaining, due)), return_when=FIRST_COMPLETED)
-                for future in done:
-                    try:
-                        result = future.result()
-                        if pending:
-                            discarded(len(pending))
-                        return result
-                    except Exception as caught:
-                        error = caught
-                if not second:
-                    failed = not pending
-                    eligible = hedge is not None and not controls[0].first_byte.is_set()
-                    if failed or (eligible and claim_hedge()):
-                        # Either kind consumes the tile's sole second attempt;
-                        # a failed hedge never creates a third request.
-                        second = True
-                        controls.append(Attempt(fresh=True, hedged=not failed))
-                        pending.add(pool.submit(request, controls[-1], True))
-                    elif hedge is not None:
-                        hedge = None
-            raise error
-        finally:
-            for control in controls:
-                control.cancel()
+    pool = ThreadPoolExecutor(max_workers=2, thread_name_prefix='radar-attempt')
+    pending = {pool.submit(request, controls[0], False): controls[0]}
+    started = time.monotonic()
+    second = False
+    error = None
+    winner = None
+    try:
+        while pending:
+            remaining = deadline-time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError('radar tile race exceeded deadline')
+            due = started+hedge-time.monotonic() if hedge is not None and not second else remaining
+            done, _ = wait(pending, timeout=max(0, min(remaining, due)), return_when=FIRST_COMPLETED)
+            for future in done:
+                control = pending.pop(future)
+                try:
+                    result = future.result()
+                    winner = control
+                    return result
+                except Exception as caught:
+                    error = caught
+            if not second:
+                failed = not pending
+                eligible = hedge is not None and not controls[0].first_byte.is_set()
+                lease = claim_hedge() if eligible and not failed else None
+                if failed or lease:
+                    second = True
+                    control = Attempt(fresh=failed, hedged=not failed, warm_lease=lease)
+                    controls.append(control)
+                    pending[pool.submit(request, control, True)] = control
+                elif hedge is not None:
+                    hedge = None
+        raise error
+    finally:
+        for control in controls:
+            control.cancel(discarded=winner is not None)
+        pool.shutdown(wait=True)
+        # Admission can race the primary's completion. Count only after every
+        # attempt drains, so a late admitted hedge cannot escape loss accounting.
+        discarded(sum(c.hedged and c.issued and c is not winner for c in controls))

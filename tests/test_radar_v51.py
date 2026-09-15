@@ -83,5 +83,5 @@ def test_health_separates_hedge_and_failure_retry_in_same_batch(engine, origin):
     health = engine._radar_health.snapshot()
     assert len(result) == 3
     assert health['hedges'] == 1 and health['retries'] == 1
-    assert health['discardedHedges'] == 1
+    assert health['discardedHedges'] == 0  # the hedge won
     assert len(origin.requests) == len(engine._radar_request_times) == 5

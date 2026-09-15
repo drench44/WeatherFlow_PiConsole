@@ -292,12 +292,15 @@ def test_primary_transport_failure_falls_back_in_new_geometry_then_recovers(make
     hybrid.calls.clear()
     # Metadata outages are discovered by scheduled validation; warm intents
     # deliberately make no metadata request. Tile outages still exercise reuse.
-    emitter._do_radar(intent_triggered=False if phase == 'metadata' else True)
+    hybrid.view()
+    for _ in range(3):
+        emitter._do_radar(intent_triggered=False if phase == 'metadata' else True)
     assert emitter._radar_result.source_id == 'rainviewer'
     assert emitter._radar_refresh['state'] == 'idle'
     assert not emitter._radar_negative and any(c[0] == 'rainviewer' for c in hybrid.calls)
     hybrid.failure = None
-    hybrid.mono += 30  # a tile outage may open the shared IEM host circuit
+    hybrid.mono += 301  # source dwell, also beyond any host circuit
+    hybrid.latest += 240
     emitter._do_radar()
     assert emitter._radar_result.zoom == 7 and emitter._radar_result.source_id == 'iem-mrms-lcref'
     assert not emitter._radar_transport_failures
@@ -310,9 +313,13 @@ def test_repeated_transport_outage_falls_back_and_recovers(make_emitter, hybrid)
     def fail(req, timeout):
         if 'iastate.edu' in req.full_url: raise ConnectionResetError('outage')
     hybrid.failure = fail
-    emitter._do_radar()  # fallback has a chance in the first failed pass
+    hybrid.view()
+    for _ in range(3):
+        emitter._do_radar(intent_triggered=False)
     assert emitter._radar_result.source_id == 'rainviewer'
     hybrid.failure = None
+    hybrid.mono += 301
+    hybrid.latest += 240
     emitter._do_radar()
     assert emitter._radar_result.source_id == 'iem-mrms-lcref'
 

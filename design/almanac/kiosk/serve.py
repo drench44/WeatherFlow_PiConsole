@@ -237,6 +237,50 @@ def _write_radar_intent(params):
         except OSError: pass
 
 
+_camera_persist_timer = None
+
+
+def _write_settled_camera(activity, params):
+    """Activity is the only live camera input; durable zoom is an output."""
+    global _camera_persist_timer
+    if activity.get('moving') or 'zoom' not in activity or 'center' not in activity:
+        return
+    old = _read_radar_intent()
+    sources = params.get('radarSource', [])
+    source = sources[0] if len(sources) == 1 and sources[0] in ('site', 'mosaic') else old.get('source')
+    if source is None:
+        try:
+            source = open(os.path.join(os.path.dirname(DATA), 'radar_source')).read().strip()
+        except OSError:
+            source = 'mosaic'
+    if source not in ('site', 'mosaic'):
+        source = 'mosaic'
+    record = dict(zoom=activity['zoom'], center=activity['center'], source=source, camera=True)
+    if all(old.get(k) == v for k, v in record.items()):
+        return
+    record['seq'] = min(999999999999, max(old['seq']+1, int(time.time()*100)))
+    marker = os.path.join(os.path.dirname(DATA), 'radar_intent')
+    tmp = marker+'.tmp'
+    try:
+        with open(tmp, 'w') as stream:
+            json.dump(record, stream)
+        os.replace(tmp, marker)
+    except OSError:
+        return
+    # Runtime intent is immediate. SD-card persistence follows a settled quiet
+    # interval; a newer report cancels the pending older write.
+    if _camera_persist_timer is not None:
+        _camera_persist_timer.cancel()
+    def persist():
+        with _count_lock:
+            if _read_radar_intent() == record:
+                _write_radar_zoom([str(record['zoom'])])
+                _write_radar_source([record['source']])
+    _camera_persist_timer = threading.Timer(.25, persist)
+    _camera_persist_timer.daemon = True
+    _camera_persist_timer.start()
+
+
 def _radar_activity(params):
     record=dict(at=time.time(),theme=params['radarTheme'][0],moving=params.get('radarMoving')==['1'])
     centers,zooms=params.get('radarGeoCenter',[]),params.get('radarGeoZoom',[])
@@ -271,14 +315,17 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 if self.client_address[0] in LOOPBACK:
                     _write_radar_viewing(viewed_radar)
                     params = parse_qs(query, keep_blank_values=True)
-                    if viewed_radar and params.get('radarTheme',[''])[0] in ('paper','night'):
+                    camera_report = viewed_radar and params.get('radarTheme',[''])[0] in ('paper','night')
+                    if camera_report:
                         marker=os.path.join(os.path.dirname(DATA),'radar_activity');tmp=marker+'.tmp'
                         try:
                             with open(tmp,'w') as f:json.dump(_radar_activity(params),f)
                             os.replace(tmp,marker)
                         except OSError:pass
-                    if 'radarSeq' in params:
-                        _write_radar_intent(params)
+                    if camera_report:
+                        _write_settled_camera(_radar_activity(params), params)
+                    elif not _read_radar_intent().get('camera') and 'radarSeq' in params:
+                        _write_radar_intent(params)  # older pages, until the first camera report
                     elif set(_read_radar_intent()) == {'seq'}:
                         _write_radar_zoom(params.get('radarZoom', []))
                         _write_radar_center(params.get('radarCenter', []))

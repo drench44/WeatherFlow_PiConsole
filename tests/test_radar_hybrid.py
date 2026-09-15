@@ -100,10 +100,12 @@ def test_primary_first_fallback_and_recovery(make_emitter, hybrid):
         if 'iastate.edu' in req.full_url:
             raise urllib.error.URLError('IEM down')
     hybrid.failure = fail
-    emitter = make_emitter(); emitter._do_radar()
+    emitter = make_emitter()
+    for _ in range(3): emitter._do_radar(intent_triggered=False)
     assert emitter._radar_result.source_id == 'rainviewer'
-    assert [c[0] for c in hybrid.calls[:2]] == ['iem', 'rainviewer']
+    assert [c[0] for c in hybrid.calls[:3]] == ['iem']*3
     hybrid.failure = None; hybrid.calls.clear()
+    hybrid.mono += 301; hybrid.latest += 240
     emitter._do_radar()
     assert emitter._radar_result.source_id == 'iem-mrms-lcref'
     assert all(c[0] == 'iem' for c in hybrid.calls)
@@ -127,7 +129,7 @@ def test_partial_iem_history_wins_and_backprobe_rolls_midnight(make_emitter, hyb
 
 
 @pytest.mark.parametrize('bad', ['stale', 'future', 'odd', 'schema', 'red', 'corrupt', 'size', 'missing'])
-def test_unusable_primary_falls_back_same_cycle(make_emitter, hybrid, bad):
+def test_unusable_primary_falls_back_after_three_passes(make_emitter, hybrid, bad):
     if bad == 'stale': hybrid.latest -= 7200
     if bad == 'future': hybrid.latest += 7200
     if bad == 'odd': hybrid.latest -= 60
@@ -141,7 +143,8 @@ def test_unusable_primary_falls_back_same_cycle(make_emitter, hybrid, bad):
         if bad == 'missing' and req.get_method() == 'HEAD':
             raise urllib.error.HTTPError(req.full_url, 404, 'missing archive', {}, None)
     hybrid.failure = fail
-    emitter = make_emitter(); emitter._do_radar()
+    emitter = make_emitter()
+    for _ in range(3): emitter._do_radar(intent_triggered=False)
     assert emitter._radar_result.source_id == 'rainviewer' and emitter._radar_available
     assert hybrid.calls[0][0] == 'iem' and any(c[0] == 'rainviewer' for c in hybrid.calls)
 
@@ -233,16 +236,16 @@ def test_negative_archive_cache_and_expiry(make_emitter, hybrid):
 
 
 @pytest.mark.parametrize('retry', ['180', 'Sun, 13 Sep 2026 00:09:00 GMT'])
-def test_429_cooldown_honored_fallback_then_primary(make_emitter, hybrid, retry):
+def test_429_cooldown_retains_source_until_retry(make_emitter, hybrid, retry):
     def fail(req, _):
         if 'iastate.edu' in req.full_url:
             raise urllib.error.HTTPError(req.full_url, 429, 'slow down', {'Retry-After': retry}, None)
     hybrid.failure = fail
     emitter = make_emitter(); emitter._do_radar()
-    assert emitter._radar_result.source_id == 'rainviewer'
+    assert not emitter._radar_result.available
     assert sum(c[0] == 'iem' for c in hybrid.calls) == 1
     hybrid.failure = None; hybrid.calls.clear(); emitter._do_radar()
-    assert all(c[0] == 'rainviewer' for c in hybrid.calls)
+    assert not hybrid.calls
     hybrid.mono = 180; hybrid.calls.clear(); emitter._do_radar()
     assert hybrid.calls[0][0] == 'iem' and emitter._radar_result.source_id == 'iem-mrms-lcref'
 

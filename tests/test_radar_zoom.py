@@ -48,7 +48,8 @@ def test_source_clamp_restore_sticky_and_reset(make_emitter, hybrid, tmp_path):
     original = emitter._radar_result
     assert original.zoom == 8
     hybrid.failure = lambda req, _: (_ for _ in ()).throw(urllib.error.URLError('primary down')) if 'iastate.edu' in req.full_url else None
-    hybrid.mono=241; hybrid.calls.clear(); emitter._do_radar()
+    hybrid.mono=241; hybrid.calls.clear()
+    for _ in range(3): emitter._do_radar(intent_triggered=False)
     fallback = emitter._build_payload()['radar']
     assert fallback['tiles']['z'] == fallback['zoomMax'] == 7
     assert fallback['zoomSource'] == 'RainViewer' and fallback['zoomCapped']
@@ -56,10 +57,10 @@ def test_source_clamp_restore_sticky_and_reset(make_emitter, hybrid, tmp_path):
     assert all('/256/7/' in c[2] for c in hybrid.calls if '/256/' in c[2])
     assert pref.read_text() == '8\n'
     emitter._do_radar(); assert emitter._build_payload()['radar']['zoomCapped']
-    hybrid.failure = None; hybrid.mono=0; hybrid.calls.clear(); emitter._do_radar()
+    hybrid.failure = None; hybrid.mono+=301; hybrid.latest+=600; hybrid.calls.clear(); emitter._do_radar()
     restored = emitter._build_payload()['radar']
     assert restored['tiles']['z'] == 8 and restored['zoomMax'] == 9 and not restored['zoomCapped']
-    assert restored['observedTs'] == original.ts_frame and len(hybrid.calls) == 1  # warm z8 restored
+    assert restored['observedTs'] == hybrid.latest  # fresh recovery after dwell
     pref.write_text('auto\n'); emitter._do_radar()
     reset = emitter._build_payload()['radar']
     assert reset['tiles']['z'] == reset['zoomAutoLevel'] == 8 and reset['zoomAuto']
@@ -93,8 +94,8 @@ def test_zoom_during_429_obeys_source_cooldown(make_emitter, hybrid, tmp_path, r
     hybrid.failure = None; hybrid.calls.clear(); emitter._do_radar()
     assert all(c[0] == 'rainviewer' for c in hybrid.calls)
     r = emitter._build_payload()['radar']
-    assert 'geometryOnly' not in r and r['tiles']['frames'] and r['refresh']['state']=='idle'
-    assert r['sourceId'] == 'rainviewer'  # eligible fallback keeps its real cached window
+    assert 'geometryOnly' not in r and not r['tiles']['frames'] and r['refresh']['state']=='failed'
+    assert not r['available']  # cold cooldown never acquired a fallback frame
     assert not hybrid.calls  # map geometry needs no capacity or provider request
     hybrid.mono = 179; hybrid.calls.clear(); emitter._do_radar()
     assert all(c[0] == 'rainviewer' for c in hybrid.calls)

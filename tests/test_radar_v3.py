@@ -205,7 +205,7 @@ def test_supersede_tile_boundary_immediate_new_pass(make_emitter, hybrid, monkey
     expect = {'radar_zoom': ('zoom',9), 'radar_source': ('source','site'),
               'radar_center': ('center',dict(lat=47.8, lon=-122.3)), 'radar_intent': ('seq',41)}[preference]
     assert all(intent[expect[0]]==expect[1] for intent in intents)
-    assert emitter._radar_refresh['state']=='idle'
+    assert emitter._radar_refresh['state']==('failed' if preference == 'radar_source' else 'idle')
     emitter.stop()
 
 
@@ -321,7 +321,8 @@ def test_repeated_layer_transport_failure_opens_shared_host(make_emitter,hybrid,
     multisite.scans.update(KNEA=stamps,KMID=stamps)
     def fail(site,url):
         if site=='KMID':raise OSError('layer down')
-    multisite.failure=fail;hybrid.view();emitter=make_emitter();emitter._do_radar()
+    multisite.failure=fail;hybrid.view();emitter=make_emitter()
+    for _ in range(5): emitter._do_radar(intent_triggered=False)
     assert emitter._radar_result.source_id == 'rainviewer'
     assert emitter._radar_health.snapshot()['breaker'] == 'open'
     assert any(k[1] == 'KNEA' for k in emitter._radar_tiles)  # paid-for good site tiles survive

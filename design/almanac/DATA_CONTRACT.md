@@ -270,8 +270,8 @@ daemon resolver thread. Every cold caller waits on the shared event only until
 its deadline; a late result may populate the cache, but cannot issue a request.
 Cached callers never wait for resolution.
 
-**v4.9 request isolation, hedges and deadlines.** Each immutable tile gets at
-most two attempts, each capped at six seconds including DNS, pool waits, TCP,
+**v5.3 request isolation, warm hedges and deadlines.** Each immutable tile gets at
+most two attempts sharing one six-second tile deadline, including DNS, pool waits, TCP,
 TLS, send and every raw header/body read. A failed tile does not abort siblings.
 The winner must be a complete, bounded, decoded 256×256 native PNG; truncated,
 placeholder and invalid responses cannot win. A fast failure retries immediately
@@ -279,15 +279,16 @@ on a fresh connection. A partial-body failure may also retry the immutable tile.
 No third attempt is possible, including through the v4.8 transport retry path.
 
 For newest only, no first response byte after `RADAR_HEDGE_SEC = 2` launches the
-second attempt on a fresh connection while the first remains eligible to win.
+second attempt only on a reserved warm connection while the first remains eligible to win.
 A received status/header byte suppresses the hedge; slow bodies keep the six-second
 absolute cap. First valid response wins. The loser is shut down, drained/joined
 and discarded before cache mutation. At most `floor(len(ctx.tiles)/2)` hedges are
 reserved per source pass, shared by its site layers; every admitted hedge/retry
 uses the rolling rate gate. The cap is conservative for multi-site views (the
-viewport count, rather than the sum of layer tiles). Three extra pool slots keep
-six hanging primaries from starving all rescue requests. Other hedges may wait
-inside their request deadlines; no unbounded threads or abandoned tile workers.
+viewport count, rather than the sum of layer tiles). Six busy primaries leave no
+hedge capacity. Reused primaries still have a three-second first-byte deadline;
+a sequential retry can use the remainder of the same six-second tile budget.
+There are no extra rescue slots or hedge pool waiters.
 History and warming have four tile workers, sequential retries and no hedges.
 An incomplete newest publishes its partial inventory and requests another pass
 (normally two seconds with headroom) before history or warming can start.
@@ -302,52 +303,73 @@ knowledge and stale-while-refresh DNS remove that wait on warm paths.
 
 `RADAR_BUILD_DEADLINE_SEC = RADAR_PRIMARY_DEADLINE_SEC = 25` remains the shared
 absolute pass deadline. Each source gets at most 16 seconds to acquire newest,
-leaving up to nine seconds for the next source. A source timeout, open breaker or
-transport failure falls through immediately in the existing site → MRMS →
-RainViewer order as applicable. v4.8's three-failed-pass transport hold is removed.
+leaving up to nine seconds for the next source. Only three consecutive failed
+provider passes advance the site → MRMS → RainViewer chain. A successful/unchanged pass resets the streak. Local setup,
+pool and pass-budget failures retain the source and cannot trigger fallback.
+The previous source's manifest and frames remain published until the candidate
+has at least four complete frames (also when staging off-tab). An automatic
+fallback dwells for 300 seconds before preferred-source recovery is attempted;
+explicit source/mode choices can change that chain. Each committed switch logs
+old/new source and its reason. A failed recovery continues refreshing the active
+fallback. Candidate tiles remain reusable between passes.
 After newest publication, background tiers may use the remaining original
 25-second budget. Resumed warming gets a new 25-second pass. All active requests
 and their cleanup remain bounded by the original deadlines (0.4–0.5 second test
 cleanup grace; no hard real-time Pi claim).
 
 Idle sockets still expire after two seconds or the shorter advertised Keep-Alive
-minus 250ms. Every checkout checks expiry. Hedges and retries bypass idle sockets.
+minus 250ms. Every checkout checks expiry. A hedge atomically reserves a warm,
+idle, connected socket before request admission; no available lease means no
+hedge, DNS lookup, pool wait or handshake. Retries may open fresh connections.
+The pool stays at six connections per host, with at most two concurrent TCP/TLS
+setups per host. One verified SSL context per host retains server session tickets
+for subsequent connections, without weakening certificate or hostname checks.
 `Connection: close`, provider changes and shutdown discard connections. SNI,
 certificate verification and IPv4 DNS caching remain intact. Best-effort Linux
 TCP keepalive uses 2/2/2 seconds/seconds/probes; missing options are harmless.
 
 **Host circuit breaker.** Completed attempt outcomes form a rolling 60-second
 window per hostname/port. At ≥6 samples and <50% successes, stop admitting that
-host for 30 seconds. Recovered hedges still count their failed/cancelled loser;
+host for 30 seconds. Client TCP/TLS setup or pool-admission timeouts count as
+`localFailures`, not host samples. Cancellation of a losing attempt is also
+excluded; it does not overwrite the last meaningful error. At a tile deadline,
+setup still counts as local, while an established request waiting for a response
+counts as a host failure; deadline cleanup is not a discarded hedge.
 HTTP 404 is a responding host with unavailable content, not a host outage.
 After cooldown, one fresh metadata request owns the `half` state; concurrent
 probes are rejected. Success clears the old samples and closes; failure opens
 another 30 seconds. Tile-only hosts use HEAD of a remembered tile URL because
 another metadata hostname cannot prove their recovery. Existing 429 cooldowns
-and the shared rate cap still apply. Eligible fallback runs in the same pass;
-recovery is retried after cooldown (or an already scheduled earlier retry).
+and the shared rate cap still apply. Fallback and recovery obey the failed-pass
+threshold, publication barrier and dwell above.
 A shared-host outage applies to both IEM products. Paid-for successes stay cached.
 
 **Operator health.** `wx.json.radar.health` is exposed as `/health.radar`:
 
 ```json
 {"lastSuccessTs":1789444700.5,"successRate60s":0.78,"hedges":9,"retries":2,
- "discardedHedges":9,"breaker":"closed","lastError":"discarded radar attempt",
+ "discardedHedges":2,"localFailures":3,"hedgeSuspendedSec":0,
+ "breaker":"closed","lastError":"radar connection/TLS setup timed out",
  "hosts":{"example.invalid":{"breaker":"closed","samples60s":41,"successRate60s":0.78}}}
 ```
 
 `lastSuccessTs` is Unix seconds of the last usable newest publication (including
 partial), not the measurement timestamp. Ratios are 0–1, null without samples.
 `hedges` and `retries` are distinct cumulative admitted second attempts, including
-bounded DNS/pool waits. `hedges` counts overlapping requests raced after 2 seconds
+bounded retry DNS/pool waits. `hedges` counts warm overlapping requests raced after 2 seconds
 without a response byte. `retries` counts second attempts after the first has
 failed (including transport recovery). A winning or losing hedge is never a
 retry; either kind consumes the tile's sole second attempt. Denied admission
-increments neither counter. `discardedHedges` counts pending losers when a race wins.
+increments neither counter. `discardedHedges` counts issued hedges that did not
+win, including failures/deadlines; a primary cancelled by a winning hedge is not
+a discarded hedge. If discarded/issued is greater than 50% in the rolling
+60-second window, suspend new hedges for 300 seconds (`hedgeSuspendedSec`).
+Sequential failure retries remain available. A new observation window begins
+after suspension; old losses cannot repeatedly retrigger it.
 `breaker` is the worst state across known hosts (`open`, `half`, `closed`), so a
 working fallback does not hide the primary outage. `lastError` retains the last
 request error even after recovery. Every ordinary fetch pass emits this object at
-INFO; the v4.8 retry line still carries `transport_retries` and
+INFO with effective tile zoom and last switch reason; the v4.8 retry line still carries `transport_retries` and
 `stale_first_byte_retries`. Radar faults do not change the engine/sensor HTTP health
 verdict. Health reflects the latest engine payload, like other `/health` fields.
 
@@ -594,7 +616,11 @@ same disk set and does not rerender existing tiles.
 
 Loopback `radar_activity` atomically carries `{at, theme, moving, center, zoom}`.
 The displayed camera (`radarGeoCenter`, `radarGeoZoom` on the ordinary poll) is
-independent of durable requested/auto zoom and the radar worker's current pass.
+the only live zoom/centre intent. Each valid settled report updates the canonical
+runtime intent; moving reports affect geography priority only. The radar worker
+watches that canonical record, so an activity-only camera change supersedes a
+pass exactly like a stepper or pinch. Durable zoom follows; it never overrides
+a settled runtime camera.
 With a viewed marker and activity age **0–5s**, missing tiles for that settled
 viewport and its margin precede the remaining home queue, in the reported theme.
 The freshness check applies only to viewport priority. Missing, malformed or
@@ -700,7 +726,7 @@ sweep with hard cuts. No tile fade, shimmer, skeleton or loading pulse is introd
 A cold provider outage with a valid station keeps Radar available. The local map
 and graticule remain while measurement inventory is empty; no observed time or
 clear conditions are invented. Cold activation uses durable manual/auto zoom,
-clamps to source bounds, preserves requested zoom through temporary caps, and
+clamps to the camera range 4–10, retains that camera through provider tile caps, and
 reports its initial camera. AS OF ordering is scoped to source/station/primary
 identity. Newer accepted transitions invalidate old pending source generations.
 Failed viewport reports remain pending until delivered; only a newer settled
@@ -710,20 +736,21 @@ frames are distinct from complete sets in completion counters and retry work.
 
 ### Loopback reports and the single note
 
-The loopback server validates a complete `{seq,zoom,source,center}` intent and
-atomically replaces one runtime `radar_intent` JSON record with fsync. Zoom and
-source are also written through durable symlinks for restart persistence. Once
-present, only the runtime record is consumed and watched by the worker; separate
-legacy files are read only before the first runtime transaction. Pan remains transient.
+The page sends `radarGeoZoom` (settled integer 4–10), `radarGeoCenter` (ASCII
+decimal latitude/longitude bounded by ±85.05112878/±180), `radarSource`, theme
+and moving state on the existing loopback poll. It no longer sends a second
+`radarZoom`/requested/auto/sequence intent. Auto selects a camera level locally;
+that settled numeric camera is what the engine builds.
 
-The query grammar and writer/fsync/durable-symlink rules are unchanged.
-`radarCenter` is `station` or ASCII decimal latitude/longitude bounded by
-±85.05112878/±180. Duplicate and non-loopback writes are ignored. The runtime
-intent is never symlinked to durable storage; zoom/source persist, pan is
-transient. The page maintains its camera in sessionStorage. Reports carry a
-monotonic local sequence, seeded from current epoch deciseconds to survive page
-reloads without an acknowledgement handshake. The sequence only cancels obsolete
-worker warm-ups, never gates pixels.
+The server validates and atomically replaces one runtime `radar_intent` record
+`{seq, zoom, source, center, camera:true}` only when settled geometry/source
+changes. Server-generated sequence numbers fence obsolete workers. Duplicate
+polls do not change the runtime inode or restart work. After 250ms without another
+change, durable zoom/source writes follow through the existing symlinks and fsync
+writer. Runtime camera/centre remains transient and is never symlinked. The
+page also saves its camera in sessionStorage. Legacy intent endpoints are accepted
+only until the first modern camera report; they cannot overwrite a live camera.
+Before a runtime record exists, durable zoom/source supply cold-start defaults.
 
 Camera reports occur on activation and after settle's 120ms trailing debounce.
 **v4.3 source input** renders intent synchronously on primary pointer contact;

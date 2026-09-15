@@ -50,7 +50,7 @@ def test_connect_preserves_sni_and_host_without_dns(monkeypatch):
     context=Mock(); conn._context=context
     conn.connect()
     sock.connect.assert_called_once_with(('192.0.2.1',443))
-    context.wrap_socket.assert_called_once_with(sock,server_hostname='radar.example',do_handshake_on_connect=False)
+    context.wrap_socket.assert_called_once_with(sock,server_hostname='radar.example',do_handshake_on_connect=False,session=None)
     conn.sock.do_handshake.assert_called_once_with()
     assert conn.host=='radar.example'
     conn.close()
@@ -80,7 +80,8 @@ def test_newest_advertised_scan_and_bounded_failures(make_emitter,hybrid):
     stamps=[datetime.strptime(u.split('lcref-')[1].split('/')[0],'%Y%m%d%H%M').replace(tzinfo=timezone.utc).timestamp() for u in gets]
     assert stamps[0] == hybrid.latest  # no artificial five-minute readiness hold
     assert all(stamps.count(t)<=12 for t in set(stamps))  # six workers, at most two attempts
-    assert emitter._radar_result.source_id=='rainviewer'
+    assert emitter._radar_result.source_id=='iem-mrms-lcref'
+    assert emitter._radar_transport_failures['iem-mrms-lcref'] == 1
 
 
 def test_placeholder_fail_fast(make_emitter,hybrid):
@@ -100,10 +101,10 @@ def test_stickiness_logs_failure_then_switch_and_recovery(make_emitter,hybrid,mo
     hybrid.failure=fail;hybrid.calls.clear();emitter._do_radar()
     assert emitter._radar_result is first and not any(c[0]=='rainviewer' for c in hybrid.calls)
     assert any('iem-mrms-lcref' in w and 'test source down' in w and 'candidates=' in w and 'elapsed=' in w for w in warnings)
-    hybrid.mono=241;emitter._do_radar()
+    hybrid.mono=241;emitter._do_radar();emitter._do_radar()
     assert emitter._radar_result.source_id=='rainviewer'
     assert any('SWITCH iem-mrms-lcref -> rainviewer' in m for m in infos)
-    hybrid.failure=None;hybrid.latest+=240;emitter._do_radar()
+    hybrid.failure=None;hybrid.latest+=600;hybrid.mono+=301;emitter._do_radar()
     assert emitter._radar_result.source_id=='iem-mrms-lcref'
     assert any('SWITCH rainviewer -> iem-mrms-lcref' in m for m in infos)
 
@@ -148,7 +149,9 @@ def test_site_failure_reports_disabled_and_falls_back(make_emitter,hybrid,tmp_pa
         if 'operation=list' in req.full_url: return io.BytesIO(b'{"scans":[]}')
         return original(self,req,timeout)
     monkeypatch.setattr(ae.RadarSession,'open',fetch)
-    emitter=make_emitter();emitter._do_radar();r=emitter._build_payload()['radar']
+    emitter=make_emitter()
+    for _ in range(3): emitter._do_radar(intent_triggered=False)
+    r=emitter._build_payload()['radar']
     assert r['sourceMode']=='mosaic' and r['sourceId']=='iem-mrms-lcref'
     assert r['sources'][1]['reason']=='not reporting' and not r['sources'][1]['available']
 

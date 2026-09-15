@@ -47,6 +47,8 @@ def radar_net(monkeypatch):
         assert url.endswith('/2/0_0.png') and int(url.split('/256/')[1].split('/')[0]) in range(4, 8)
         return io.BytesIO(state['tile'])
 
+    # This fixture tests the RainViewer adapter, not automatic MRMS fallback.
+    monkeypatch.setattr(ae, '_radar_iem_eligible', lambda *args: False)
     monkeypatch.setattr(ae.RadarSession, 'open', lambda self, *a, **k: fetch(*a, **k))
     monkeypatch.setattr(ae.time, 'sleep', lambda _: None)
     monkeypatch.setattr(ae.time, 'time', lambda: state['times'][-1] + 240)
@@ -227,13 +229,13 @@ def test_never_raises_keeps_last_good_and_warns_once(make_emitter, radar_net, mo
         assert result.frames[-1]['ts'] == radar_net['times'][-1]
         assert not result.frames[-1]['complete']
         assert result.ts_fetch == previous.ts_fetch
-    assert len(warnings) == 3 and len(retries) == 1
-    assert all('candidates=' in w and 'elapsed=' in w for w in warnings[:2])
+    assert len(warnings) == 1 and len(retries) == 1
+    assert 'candidates=' in warnings[0] and 'elapsed=' in warnings[0]
     assert retries[0][:2] == ('radar', emitter._check_radar)
     if failure in ('tile', 'decode'):
         assert 29 <= retries[0][2] <= 30  # probe the newly opened host circuit
     else:
-        assert retries[0][2] == 120
+        assert retries[0][2] == 2  # bounded retry before the failed-pass threshold
 
 
 

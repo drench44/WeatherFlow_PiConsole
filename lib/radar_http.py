@@ -19,6 +19,26 @@ def is_transport_error(error):
     return isinstance(error, TRANSPORT_ERRORS)
 
 
+class LocalTransportError(socket.timeout):
+    """Client connection setup/resource deadline; not evidence of host health."""
+
+
+class WarmUnavailable(LocalTransportError):
+    pass
+
+
+class _WarmLease:
+    def __init__(self, session, key, conn):
+        self.session, self.key, self.conn = session, key, conn
+        self.consumed = False
+
+    def close(self):
+        with self.session._condition:
+            if not self.consumed:
+                self.consumed = True
+                self.session._release(self.key, self.conn)
+
+
 class _StaleFirstByteTimeout(socket.timeout):
     """A reused socket accepted a request but returned no HTTP response byte."""
 
@@ -84,6 +104,8 @@ class _Connection(http.client.HTTPSConnection):
         super().__init__(host, port, timeout=timeout)
         self.addresses = addresses
         self.attempt = None
+        self.pool = None
+        self.warm_only = False
         self.response_bytes = 0
         self.deadline = time.monotonic() + timeout
         self.first_byte_end = None
@@ -99,6 +121,29 @@ class _Connection(http.client.HTTPSConnection):
         super().send(data)
 
     def connect(self):
+        if self.warm_only:
+            raise WarmUnavailable('hedge requires an already connected socket')
+        pool = self.pool
+        key = (self.host, self.port)
+        if pool is None:
+            return self._connect()
+        with pool._condition:
+            while pool._connecting.get(key, 0) >= pool.MAX_HANDSHAKES:
+                remaining = self.deadline - time.monotonic()
+                if remaining <= 0:
+                    raise LocalTransportError('radar handshake admission deadline')
+                if self.attempt:
+                    self.attempt.check()
+                pool._condition.wait(min(remaining, .05))
+            pool._connecting[key] = pool._connecting.get(key, 0) + 1
+        try:
+            return self._connect()
+        finally:
+            with pool._condition:
+                pool._connecting[key] -= 1
+                pool._condition.notify_all()
+
+    def _connect(self):
         # Connect to the resolved address; certificate verification, SNI and HTTP
         # Host still use the original hostname. Reconnect never re-enters DNS.
         end = self.deadline
@@ -118,16 +163,22 @@ class _Connection(http.client.HTTPSConnection):
                 if remaining <= 0:
                     raise socket.timeout('radar TLS exceeded deadline')
                 sock.settimeout(remaining)
-                self.sock = self._context.wrap_socket(sock, server_hostname=self.host, do_handshake_on_connect=False)
+                self.sock = self._context.wrap_socket(sock, server_hostname=self.host,
+                    do_handshake_on_connect=False,
+                    session=self.pool._tls_sessions.get((self.host, self.port)) if self.pool else None)
                 if getattr(self, "attempt", None):
                     self.attempt.attach(self.sock)
                 self.sock.do_handshake()
                 return
             except OSError as error:
-                failure = error
+                failure = (LocalTransportError('radar connection/TLS setup timed out: '+str(error))
+                           if isinstance(error, socket.timeout) else error)
                 sock.close()
+                if self.sock is not None:
+                    self.sock.close()
+                    self.sock = None
                 if time.monotonic() >= end:
-                    raise
+                    raise failure from error
         raise failure
 
 
@@ -168,6 +219,7 @@ class _Response:
 
 class RadarSession:
     MAX_CONNECTIONS = 6
+    MAX_HANDSHAKES = 2
     IDLE_SEC = 2
     FIRST_BYTE_TIMEOUT_SEC = 3
     DNS_TTL_SEC = 15 * 60
@@ -183,6 +235,9 @@ class RadarSession:
         self._resolved_at = {}
         self._dns_errors = {}
         self._resolving = {}  # host -> event; cold callers share one lookup
+        self._connecting = {}
+        self._tls_contexts = {}
+        self._tls_sessions = {}
         self.connections = {}  # host -> connections, including leased sockets
         self._busy = set()
         self._used = {}
@@ -244,7 +299,7 @@ class RadarSession:
         if cached is not None:
             return cached  # stale-while-refresh: first tile never waits for DNS
         if not event.wait(max(0, end - time.monotonic())):
-            raise TimeoutError('radar DNS exceeded request deadline')
+            raise LocalTransportError('radar DNS exceeded request deadline')
         with self._condition:
             if self._closed:
                 raise OSError('radar session closed')
@@ -279,9 +334,27 @@ class RadarSession:
                 self._used.pop(conn, None)
                 self._idle_sec.pop(conn, None)
             else:
+                sock = conn.sock
+                if isinstance(sock, ssl.SSLSocket) and sock.session.has_ticket:
+                    self._tls_sessions[key] = sock.session
                 self._used[conn] = time.monotonic()
                 self._idle_sec[conn] = self.IDLE_SEC if idle_sec is None else idle_sec
             self._condition.notify_all()
+
+    def reserve_hedge(self, url):
+        """Atomically reserve an idle, connected lease; never DNS/connect/wait."""
+        parsed = urlsplit(url)
+        key = (parsed.hostname, parsed.port or 443)
+        with self._condition:
+            if self._closed:
+                return None
+            self._expire()
+            conn = next((c for c in self.connections.get(key, ())
+                         if c not in self._busy and c.sock is not None), None)
+            if conn is None:
+                return None
+            self._busy.add(conn)
+            return _WarmLease(self, key, conn)
 
     def open(self, req, timeout):
         url = urlsplit(req.full_url)
@@ -295,19 +368,29 @@ class RadarSession:
                 raise TimeoutError('radar pass exceeded deadline')
             if control is not None:
                 control.check()
-            addresses = self._addresses_for(key, end)
+            lease = getattr(control, 'warm_lease', None)
+            if control is not None and control.hedged and lease is None:
+                raise WarmUnavailable('no warm radar hedge lease')
+            addresses = None if lease else self._addresses_for(key, end)
             with self._condition:
                 while True:
+                    if lease is not None:
+                        if lease.session is not self or lease.key != key or lease.consumed:
+                            raise WarmUnavailable('invalid radar hedge lease')
+                        lease.consumed = True
+                        conn, reused = lease.conn, True
+                        remaining = end - time.monotonic()
+                        break
                     if self._closed:
                         raise OSError('radar session closed')
                     self._expire()  # also expire sockets released during pool waits
                     remaining = end - time.monotonic()
                     if remaining <= 0:
-                        raise TimeoutError('radar DNS/pool exceeded request deadline')
+                        raise LocalTransportError('radar DNS/pool exceeded request deadline')
                     conns = self.connections.setdefault(key, [])
                     idle = next((c for c in conns if c not in self._busy), None)
                     fresh = attempt or (control is not None and control.fresh)
-                    limit = self.MAX_CONNECTIONS + (3 if control is not None else 0)
+                    limit = self.MAX_CONNECTIONS
                     conn = idle if not fresh else None
                     if fresh and len(conns) >= limit and idle is not None:
                         # A retry needs a fresh socket. Evict an idle lease only
@@ -316,11 +399,15 @@ class RadarSession:
                     reused = conn is not None
                     if conn is None and len(conns) < limit:
                         conn = _Connection(*key, addresses, remaining)
+                        conn.pool = self
+                        # One verification context per host makes TLS tickets reusable.
+                        conn._context = self._tls_contexts.setdefault(key, conn._context)
                         conns.append(conn)
                     if conn is not None:
                         self._busy.add(conn)
                         break
                     self._condition.wait(remaining)
+            conn.warm_only = bool(control is not None and control.hedged)
             conn.attempt = control
             conn.timeout = remaining
             conn.deadline = end
@@ -338,10 +425,12 @@ class RadarSession:
                 remaining = end - time.monotonic()
                 if remaining <= 0:
                     raise TimeoutError('radar request exceeded deadline')
-                if reused and control is None:
+                if reused and (control is None or not control.hedged):
                     conn.first_byte_end = min(end, time.monotonic() + self.first_byte_timeout)
                 if conn.sock:
-                    conn.sock.settimeout(min(remaining, self.first_byte_timeout) if reused and control is None else remaining)
+                    conn.sock.settimeout(min(remaining, self.first_byte_timeout) if reused and (control is None or not control.hedged) else remaining)
+                if control is not None:
+                    control.waiting_response = True
                 response = conn.getresponse()
                 if response.status != 200:
                     response.close()

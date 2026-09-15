@@ -66,6 +66,10 @@ def test_six_hanging_reused_workers_share_deadline(make_emitter, origin, monkeyp
     emitter._radar_session = session
     try:
         origin.hang_ids = prime(session, origin)
+        # Priming through the raw session bypasses emitter health; account for
+        # those six real successful requests as production admission does.
+        for _ in origin.hang_ids:
+            emitter._radar_health.record(source, origin.url, True)
         origin.hang = fresh_hangs
         ctx = dict(zoom=8, tiles=[(i, 1, 0, 0) for i in range(12)], tile_workers=6)
         start = time.monotonic()
@@ -80,15 +84,15 @@ def test_six_hanging_reused_workers_share_deadline(make_emitter, origin, monkeyp
             assert len(result()) == 12
         elapsed = time.monotonic()-start
         print(f'six reused TLS sockets, fresh_hangs={fresh_hangs}: {elapsed:.3f}s')
-        assert (3.5 if fresh_hangs else 2) <= elapsed < 4.2
+        assert (3.5 if fresh_hangs else 3) <= elapsed < 4.2
         assert session.retries == session.stale_first_byte_retries == 0
-        assert emitter._radar_health.hedges == 6
-        assert emitter._radar_health.retries == 0
+        assert emitter._radar_health.hedges == 0
+        assert emitter._radar_health.retries == 6
         assert not infos  # tiles use the v4.9 race; pass logging lives in _do_radar
         assert not session._busy  # executor drained, no abandoned socket workers
         assert all(ident > 6 for ident, _, _ in origin.requests[12:])
         if fresh_hangs:
-            assert len(origin.requests) == 15  # six prime, six dead, three rescue leases; three queued
+            assert len(origin.requests) == 18  # six prime, six dead, six sequential retries
         else:
             assert len(origin.requests) == 24  # second tile wave also succeeds
     finally:
@@ -243,9 +247,9 @@ def test_full_engine_pass_deadline_includes_all_tile_workers(make_emitter, origi
         print(f'full engine pass, six hanging tile reads: {elapsed:.3f}s (budget {budget}s)')
         assert elapsed < budget+.4
         if budget == 25:
-            assert elapsed < 9  # opening host breaker leaves the rest of the pass free
+            assert elapsed < ae.RADAR_SOURCE_DEADLINE_SEC+.4  # no rescue handshakes at a deadline
         retries = emitter._radar_stale_first_byte_retries
-        assert 6 <= sum(path.startswith('/tile/') for _, _, path in origin.requests) <= 12
+        assert 6 <= sum(path.startswith('/tile/') for _, _, path in origin.requests) <= 24
         assert emitter._radar_session is None or not emitter._radar_session._busy
     finally:
         if emitter._radar_session:

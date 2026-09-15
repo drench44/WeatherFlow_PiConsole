@@ -29,16 +29,16 @@ def engine(make_emitter, origin):
 
 
 @pytest.mark.parametrize('behavior', ['hang', 'slow'])
-def test_three_bad_tiles_hedged_on_fresh_connections(engine, origin, behavior):
+def test_three_bad_tiles_hedged_on_warm_connections(engine, origin, behavior):
     origin.behavior = lambda path, n: behavior if n == 1 and path.rsplit('/', 1)[-1] in ('0', '1', '2') else 'normal'
     start = time.monotonic()
     result, ctx = batch(engine, origin)
     elapsed = time.monotonic()-start
     h = engine._radar_health.snapshot()
     assert len(result) == 10 and 2 <= elapsed < 3.5
-    assert h['hedges'] == h['discardedHedges'] == 3
+    assert h['hedges'] == 3 and h['discardedHedges'] == 0
     assert h['retries'] == 0  # winning hedges are not failure retries
-    assert h['successRate60s'] == 10/13
+    assert h['successRate60s'] == 1  # cancelled primaries are local, not host failures
     assert len(engine._radar_request_times) == len(origin.requests) == 13
     for x in range(3):
         ids = [ident for ident, _, path in origin.requests if path == f'/tile/1/{x}']
@@ -78,10 +78,10 @@ def test_deadline_and_all_busy_primary_slots(engine, origin):
     with pytest.raises((ae._RadarBudget, CircuitOpen)):
         batch(engine, origin, count=12, seconds=2.3)
     assert time.monotonic()-start < 2.8
-    # Six primaries cannot prevent the first three fresh rescue leases.
-    assert len(origin.requests) == 9
+    # No idle connection means no hedge may create a rescue handshake.
+    assert len(origin.requests) == 6
     assert not engine._radar_session._busy
-    assert engine._radar_health.hedges == 6  # three leased and three bounded pool waiters
+    assert engine._radar_health.hedges == 0
     assert engine._radar_health.retries == 0  # losing hedges are not retries either
 
 

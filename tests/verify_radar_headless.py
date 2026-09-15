@@ -260,8 +260,8 @@ def smoke(browser,server,theme,output):
       while(radarGesture.state!=='idle')await new Promise(requestAnimationFrame);
       await new Promise(r=>setTimeout(r,250));
     }''')
-    reports=[u for u in server.requests[before:] if 'radarZoom=' in u]
-    assert len(reports)==1 and 'radarCenter=' in reports[0],reports
+    reports=[u for u in server.requests[before:] if 'radarGeoZoom=' in u and 'radarMoving=0' in u]
+    assert len(reports)==1 and 'radarGeoCenter=' in reports[0],reports
     from urllib.request import urlopen
     with urlopen(server.url+'/wx.json') as response:assert response.headers.get('X-Radar-Intent-Seq') is None
     print('R20/R23',theme,dict(inertiaTravel=inertia['travel'],reports=len(reports)),flush=True)
