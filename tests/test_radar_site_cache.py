@@ -137,7 +137,8 @@ def test_listing_failure_is_retried_independently(scene, multisite, monkeypatch)
     assert failed and (SITE,'KMID') not in emitter._radar_newest
     monkeypatch.setattr(ae.RadarSession, 'open', original)
     multisite.calls.clear()
-    emitter._radar_site_discover(dict(ctx, intent_triggered=True))
+    # This is a new pass; a failed listing is shared only within its own pass.
+    emitter._radar_site_discover(dict(ctx, intent_triggered=True, listing_results={}))
     assert multisite.calls == [('list','KMID')]
 
 

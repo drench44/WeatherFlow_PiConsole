@@ -58,7 +58,7 @@ SCENARIO = r'''async kind=>{
     if(radarView.current!==previous){paints.push({at:clock,stamp:radarView.current.stamp,old:frames.includes(radarView.current),previousNewest:previous.stamp===frames.at(-1).stamp});previous=radarView.current;}
     check(!document.getElementById('rad-frame-time').textContent.includes('Buffering'),'read regressed to Buffering');
     check(radarReady().length>0&&radarView.nextAt>0,'playback lost');
-    if(radarView.holdingWindow&&clock>start+610)check(document.getElementById('rad-note').textContent.startsWith('Refreshing · frame '),'acquisition note');
+    if(radarView.holdingWindow&&clock>start+610)check(document.getElementById('rad-note').textContent==='Playing previous view · sharpening '+n+' of 8','acquisition note');
     if(radarView.holdingWindow)acquiring=true;
     if(acquiring&&adoptAt===null&&!radarView.holdingWindow){adoptAt=clock;check(n>=4,'adopt before four');check(radarView.current===radarView.cycle[0],'adopt off wrap');}
     maxBytes=Math.max(maxBytes,radarMemory());maxAudit=Math.max(maxAudit,audit.bytes());check(maxBytes<=RAD_MEMORY_CAP&&maxAudit<=RAD_MEMORY_CAP,'memory bound');

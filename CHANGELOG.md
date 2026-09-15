@@ -7,6 +7,26 @@ to shared upstream code that the classic console benefits from too.
 ## 2026-09-15
 
 ### Radar
+- **Radar v6.0 carries closest-site evidence into the picker.** `nexrad` adds
+  `reporting`, `newestTs`, `ageSec`, `reason`, `checkedTs`, `checkedAt`,
+  `nextCheckTs` and `nextCheckAt` from the last listing and existing discovery
+  schedule. Region checks the closest eligible site on that same wakeup, within
+  the shared deadline/budget and footprint-aware reserve (at least 34 requests).
+  Listing results are shared across the pass; tile failure cannot erase the last check.
+  Empty-listing site taps are refused immediately, with `refresh.reason:
+  "not reporting"` and `sourceFallback:"site-not-reporting"`, while Region
+  continues updating. The site remains tappable and names its last check or
+  measured scan age. The note uses the scheduled check time; Region caption
+  copy stays unchanged. Unknown/failed listings never claim an outage start.
+- **Zoom notes separate retained playback from incoming acquisition.** While the
+  previous view loops, the note says “Playing previous view · sharpening N of M,”
+  counting only incoming decoded composites. A coincident dirty-camera paint and
+  playback deadline now paint the successor once. Local Chromium counters found
+  a maximum of two echo paints per RAF before, one after; native decode admission
+  remains at most one per RAF. With eight scans actively looping, renderer task time was 92–122 ms per
+  0.6-second step before and 99–116 ms after, without a material CPU reduction.
+  Engine, both-theme state-machine and v5.9 retained-window checks cover the
+  change; `tools/benchmark_radar_v60.py` records reproducible local counters.
 - **Radar v5.6 adds durable Smooth.** A quiet 44px-target toggle beside zoom reset
   defaults off and persists through the loopback-only `radar_smooth` marker.
   Smooth upsamples native reflectivity 2× with valid-coverage bilinear weights,

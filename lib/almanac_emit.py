@@ -991,6 +991,7 @@ class AlmanacEmitter:
         self._radar_transport_retries = 0
         self._radar_stale_first_byte_retries = 0
         self._radar_health = HostHealth()
+        self._radar_site_status = {}  # last listing evidence, independent of tile validity
         self._radar_discovery = DiscoverySchedule()
         self._radar_discovery_event = None
         self._radar_discovery_pending = False
@@ -1511,7 +1512,8 @@ class AlmanacEmitter:
                 intent=dict(ctx.get('intent', {})), requests=len(self._radar_request_times),
                 bytes=getattr(self, '_radar_received_bytes', 0)))
             self._radar_phase_metrics = self._radar_phase_metrics[-128:]
-        refresh.update(intent=dict(ctx.get('intent', {})), pending=dict(self._radar_pending),
+        refresh.update(reason='not reporting' if ctx.get('source_fallback') == 'site-not-reporting' else None,
+                       intent=dict(ctx.get('intent', {})), pending=dict(self._radar_pending),
                        nextRetry=getattr(self, '_radar_next_retry', None))
         ctx['refresh'] = refresh
         with self._radar_lock:
@@ -1562,6 +1564,7 @@ class AlmanacEmitter:
         with self._radar_lock:
             self._radar_refresh = dict(state=state, frameIndex=sum(f['complete'] for f in snap.frames),
                                       frameTotal=len(snap.frames), intent=dict(self._radar_refresh.get('intent', {})),
+                                      reason='not reporting' if snap.source_fallback == 'site-not-reporting' else None,
                                       pending=dict(self._radar_pending), nextRetry=getattr(self, '_radar_next_retry', None))
         self._radar_emit_now()
 
@@ -2074,11 +2077,65 @@ class AlmanacEmitter:
                 return self._radar_history(source, candidate, newest, ctx, build, latest)
         raise ValueError('no fresh complete IEM frame: ' + ctx.get('last_error', 'unavailable'))
 
-    def _radar_site_discover(self, ctx):
-        """Concurrent per-site listings, reused by intent and idle tile warming."""
+    def _radar_site_listing(self, ctx, site):
+        """One listing owner for viewport acquisition and Region's cadence check."""
         from urllib.parse import urlencode
         source = 'iem-nexrad-n0b'
         now = time.time()
+        fmt = lambda t: datetime.fromtimestamp(t, timezone.utc).strftime('%Y-%m-%dT%H:%MZ')
+        deadline = min(ctx['deadline'], time.monotonic() + RADAR_PRIMARY_DEADLINE_SEC)
+        self._radar_checkpoint(ctx)
+        url = RADAR_SITE_LIST_URL + '?' + urlencode(dict(operation='list', radar=site['id'][1:],
+            product='N0B', start=fmt(now - RADAR_HISTORY_SEC - RADAR_SITE_MAX_AGE_SEC), end=fmt(now)))
+        cached = ctx.get('listing_results', {}).get(site['id'])
+        if cached is not None:
+            state, result = cached
+            site.update(state)
+            return result
+        stamps = []
+        reason = 'not reporting'
+        try:
+            known = self._radar_known(source, ctx, site['id'])
+            if known is not None:
+                stamps = [t for t in known['stamps'] if 0 <= now-t <= RADAR_HISTORY_SEC + RADAR_SITE_MAX_AGE_SEC]
+            else:
+                self._radar_forget(source, site['id'])
+                listing = json.loads(self._radar_request(source, url, deadline, metadata=True,
+                    **(dict(reserve=ctx['request_reserve']) if ctx.get('request_reserve') else {})))
+                for scan in listing['scans']:
+                    valid = datetime.fromisoformat(scan['ts'].replace('Z', '+00:00'))
+                    if valid.utcoffset() != timedelta(0):
+                        raise ValueError('non-UTC site scan')
+                    ts = int(valid.timestamp())
+                    if 0 <= now - ts <= RADAR_HISTORY_SEC + RADAR_SITE_MAX_AGE_SEC and ts % 60 == 0:
+                        stamps.append(ts)
+                stamps = sorted(set(stamps))
+                self._radar_newest[(source, site['id'])] = (time.monotonic(),
+                    dict(newest=stamps[-1] if stamps else None, stamps=tuple(stamps), checkedTs=now))
+        except (_RadarBudget, _RadarSuperseded):
+            raise
+        except Exception as error:
+            stamps = []
+            reason = 'scan unavailable'
+            Logger.warning(f'almanac_emit: radar site {site["id"]} listing failed: {type(error).__name__}: {error}')
+        newest = stamps[-1] if stamps else None
+        site.update(reason=None if newest is not None and now-newest < RADAR_SITE_MAX_AGE_SEC else reason)
+        site.update(reporting=newest is not None and now-newest < RADAR_SITE_MAX_AGE_SEC,
+                    newestTs=newest, ageSec=int(now-newest) if newest is not None else None)
+        checked = known.get('checkedTs') if known is not None else now
+        if known is None:
+            # Cached acquisition may age scans out of its history window, but
+            # only an actual listing attempt can replace the last-check evidence.
+            with self._radar_lock:
+                self._radar_site_status[site['id']] = dict(reporting=site['reporting'], newestTs=newest,
+                    reason=site['reason'], checkedTs=checked)
+        result = site['id'], tuple(stamps), known is not None
+        if 'listing_results' in ctx and known is None:
+            ctx['listing_results'][site['id']] = ({k: site[k] for k in ('reporting', 'newestTs', 'ageSec', 'reason')}, result)
+        return result
+
+    def _radar_site_discover(self, ctx):
+        """Concurrent per-site listings, reused by intent and idle tile warming."""
         sites, considered = _radar_sites(ctx['station'], ctx['bounds'])
         if not sites:
             ctx['site_failure'] = 'out of view'
@@ -2086,7 +2143,6 @@ class AlmanacEmitter:
         for site in sites:
             site.update(reporting=False, newestTs=None, ageSec=None, primary=False, contributing=False, reason='not reporting')
         ctx.update(sites=sites, sites_considered=considered, site_scans={})
-        fmt = lambda t: datetime.fromtimestamp(t, timezone.utc).strftime('%Y-%m-%dT%H:%MZ')
         deadline = min(ctx['deadline'], time.monotonic() + RADAR_PRIMARY_DEADLINE_SEC)
         # Timeline ownership is independent of viewport selection and arrival order.
         timeline = sorted((dict(id=i, lat=a, lon=b, distanceMeters=distance_meters(*ctx['station'],a,b))
@@ -2096,41 +2152,8 @@ class AlmanacEmitter:
         listings = {s['id']:s for s in sites}
         for site in timeline:
             listings.setdefault(site['id'], dict(site, reporting=False, newestTs=None, reason='not reporting'))
-        def discover(site):
-            self._radar_checkpoint(ctx)
-            url = RADAR_SITE_LIST_URL + '?' + urlencode(dict(operation='list', radar=site['id'][1:],
-                product='N0B', start=fmt(now - RADAR_HISTORY_SEC - RADAR_SITE_MAX_AGE_SEC), end=fmt(now)))
-            stamps = []
-            try:
-                known = self._radar_known(source, ctx, site['id'])
-                if known is not None:
-                    stamps = [t for t in known['stamps'] if 0 <= now-t <= RADAR_HISTORY_SEC + RADAR_SITE_MAX_AGE_SEC]
-                else:
-                    self._radar_forget(source, site['id'])
-                    listing = json.loads(self._radar_request(source, url, deadline, metadata=True,
-                        **(dict(reserve=ctx['request_reserve']) if ctx.get('request_reserve') else {})))
-                    for scan in listing['scans']:
-                        valid = datetime.fromisoformat(scan['ts'].replace('Z', '+00:00'))
-                        if valid.utcoffset() != timedelta(0):
-                            raise ValueError('non-UTC site scan')
-                        ts = int(valid.timestamp())
-                        if 0 <= now - ts <= RADAR_HISTORY_SEC + RADAR_SITE_MAX_AGE_SEC and ts % 60 == 0:
-                            stamps.append(ts)
-                    stamps = sorted(set(stamps))
-                    self._radar_newest[(source, site['id'])] = (time.monotonic(),
-                        dict(newest=stamps[-1] if stamps else None, stamps=tuple(stamps)))
-            except (_RadarBudget, _RadarSuperseded):
-                raise
-            except Exception as error:
-                stamps = []
-                site['reason'] = 'scan unavailable'
-                Logger.warning(f'almanac_emit: radar site {site["id"]} listing failed: {type(error).__name__}: {error}')
-            newest = stamps[-1] if stamps else None
-            site.update(reporting=newest is not None and now-newest < RADAR_SITE_MAX_AGE_SEC,
-                        newestTs=newest, ageSec=int(now-newest) if newest is not None else None)
-            return site['id'], tuple(stamps), known is not None
         with ThreadPoolExecutor(max_workers=RADAR_TILE_WORKERS, thread_name_prefix='radar-list') as pool:
-            futures = [pool.submit(discover, site) for site in
+            futures = [pool.submit(self._radar_site_listing, ctx, site) for site in
                        sorted(listings.values(), key=lambda s:(s['distanceMeters'],s['id']))]
             for future in futures:
                 site, stamps, reused = future.result(timeout=max(0, deadline-time.monotonic()))
@@ -2152,6 +2175,8 @@ class AlmanacEmitter:
         source = 'iem-nexrad-n0b'
         now = time.time()
         stamps, deadline = self._radar_site_discover(ctx)
+        if self._radar_refuse_dark_site(ctx):
+            return
         ctx.update(_radar_scan_cadence(stamps))
         self._radar_discovery_unchanged(source, stamps[-1], ctx)
         def build(ts, limit):
@@ -2296,7 +2321,7 @@ class AlmanacEmitter:
         self._radar_health.last_success = time.time()
         ctx['deadline'] = ctx.get('pass_deadline', ctx['deadline'])
         self._radar_session.begin_pass(ctx['deadline'])
-        self._radar_idle_context = (source, dict(ctx))
+        self._radar_idle_context = (source, {k: v for k, v in ctx.items() if k != 'listing_results'})
         if not latest['complete']:
             if self._radar_failed_pass(source, TimeoutError('visible newest incomplete'), ctx):
                 raise TimeoutError('visible newest objective failed three passes')
@@ -2686,6 +2711,24 @@ class AlmanacEmitter:
         self._radar_budget_retry(source, 1, min_delay=max(2, probe))
         return False
 
+    def _radar_refuse_dark_site(self, ctx):
+        nearest = ctx.get('nexrad')
+        state = self._radar_site_status.get(nearest['id'], {}) if nearest else {}
+        if (ctx.get('source_pref') != 'site' or ctx.get('source_fallback') == 'site-zoom-floor'
+                or state.get('checkedTs') is None or state.get('reason') != 'not reporting' or state.get('newestTs') is not None
+                or self._radar_result.source_mode != 'mosaic' or not self._radar_result.frames):
+            return False
+        self._radar_checkpoint(ctx)
+        choices = [dict(s) for s in ctx['sources']]
+        choices[1].update(available=False, reason='not reporting')
+        with self._radar_lock:
+            self._radar_result = self._radar_result._replace(source_pref='site',
+                source_fallback='site-not-reporting', sources=tuple(choices))
+            self._radar_pending = {}
+            self._radar_refresh = dict(state='idle', reason='not reporting',
+                intent=dict(ctx['intent']), frameIndex=0, frameTotal=0, pending={}, nextRetry=None)
+        return True
+
     def _do_radar(self, intent_triggered=None, view_started=False, discovery=False):
         """Primary-first orchestration; radar failures never alter engine health."""
         pass_deadline = time.monotonic() + RADAR_BUILD_DEADLINE_SEC
@@ -2774,7 +2817,7 @@ class AlmanacEmitter:
                 smooth = len(raw) < 128 and raw.strip() == 'on'
             except (OSError, UnicodeError):
                 smooth = False
-            ctx = dict(smooth=smooth, center=center, nexrad=_radar_nexrad(station_lat, station_lon, unit), viewed=viewed,
+            ctx = dict(listing_results={}, smooth=smooth, center=center, nexrad=_radar_nexrad(station_lat, station_lon, unit), viewed=viewed,
                 desired=desired, auto_zoom=auto_zoom, builds=0, station=station, unit=unit, previous_result=previous,
                 preference_stamp=stamp, stamp_names=stamp_names, intent_triggered=intent_triggered, discovery=discovery,
                 deadline=pass_deadline, pass_deadline=pass_deadline, inventory=self._radar_disk_inventory, manifest_cache=self._radar_manifest_cache)
@@ -2811,6 +2854,34 @@ class AlmanacEmitter:
                                  source=ctx['source_pref'],
                                  center='station' if centered else dict(center))
             self._radar_checkpoint(ctx)
+            # Refresh closest-site evidence on Region's existing discovery wakeup,
+            # including unchanged MRMS stamps and unviewed/zoom-below-seven maps.
+            if discovery and previous.source_mode == 'mosaic' and site_ok:
+                camera_zoom = desired if desired is not None else auto_zoom
+                check = dict(ctx, zoom=min(camera_zoom, previous.max_zoom), camera_zoom=camera_zoom)
+                stamps = [f['ts'] for f in previous.frames[-(8 if viewed else 1):]]
+                reserve = max(RADAR_HISTORY_RESERVE, self._radar_mandatory_reserve(previous.source_id, check, stamps))
+                check['request_reserve'] = reserve
+                if not self._radar_headroom_delay('iem-nexrad-n0b', reserve+1):
+                    if self._radar_session is None or self._radar_provider != 'iem':
+                        if self._radar_session is not None:
+                            self._radar_session.close()
+                        self._radar_session = RadarSession()
+                        self._radar_provider = 'iem'
+                    self._radar_session.begin_pass(pass_deadline)
+                    self._radar_session.on_retry = lambda end, first_byte=False: self._radar_transport_retry(
+                        'iem-nexrad-n0b', end, reserve=reserve, first_byte=first_byte)
+                    try:
+                        self._radar_site_listing(check, dict(site))
+                    except _RadarBudget:
+                        pass  # preserve unknown/last evidence until the next cadence
+            if self._radar_refuse_dark_site(ctx):
+                if not discovery:
+                    return
+                # Refusal must not stop the Region radar from refreshing.
+                adapters = [pair for pair in adapters if pair[0] != 'iem-nexrad-n0b']
+                ctx['source_fallback'] = 'site-not-reporting'
+                ctx['sources'][1].update(available=False, reason='not reporting')
             same_mode = previous.available and previous.source_pref == ctx['source_pref'] and previous.source_fallback == ctx['source_fallback']
             if (same_mode and previous.source_id in dict(adapters) and previous.source_id != adapters[0][0]
                     and time.monotonic()-self._radar_source_since < 300
@@ -2901,6 +2972,8 @@ class AlmanacEmitter:
                         ctx.update(intent_triggered=False, reuse_newest=False)
                         ctx.pop('site_reasons', None)
                         adapter(ctx)  # same deadline, build count and rolling request gate
+                    if source == 'iem-nexrad-n0b' and self._radar_refuse_dark_site(ctx):
+                        return
                     if not ctx.get('retained_failed'):
                         self._radar_transport_failures.pop(source, None)
                     try:
@@ -2933,6 +3006,8 @@ class AlmanacEmitter:
                     self._radar_budget_retry(source, needed)
                     return
                 except Exception as error:
+                    if source == 'iem-nexrad-n0b' and self._radar_refuse_dark_site(ctx):
+                        return
                     self._radar_health.last_error = str(error) or type(error).__name__
                     self._radar_forget(source)
                     self._radar_checkpoint(ctx)
@@ -2991,6 +3066,12 @@ class AlmanacEmitter:
         age = int(now-snap.ts_frame) if snap.ts_frame is not None else None
         factor = 1609.344 if snap.units == 'mi' else 1000
         choices = [dict(meters=d*factor,label=f'{d} {snap.units}') for d in (5,10,20,25,50,100,150,200,250)]
+        nearest = None
+        if snap.nexrad:
+            nearest = dict(reporting=None, newestTs=None, reason=None, checkedTs=None, nextCheckTs=None)
+            nearest.update(snap.nexrad)
+            nearest.update(ageSec=max(0, int(now-nearest['newestTs'])) if nearest['newestTs'] is not None else None,
+                           checkedAt=local(nearest['checkedTs']), nextCheckAt=local(nearest['nextCheckTs']))
         tiles = dict(snap.tiles or {})
         tiles['frames'] = [{k:v for k,v in dict(f,at=local(f['ts'])).items() if k not in ('complete','publishable','acquiredSites')}
                            for f in tiles.get('frames',())]
@@ -3020,7 +3101,7 @@ class AlmanacEmitter:
             rings=[dict(meters=float(r['label'].split()[0])*factor,label=r['label']) for r in snap.rings or ()],
             frameCount=len(snap.frames),observedAt=local(snap.ts_frame),observedTs=snap.ts_frame,
             ageSec=age,staleSec=snap.stale_sec,stale=age is not None and age>=snap.stale_sec,
-            fetchedAt=snap.ts_fetch,updatedAt=local(snap.ts_fetch),nexrad=snap.nexrad,legend=dict(snap.legend))
+            fetchedAt=snap.ts_fetch,updatedAt=local(snap.ts_fetch),nexrad=nearest,legend=dict(snap.legend))
 
     def _check_version(self, _dt=None):
         """ Kick off a non-blocking GitHub version check on a daemon thread so a
@@ -3855,6 +3936,11 @@ class AlmanacEmitter:
         alerts_snap = self._alerts_result
         with self._radar_lock:
             radar_snap = self._radar_result
+            if radar_snap.nexrad:
+                nearest = dict(radar_snap.nexrad)
+                nearest.update(self._radar_site_status.get(nearest['id'], {}))
+                nearest['nextCheckTs'] = self._radar_discovery.due
+                radar_snap = radar_snap._replace(nexrad=nearest)
             radar_refresh = self._radar_refresh
         ver_snap    = self._ver_result
         fc_rows   = self._unify_today(

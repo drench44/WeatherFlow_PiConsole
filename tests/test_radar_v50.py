@@ -39,15 +39,15 @@ def test_aligned_discovery_bounded_repoll_and_no_tiles(scheduled):
     clock.advance(119.99)
     assert len(h.calls) == before
     clock.advance(.01)
-    assert len(h.calls) == before + 1  # unchanged costs metadata only
+    assert len(h.calls) == before + 2  # unchanged: MRMS metadata + closest-site listing, no tiles
     assert e._radar_known('iem-mrms-lcref', dict(intent_triggered=True))['newest'] == first
     assert e._radar_discovery.last_poll == first + 420
     clock.advance(100)
-    assert len(h.calls) == before + 6
+    assert len(h.calls) == before + 12
     assert e._radar_discovery.polls == 6
     assert e._radar_discovery.due == first + 640
     clock.advance(119)
-    assert len(h.calls) == before + 6
+    assert len(h.calls) == before + 12
     e.stop()
     assert not clock.events
 
@@ -111,7 +111,7 @@ def test_busy_lane_rearms_without_counting_a_poll(scheduled):
         e._radar_checkpoint(dict(request_reserve=ae.RADAR_HISTORY_RESERVE))
     e._inflight.clear()
     clock.advance(5)
-    assert len(h.calls) == before + 1
+    assert len(h.calls) == before + 2
     assert not e._radar_discovery_pending
 
 
@@ -132,7 +132,7 @@ def test_retry_at_readiness_consumes_discovery_once(scheduled):
     e._radar_arm_discovery()  # place readiness after the coincident retry
     before = len(h.calls)
     clock.advance(120)
-    assert len(h.calls) == before + 1
+    assert len(h.calls) == before + 2
     assert e._radar_discovery.polls == 1
     assert e._radar_discovery.due == h.latest + 440
 
@@ -163,11 +163,11 @@ def test_breaker_probe_recovers_without_shifting_scan_phase(scheduled):
     e._radar_arm_discovery()
     before = len(h.calls)
     clock.advance(30)
-    assert len(h.calls) == before + 1
+    assert len(h.calls) == before + 2
     assert e._radar_health.snapshot()['breaker'] == 'closed'
     assert e._radar_discovery.due == h.latest + 420
     clock.advance(89)
-    assert len(h.calls) == before + 1
+    assert len(h.calls) == before + 2
 
 
 def test_advertised_scan_is_not_delayed_by_prediction(make_emitter, hybrid):

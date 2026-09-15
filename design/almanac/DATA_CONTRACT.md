@@ -378,6 +378,55 @@ that a radar sees every point inside that circle. `nexrad` still reports the
 nearest site within 285 miles; `distanceMeters` provides the unrounded value
 used to decide eligibility.
 
+### Closest-site evidence and refusal (v6.0)
+
+The closest-site identity stays independent of the drawn timeline. When `nexrad`
+is non-null, these fields describe its **last listing**, even while Region is
+showing and even when tile acquisition subsequently fails:
+
+| Field | Meaning |
+| --- | --- |
+| `nexrad.reporting` | Boolean freshness result at the last listing evaluation; null before any check. False alone does not prove an empty listing: inspect `reason` and `newestTs`. |
+| `nexrad.newestTs` | Newest accepted UTC scan epoch from the listing, or null for an empty/failed listing. Existing listing validation and history horizon still apply. |
+| `nexrad.ageSec` | Nonnegative whole seconds since `newestTs`, recomputed at publication; null without a scan. This clock advances while `checkedTs` stays fixed. |
+| `nexrad.reason` | Null when reporting, `not reporting` for an empty or over-age listing, `scan unavailable` for a failed/invalid listing; null before any check. |
+| `nexrad.checkedTs` | Wall-clock epoch of the listing attempt's observation time. Cache reuse and heartbeat publication do not advance it. Null before a check. |
+| `nexrad.checkedAt` | Station-local `HH:MM` rendering of `checkedTs`, or null. It is a check time, never a claimed outage start. |
+| `nexrad.nextCheckTs` | Current existing discovery wakeup epoch, or null when no wakeup is scheduled. Budget/busy-lane rescheduling changes this value. |
+| `nexrad.nextCheckAt` | Station-local `HH:MM` rendering of `nextCheckTs`, or null. |
+| `refresh.reason` | `not reporting` for an empty-listing refusal; otherwise null/absent. Existing `refresh.intent` identifies the rejected session/generation. Refusal leaves Region's refresh state idle and does not mark its measurements stale. |
+
+`sourceFallback` adds `site-not-reporting`: the durable site preference is kept
+while the existing Region window is shown. A refusal does not acknowledge new
+geometry in `tiles.intent` or change any scan timestamp. It creates no provider
+failure streak, repair retry or 20-second switch deadline. The engine checks
+last evidence before transport on a tap; newly empty listings also refuse in
+that pass. This applies to an empty closest-site choice from an already measured
+Region view. Existing site playback still uses its nearest-reporting timeline;
+an old but nonempty listing or a transport error follows normal acquisition.
+
+On each existing discovery wakeup while Region shows, the closest eligible
+site is listed before the unchanged-MRMS early return, including while unviewed
+or below site zoom seven. There is no additional timer, emit-triggered I/O or
+polling loop. This optional request shares the pass deadline and 240/minute gate,
+preserving the footprint-aware mandatory reserve (at least 34 interaction slots). It yields under budget pressure without inventing
+a new observation. A per-pass listing table prevents repeating the closest-site
+request when site acquisition/fallback/warming follows in that same pass. Later
+discovery refreshes both site knowledge and Region imagery; reporting recovery
+can fulfill the durable site preference on that wakeup.
+
+Both themes keep the closest segment tappable when the site is `not reporting`
+or its scan is unavailable. A second line, also in its accessible name, says
+`off air · checked 09:12`, `last scan 27 min ago`, or `scan unavailable` according
+to the evidence. Null knowledge adds no guessed status. An empty-listing tap
+immediately says `KATX is off air · showing Region · Checking again at 09:32`
+(omit the last clause without a schedule). It bypasses the note's 600ms grace
+and cancels switch timing; a matching engine refusal does the same in its poll.
+Older generations cannot refuse a newer choice. Region's existing caption is
+unchanged. Choosing Region can cancel the saved site preference after refusal.
+An empty recent listing cannot establish “off air since HH:MM,” so the UI
+explicitly labels the time as a check.
+
 ### Acquisition, budgets and tile service (N)
 
 MRMS metadata:
@@ -1304,7 +1353,7 @@ frame does not exclude older decoded scans. `good` names acquisition's newest;
 | --- | --- | --- |
 | Cold acquisition | Paint newest as it decodes; start when `min(4, total)` scans are decoded (at least two to animate). | Count decoded composites, not tile coverage or a contiguous suffix. |
 | Playing / manifest or decode arrives | Preserve current scan, blend and deadline; finish the fixed cycle and its old-newest 1100ms hold. | Stage the latest window and decoded arrivals; retain composites with the same frame key. |
-| Geometry change | Continue the current cycle through the camera, without resetting its deadline. Keep naming the displayed scan; corner note says `Refreshing · frame N of M`. | Stage newest-first replacements; wait for four, then adopt at wrap. At four, free already played outgoing prefix scans oldest first (preserve current/blend and the remaining sequence); close the remainder on adoption. Never free a future scan merely to make room. |
+| Geometry change | Continue the current cycle through the camera, without resetting its deadline. Keep naming the displayed scan; corner note says `Playing previous view · sharpening N of M` (v6.0). | Stage newest-first replacements; wait for four, then adopt at wrap. At four, free already played outgoing prefix scans oldest first (preserve current/blend and the remaining sequence); close the remainder on adoption. Never free a future scan merely to make room. |
 | Wrap | With four replacements ready (otherwise repeat the outgoing cycle), snapshot all currently decoded scans in the latest window; blend old-newest → slid-oldest, then progress to new-newest and its hold. | Late frames join here. Close aged-out composites once neither cycle, current nor blend needs them. |
 | Paused / manifest arrives | Keep the displayed scan; update the window silently. Resume from that scan if retained, otherwise wrap to the slid-oldest. | Retain a displayed aged-out composite until playback leaves it. |
 | Reduced motion | Same wrap adoption, no crossfade. One requested sweep stops at that cycle's newest; another Play uses the updated window. | Same decoded inventory and bitmap lifetime rules. |
@@ -1317,6 +1366,19 @@ fallbacks cannot re-key retained composites. Aging removes only the composite;
 resident native tiles remain subject to the existing LRU. A wrap performs no fetch
 or decode; a resident-native new scan requires compositing only. Newly unavailable
 native inputs still require normal newest-first acquisition.
+
+The v6.0 geometry note uses no new payload field: `N` counts bitmaps in the
+incoming `loaded` window and `M` is its advertised inventory, capped at eight.
+The prefix separately names retained playback (`Previous view` when playback is
+stopped or paused); zero sharpening progress cannot
+be confused with zero playing frames. After adoption ordinary refresh copy
+resumes. Failure/retry notes retain their precedence and the read/AS OF continue
+to name the actual painted scan. A dirty camera/tile paint coinciding with a
+playback deadline yields to that deadline: reproject the successor once, then
+admit at most one native decode in that RAF. Incoming composite assembly remains
+limited to one per RAF on frames without a paint. Ordinary same-camera temporal
+blends retain their two weighted draws; neither entire window is reprojected
+on every animation frame.
 
 The loop cluster at left:12px/bottom:12px keeps its box through play, clear,
 buffering, zoom, source swaps and frame staging; only an inactive radar tab or
@@ -1431,3 +1493,23 @@ and oldest-first bitmap closes. A loopback-only 8→7→6→7→8 sequence at th
 spacing measures actual paints, decode admission per RAF and independent bitmap
 ownership against 40MiB. No panel CPU or process RSS claim follows from these
 local raster-storage and paint measurements.
+
+### Radar v6.0 local verification
+
+`tests/test_radar_v60.py` covers unknown/empty/old/fresh/failed listings, publication
+age versus fixed check time, Region discovery cadence/reserve, immediate refusal
+without transport or hysteresis, continuing Region updates, and single-listing
+recovery. `tests/verify_radar_v60.py` uses the v5.9 loopback fixture in paper/night
+for before-tap evidence, synchronous and matching-poll refusal, generation fencing,
+stale/error distinctions, retained playback pixels and a forced dirty/deadline
+collision with one echo paint per RAF. The v5.9 zoom/pan/two-step scenarios and
+real loopback acquisition remain required.
+
+`PYTHONPATH=. ./venv-test/bin/python tools/benchmark_radar_v60.py -o FILE.json`
+measures 8→7→8 with the same local fixture and headless Chromium (`--disable-gpu`),
+starting from an eight-scan cycle with its next deadline at +150ms,
+recording per-RAF echo/reprojection/native-decode/composite counts plus CDP
+renderer TaskDuration/ScriptDuration over each 0.6-second step. These local task
+clock values do not measure all Chromium process/thread CPU or establish Pi
+performance. `--html PATH` selects a local baseline page without changing the
+working tree. Fixture traffic is restricted to its 127.0.0.1 origin.

@@ -205,7 +205,10 @@ def test_supersede_tile_boundary_immediate_new_pass(make_emitter, hybrid, monkey
     expect = {'radar_zoom': ('zoom',9), 'radar_source': ('source','site'),
               'radar_center': ('center',dict(lat=47.8, lon=-122.3)), 'radar_intent': ('seq',41)}[preference]
     assert all(intent[expect[0]]==expect[1] for intent in intents)
-    assert emitter._radar_refresh['state']==('failed' if preference == 'radar_source' else 'idle')
+    assert emitter._radar_refresh['state']=='idle'
+    if preference == 'radar_source':
+        assert emitter._radar_refresh['reason']=='not reporting'
+        assert emitter._radar_result.source_fallback=='site-not-reporting'
     emitter.stop()
 
 
