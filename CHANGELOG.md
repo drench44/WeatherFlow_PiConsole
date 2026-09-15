@@ -7,6 +7,18 @@ to shared upstream code that the classic console benefits from too.
 ## 2026-09-14
 
 ### Radar
+- **Radar v4.8 bounds silently dead pooled sockets.** Reused connections wait at
+  most three seconds for the first response byte, then retry a zero-byte
+  GET/HEAD failure once on a fresh connection. Partial responses and fresh hangs
+  are never replayed. One absolute 25-second budget now spans the whole pass,
+  including pooled workers, DNS waits, TLS, headers/body, retries and history;
+  trickled reads cannot restart the timeout. Idle reuse defaults to two seconds
+  (or the shorter advertised Keep-Alive), with guarded TCP keepalive settings
+  of 2/2/2 seconds/seconds/probes on Linux. INFO telemetry separately counts
+  stale-first-byte retries; successful recovery keeps an honest idle refresh
+  state. Real loopback HTTPS tests cover six hanging reused sockets recovering
+  on fresh connections in about three seconds and bounded failure when retries
+  also hang. No panel or mesh timing claim is made.
 - **Radar v4.7 keeps the manifest sliding during a new scan.** At unchanged
   source, geometry and legend, the first pending-newest publish retains the
   previous hour's frames and complete counts. Slow newest tiles cannot replace

@@ -19,6 +19,23 @@ def is_transport_error(error):
     return isinstance(error, TRANSPORT_ERRORS)
 
 
+class _StaleFirstByteTimeout(socket.timeout):
+    """A reused socket accepted a request but returned no HTTP response byte."""
+
+
+def _tcp_keepalive(sock):
+    # Mesh paths can disappear without FIN/RST. Best effort on non-Linux kernels.
+    options = [(socket.SOL_SOCKET, getattr(socket, 'SO_KEEPALIVE', None), 1)]
+    options += [(socket.IPPROTO_TCP, getattr(socket, name, None), value)
+                for name, value in (('TCP_KEEPIDLE', 2), ('TCP_KEEPINTVL', 2), ('TCP_KEEPCNT', 2))]
+    for level, option, value in options:
+        if option is not None:
+            try:
+                sock.setsockopt(level, option, value)
+            except OSError:
+                pass  # an exposed constant need not be supported by this kernel
+
+
 class _CountingReader(io.RawIOBase):
     """Count below buffering, including partial status lines before a timeout."""
     def __init__(self, raw, conn):
@@ -28,7 +45,22 @@ class _CountingReader(io.RawIOBase):
         return True
 
     def readinto(self, buffer):
-        count = self.raw.readinto(buffer)
+        # http.client may perform many reads (headers, chunk framing, body).
+        # Recompute before EACH raw read: a per-recv timeout is not a deadline.
+        end = self.conn.deadline
+        first_byte = not self.conn.response_bytes and self.conn.first_byte_end is not None
+        if first_byte:
+            end = min(end, self.conn.first_byte_end)
+        remaining = end - time.monotonic()
+        try:
+            if remaining <= 0:
+                raise socket.timeout('radar response exceeded deadline')
+            self.raw._sock.settimeout(remaining)
+            count = self.raw.readinto(buffer)
+        except socket.timeout as error:
+            if first_byte and end < self.conn.deadline:
+                raise _StaleFirstByteTimeout('radar reused socket first-byte timeout') from error
+            raise
         self.conn.response_bytes += count or 0
         return count
 
@@ -50,18 +82,37 @@ class _Connection(http.client.HTTPSConnection):
         super().__init__(host, port, timeout=timeout)
         self.addresses = addresses
         self.response_bytes = 0
+        self.deadline = time.monotonic() + timeout
+        self.first_byte_end = None
         self.response_class = lambda *a, **kw: _TrackedResponse(self, *a, **kw)
+
+    def send(self, data):
+        if self.sock is None:
+            self.connect()
+        remaining = self.deadline - time.monotonic()
+        if remaining <= 0:
+            raise socket.timeout('radar send exceeded deadline')
+        self.sock.settimeout(remaining)
+        super().send(data)
 
     def connect(self):
         # Connect to the resolved address; certificate verification, SNI and HTTP
         # Host still use the original hostname. Reconnect never re-enters DNS.
-        end = time.monotonic() + self.timeout
+        end = self.deadline
         failure = OSError("no radar IPv4 addresses")
         for family, kind, proto, _, address in self.addresses:
             sock = socket.socket(family, kind, proto)
             try:
-                sock.settimeout(max(.001, end - time.monotonic()))
+                remaining = end - time.monotonic()
+                if remaining <= 0:
+                    raise socket.timeout('radar connect exceeded deadline')
+                _tcp_keepalive(sock)
+                sock.settimeout(remaining)
                 sock.connect(address)
+                remaining = end - time.monotonic()
+                if remaining <= 0:
+                    raise socket.timeout('radar TLS exceeded deadline')
+                sock.settimeout(remaining)
                 self.sock = self._context.wrap_socket(sock, server_hostname=self.host)
                 return
             except OSError as error:
@@ -109,11 +160,17 @@ class _Response:
 
 class RadarSession:
     MAX_CONNECTIONS = 6
-    IDLE_SEC = 4
+    IDLE_SEC = 2
+    FIRST_BYTE_TIMEOUT_SEC = 3
     DNS_TTL_SEC = 15 * 60
 
-    def __init__(self, on_retry=None):
+    def __init__(self, on_retry=None, first_byte_timeout=None):
         self.on_retry = on_retry
+        self.first_byte_timeout = (self.FIRST_BYTE_TIMEOUT_SEC if first_byte_timeout is None
+                                   else float(first_byte_timeout))
+        if not 0 < self.first_byte_timeout < float('inf'):
+            raise ValueError('first-byte timeout must be finite and positive')
+        self._pass_deadline = float('inf')
         self.addresses = {}
         self._resolved_at = {}
         self._dns_errors = {}
@@ -123,11 +180,13 @@ class RadarSession:
         self._used = {}
         self._idle_sec = {}
         self.retries = 0
+        self.stale_first_byte_retries = 0
         self._condition = threading.Condition()
         self._closed = False
 
-    def begin_pass(self):
+    def begin_pass(self, deadline=None):
         with self._condition:
+            self._pass_deadline = float('inf') if deadline is None else deadline
             # A broken resolver costs once per pass; the next pass may recover.
             self._dns_errors.clear()
             self._expire()
@@ -170,11 +229,10 @@ class RadarSession:
             if resolve:
                 event = self._resolving[key] = threading.Event()
         if resolve:
-            if cached is not None:
-                threading.Thread(target=self._resolve, args=(key, event),
-                                 name='radar-dns', daemon=True).start()
-            else:
-                self._resolve(key, event)
+            # The system resolver is not cancellable. Even the cold leader waits
+            # on the event only until its deadline; late results may seed cache.
+            threading.Thread(target=self._resolve, args=(key, event),
+                             name='radar-dns', daemon=True).start()
         if cached is not None:
             return cached  # stale-while-refresh: first tile never waits for DNS
         if not event.wait(max(0, end - time.monotonic())):
@@ -218,8 +276,10 @@ class RadarSession:
         if url.scheme != 'https' or not url.hostname or url.username or url.password:
             raise ValueError('radar requires an HTTPS host')
         key = (url.hostname, url.port or 443)
-        end = time.monotonic() + timeout
+        end = min(time.monotonic() + timeout, self._pass_deadline)
         for attempt in range(2):
+            if time.monotonic() >= end:
+                raise TimeoutError('radar pass exceeded deadline')
             addresses = self._addresses_for(key, end)
             with self._condition:
                 while True:
@@ -245,6 +305,8 @@ class RadarSession:
                         break
                     self._condition.wait(remaining)
             conn.timeout = remaining
+            conn.deadline = end
+            conn.first_byte_end = None
             conn.response_bytes = 0
             try:
                 if conn.sock:
@@ -254,8 +316,10 @@ class RadarSession:
                 remaining = end - time.monotonic()
                 if remaining <= 0:
                     raise TimeoutError('radar request exceeded deadline')
+                if reused:
+                    conn.first_byte_end = min(end, time.monotonic() + self.first_byte_timeout)
                 if conn.sock:
-                    conn.sock.settimeout(remaining)
+                    conn.sock.settimeout(min(remaining, self.first_byte_timeout) if reused else remaining)
                 response = conn.getresponse()
                 if response.status != 200:
                     response.close()
@@ -267,10 +331,13 @@ class RadarSession:
                         not is_transport_error(error) or conn.response_bytes or
                         time.monotonic() >= end):
                     raise
+                first_byte = isinstance(error, _StaleFirstByteTimeout)
                 if self.on_retry is not None:
-                    self.on_retry(end)  # caller's rate/cooldown gate also covers retries
+                    # The caller's rate/cooldown gate also covers retries.
+                    self.on_retry(end, first_byte=first_byte)
                 with self._condition:
                     self.retries += 1
+                    self.stale_first_byte_retries += int(first_byte)
 
     def discard(self, url):
         """Drop idle sockets after a validation error; never interrupt other leases."""

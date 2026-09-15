@@ -99,7 +99,12 @@ def verify(browser, server, theme, output):
             started.set();gate.wait(35)
     server.request_hook = delay
     page.evaluate('r=>{window.heldV47=radarView.loaded.map(f=>({f,b:f.bitmap}));window.seenV47=[];audit.fetches=[];const label=radarFrameLabel;radarFrameLabel=f=>{seenV47.push(f.stamp);return label(f)};renderRadar({radar:r});}', radar)
-    assert started.wait(5), 'newest fetch did not start'
+    # Pump Playwright's route callbacks while waiting for the server event.
+    # A blocking Event.wait can prevent route.continue_ from ever running.
+    until = time.monotonic()+5
+    while not started.is_set() and time.monotonic() < until:
+        page.wait_for_timeout(10)
+    assert started.is_set(), 'newest fetch did not start'
     start=time.monotonic();timer=threading.Timer(25,gate.set);timer.start();samples=[]
     try:
         for second in range(31):

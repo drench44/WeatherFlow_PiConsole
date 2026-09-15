@@ -259,16 +259,56 @@ the pool lock, with a per-host event sharing the result among cold callers;
 another host can proceed meanwhile. Expired good addresses remain immediately
 usable while one background refresh runs. A failed refresh keeps those addresses
 and retries next pass; a cold resolver failure is also charged only once per pass.
-System DNS cannot be interrupted by socket timeout; an over-budget cold lookup
-is rejected on return, while cached callers never wait for resolution.
+System DNS cannot be interrupted by socket timeout: cold lookups also run in a
+daemon resolver thread. Every cold caller waits on the shared event only until
+its deadline; a late result may populate the cache, but cannot issue a request.
+Cached callers never wait for resolution.
 
-Idle sockets expire after four seconds or the smaller advertised Keep-Alive
-window minus 250 ms. A reused GET/HEAD that fails before any response byte is
-retried once on a fresh socket within the original deadline and atomic rate gate.
-Partial responses and fresh-socket failures propagate. Connection: close drops
-the socket; provider changes and shutdown close the session. A primary transport
-hiccup retains the completed scan and retries in seconds; repeated failed passes
-permit fallback. Transport errors do not negatively cache frames.
+**v4.8 transport deadlines.** Idle sockets expire after `RadarSession.IDLE_SEC = 2`
+seconds or the smaller advertised Keep-Alive window minus 250 ms. The shorter
+idle bound limits exposure to silent path death on a wifi mesh: an apparently
+open TCP socket can accept a request and then return no response. It is a
+conservative default, not a measured mesh lifetime. `Connection: close` drops
+the socket; provider changes and shutdown close the session.
+
+A reused socket gets `RadarSession.FIRST_BYTE_TIMEOUT_SEC = 3` seconds from the
+completed request send until its first HTTP response byte, capped by the original
+request/pass deadline. This is configurable per session with
+`RadarSession(first_byte_timeout=seconds)` (finite, positive). A zero-byte read
+timeout on a reused GET/HEAD discards that socket and retries once on a **fresh**
+connection, using the existing rate/cooldown gate and remaining time. Immediate
+zero-byte transport failures use the same retry path. The first response byte
+restores the remaining ordinary deadline; partial status lines, headers and
+bodies are never replayed. Fresh-socket failures, including a hanging fresh retry,
+propagate without another attempt. Fresh connections retain the ordinary
+`RADAR_HTTP_TIMEOUT_SEC = 10` request cap, bounded by the pass's remaining time.
+
+`RADAR_PRIMARY_DEADLINE_SEC = RADAR_BUILD_DEADLINE_SEC = 25` is one absolute
+monotonic deadline starting at pass entry, shared by metadata, archive HEADs,
+all tile/list workers, source fallback, revalidation, history and idle warming
+within that pass. It replaces the former 150-second overall build allowance.
+Independent resumed warming starts its own 25-second pass. Session admission,
+DNS/pool waits, connect, TLS, send, every raw header/body read and worker waits
+consume the same remaining budget; a retry or queued worker cannot reset it.
+After expiry no further network request is admitted. Active workers drain under
+that deadline with a small scheduling/CPU cleanup grace, retaining already
+validated tiles for the next pass. The regression tolerance is 0.4–0.5 seconds
+on loopback, not a hard real-time scheduling guarantee on the Pi.
+
+Pooled sockets enable `SO_KEEPALIVE`; where supported, Linux `TCP_KEEPIDLE = 2`,
+`TCP_KEEPINTVL = 2`, and `TCP_KEEPCNT = 2` detect dead paths between passes.
+Missing or rejected platform options are harmless. These probes complement the
+first-byte timeout and do not replace it.
+
+The INFO retry line carries cumulative `transport_retries=N` and
+`stale_first_byte_retries=M`; the latter counts only reused zero-byte read
+timeouts that pass the retry gate. Successful transparent recovery leaves the
+refresh state successful/idle, without a failure note or provider failure count.
+A failed primary transport pass retains the completed scan and retries in seconds;
+repeated failed passes permit fallback. Transport errors do not negatively cache
+frames. Loopback HTTPS regressions cover normal/idle-closing origins, accepted
+requests with no response, six simultaneous stale sockets, failed fresh retries,
+queued pool waiters, trickled headers/body, TCP options and engine refresh state.
 
 Validated native PNG bytes enter a 400-tile in-memory LRU before cancellation is
 checked. Keys include source, site when applicable, scan timestamp, zoom and tile

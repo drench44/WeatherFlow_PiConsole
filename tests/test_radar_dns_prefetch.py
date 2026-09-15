@@ -247,7 +247,7 @@ def test_newest_history_concurrency_bound(make_emitter, monkeypatch, workers):
     monkeypatch.setattr(emitter, '_radar_request', request)
     ctx = dict(zoom=8, tiles=[(i, 1, 0, 0) for i in range(15)], tile_workers=workers)
     with ThreadPoolExecutor(max_workers=1) as pool:
-        future = pool.submit(lambda: list(emitter._radar_tile_batch('iem-mrms-lcref', 1, ctx, 100, lambda x,y:str(x), None)))
+        future = pool.submit(lambda: list(emitter._radar_tile_batch('iem-mrms-lcref', 1, ctx, time.monotonic()+5, lambda x,y:str(x), None)))
         try:
             barrier.wait(3)
             assert peak == workers

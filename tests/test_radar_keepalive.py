@@ -27,7 +27,8 @@ def origin(tmp_path, monkeypatch):
                    check=True, capture_output=True)
     state = SimpleNamespace(connections=0, requests=[], closed=0, idle=2,
                             close_after=0, alternate=False, fail_fresh=False,
-                            headers={}, second=None, delay=0, active=0, peak=0, hold=0, body=png())
+                            headers={}, second=None, delay=0, active=0, peak=0, hold=0, body=png(),
+                            hang=False, hang_ids=set(), hang_path=None, release=threading.Event(), drip=None)
     lock = threading.Lock()
     gate = threading.Condition(lock)  # hold: tile requests wait until `hold` are in flight (deterministic peak)
     class Handler(BaseHTTPRequestHandler):
@@ -45,10 +46,30 @@ def origin(tmp_path, monkeypatch):
             finally:
                 with lock: state.closed += 1
         def log_message(self, *args): pass
+        def handle(self):
+            try:
+                super().handle()
+            except (ConnectionError, ssl.SSLError):
+                pass  # the client deliberately drops timed-out/partial responses
         def do_HEAD(self): self.do_GET()
         def do_GET(self):
             self.count += 1
             with lock: state.requests.append((self.ident, self.command, self.path))
+            if state.hang or self.ident in state.hang_ids or (state.hang_path and self.path.startswith(state.hang_path)):
+                # Read the complete request, then send nothing and keep TLS open.
+                state.release.wait(40)
+                self.close_connection = True
+                return
+            if state.drip is not None:
+                data, interval = state.drip
+                try:
+                    for byte in data:
+                        self.wfile.write(bytes([byte])); self.wfile.flush()
+                        if state.release.wait(interval): break
+                except (OSError, ssl.SSLError):
+                    pass
+                self.close_connection = True
+                return
             if state.fail_fresh:
                 self.close_connection = True
                 return
@@ -99,6 +120,7 @@ def origin(tmp_path, monkeypatch):
     try:
         yield state
     finally:
+        state.release.set()
         server.shutdown(); server.server_close(); thread.join(5)
 
 
@@ -144,9 +166,9 @@ def test_fresh_failure_and_failed_retry_propagate(origin):
 
 
 @pytest.mark.parametrize('headers,age,reconnect', [
-    ({}, 3.9, False), ({}, 4.01, True),
+    ({}, 1.9, False), ({}, 2.01, True),
     ({'Keep-Alive': 'max=100, timeout=1'}, .8, True),
-    ({'Keep-Alive': 'timeout=75'}, 4.01, True),
+    ({'Keep-Alive': 'timeout=75'}, 2.01, True),
     ({'Keep-Alive': 'timeout=0'}, 0, True),
     ({'Connection': 'close'}, 0, True),
 ])
@@ -284,7 +306,7 @@ def test_retry_obeys_shared_request_gate(make_emitter, origin):
     origin.close_after = 1
     emitter = make_emitter()
     source = 'iem-mrms-lcref'
-    session = http.RadarSession(on_retry=lambda end: emitter._radar_transport_retry(source, end))
+    session = http.RadarSession(on_retry=lambda end, **kw: emitter._radar_transport_retry(source, end, **kw))
     emitter._radar_session = session
     try:
         get(session, origin)
