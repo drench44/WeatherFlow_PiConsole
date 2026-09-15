@@ -24,10 +24,11 @@ SCENARIO = r'''async()=>{
   radarGeoRequest=()=>{};radarOverlayBuild=()=>{};
   const baseline=structuredClone(radarView.data),baseTs=baseline.tiles.frames[0].ts;
   const scan=i=>({ts:baseTs+i*120,stamp:radarStamp(baseTs+i*120),at:'12:'+String(i*2).padStart(2,'0'),levels:{'8':true},siteScans:[]});
-  const manifest=(first,last)=>{const r=structuredClone(baseline);r.stale=false;r.tiles.frames=Array.from({length:last-first+1},(_,i)=>scan(first+i));r.observedTs=r.tiles.frames.at(-1).ts;r.observedAt=r.tiles.frames.at(-1).at;r.tiles.newest={...r.tiles.newest,stamp:r.tiles.frames.at(-1).stamp,mask:'ffffffffffffffff',expectedMask:'ffffffffffffffff'};return r;};
+  // Include older listed history: selection of eight differs from an omission.
+  const manifest=(first,last)=>{const r=structuredClone(baseline);r.stale=false;r.tiles.frames=Array.from({length:last+1},(_,i)=>scan(i));r.observedTs=r.tiles.frames.at(-1).ts;r.observedAt=r.tiles.frames.at(-1).at;r.tiles.newest={...r.tiles.newest,stamp:r.tiles.frames.at(-1).stamp,mask:'ffffffffffffffff',expectedMask:'ffffffffffffffff'};return r;};
   const plate=new OffscreenCanvas(956,490),px=plate.getContext('2d');
   const decode=f=>{px.fillStyle='#8aa3c6';px.fillRect(0,0,956,490);f.bitmap=plate.transferToImageBitmap();f.camera={...radarCamera};f.ready=true;f.hasEcho=true;f.legend={remapped:true};};
-  const reset=(missing=[])=>{radarRelease();radarView.paused=false;radarView.singleSweep=false;radarView.data=manifest(0,7);radarView.loaded=radarView.data.tiles.frames.map(f=>({...f,revision:baseline.tiles.revision,sourceId:baseline.sourceId}));for(const [i,f] of radarView.loaded.entries())if(!missing.includes(i))decode(f);else f.levels={'8':false};radarView.current=radarView.good=radarView.loaded.at(-1);radarUpdateReady();radarLoopSync();radarEchoDirty=false;radarEchoPaint(radarView.current);};
+  const reset=(missing=[])=>{radarRelease();radarView.paused=false;radarView.singleSweep=false;radarView.data=manifest(0,7);radarView.windowKey=radarWindowKey(radarView.data);radarView.loaded=radarView.data.tiles.frames.map(f=>({...f,revision:baseline.tiles.revision,sourceId:baseline.sourceId}));for(const [i,f] of radarView.loaded.entries())if(!missing.includes(i))decode(f);else f.levels={'8':false};radarView.current=radarView.good=radarView.loaded.at(-1);radarUpdateReady();radarLoopSync();radarEchoDirty=false;radarEchoPaint(radarView.current);};
   const id=f=>Math.round((f.ts-baseTs)/120),ids=fs=>fs.map(id);
   const read=()=>document.getElementById('rad-frame-time').textContent;
   const tick=()=>parseFloat(document.getElementById('rad-tick').style.left);
@@ -82,7 +83,7 @@ SCENARIO = r'''async()=>{
   // cannot turn an old composite into a scan rendered by a different revision.
   const f=radarView.good,k=radarFrameKey(f);radarView.data.tiles.revision='000000000000';check(radarFrameKey(f)===k,'mutable render identity');
   radarView.data.tiles.revision=baseline.tiles.revision;
-  window.v46Harness={reset,step,advance,id,read,drawAt};radarView.active=false;
+  window.v46Harness={reset,step,advance,id,read,drawAt,manifest,warm,decode};radarView.active=false;
   return {sequence,advances,late,memory,read:read(),zeroTileFetches:true,retainedComposites:retained.size,agedBitmapClosed:oldBitmap.width===0,frameMs:RAD_FRAME_MS,holdMs:RAD_HOLD_MS,blendMs:RAD_BLEND_MS};
 }'''
 

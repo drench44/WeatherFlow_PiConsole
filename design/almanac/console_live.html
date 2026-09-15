@@ -2836,7 +2836,7 @@
     if(!radarAdmit(RAD_TILE_BYTES)){tile.bitmap.close();return;}
     radarTiles.set(key,tile);radarUnreserve(RAD_TILE_BYTES);
   }
-  function radarAcceptSource(){radarView.blend=null;
+  function radarAcceptSource(){radarView.windowKey=null;radarView.blend=null;
     var next=radarView.pendingSource.data;radarView.pendingSource=null;
     radarView.loaded.concat(radarView.retired).forEach(f=>{if(f.bitmap)f.bitmap.close();});radarView.loaded=[];radarView.readyFrames=[];radarView.cycle=[];radarView.retired=[];radarView.started=false;radarView.nextAt=0;radarView.good=radarView.current=null;radarCompositeJob=null;
     radarView.acceptingSource=true;renderRadar({radar:next});radarView.acceptingSource=false;radarCamera.zoom=clamp(radarCamera.zoom,next.zoomMin,next.zoomMax);radarCameraDirty=true;radarBaseDirty=true;radarEchoDirty=true;radarWake();
@@ -2946,13 +2946,13 @@
   function radarPruneFrames(){var keep=new Set([radarView.current,radarView.blend?.from,radarView.blend?.to,...radarView.cycle]);
     radarView.retired=radarView.retired.filter(f=>{if(keep.has(f))return true;if(f.bitmap){f.bitmap.close();delete f.bitmap;}return false;});
   }
-  function radarUpdateReady(){radarView.readyFrames=radarView.loaded.filter(f=>f.bitmap).sort((a,b)=>a.ts-b.ts);
+  function radarUpdateReady(){radarView.readyFrames=radarView.loaded.filter(f=>f.bitmap).sort((a,b)=>a.ts-b.ts).slice(-8);
     if(!radarView.started&&!radarView.paused&&radarView.good?.bitmap&&radarView.current!==radarView.good){radarView.current=radarView.good;radarEchoDirty=true;}
     if(radarView.paused||radarReduced()&&!radarView.singleSweep){radarView.cycle=[];radarPruneFrames();}
   }
   function radarPlayback(){return radarView.cycle.length?radarView.cycle:radarReady();}
   function radarReady(){return radarView.readyFrames;}
-  function radarRelease(){radarView.blend=null;radarView.pendingSource=null;radarEchoEpoch++;radarTileQueue=[];radarTiles.forEach(t=>t.bitmap.close());radarTiles.clear();radarView.loaded.concat(radarView.retired).forEach(f=>{if(f.bitmap)f.bitmap.close();});radarView.loaded=[];radarView.readyFrames=[];radarView.cycle=[];radarView.retired=[];radarView.started=false;radarView.nextAt=0;radarView.good=radarView.current=null;radarCompositeJob=null;radarMemory();$('rad-loop').hidden=true;}
+  function radarRelease(){radarView.windowKey=null;radarView.blend=null;radarView.pendingSource=null;radarEchoEpoch++;radarTileQueue=[];radarTiles.forEach(t=>t.bitmap.close());radarTiles.clear();radarView.loaded.concat(radarView.retired).forEach(f=>{if(f.bitmap)f.bitmap.close();});radarView.loaded=[];radarView.readyFrames=[];radarView.cycle=[];radarView.retired=[];radarView.started=false;radarView.nextAt=0;radarView.good=radarView.current=null;radarCompositeJob=null;radarMemory();$('rad-loop').hidden=true;}
   function radarFrameLabel(fr){if(fr.at)return fr.at;var r=radarView.data;if(!r||!r.observedAt||!isNum(fr.ts))return '—';var a=r.observedAt.split(':'),m=(+a[0]*60+(+a[1])-Math.round((r.observedTs-fr.ts)/60)+1440)%1440;return String(Math.floor(m/60)).padStart(2,'0')+':'+String(m%60).padStart(2,'0');}
   function radarCouldLoop(){var ready=radarPlayback(),total=Math.min(8,Math.max(radarView.loaded.length,radarView.data.frameCount||0,radarView.data.refresh?.frameTotal||0))||8;return !radarView.pendingSource&&radarGesture.state==='idle'&&radarView.active&&!document.hidden&&ready.length>=(radarView.cycle.length?2:Math.min(4,total))&&ready.length>=2&&ready.every(f=>f.bitmap)&&ready.some(f=>f.hasEcho)&&!radarView.data.stale;}
   function radarLoopSync(){if(radarView.paused||radarReduced()&&!radarView.singleSweep){radarView.cycle=[];radarPruneFrames();}var r=radarView.data,ready=radarPlayback(),play=$('rad-play'),loop=$('rad-loop');if(!r||!radarView.active){loop.hidden=true;return;}
@@ -2971,9 +2971,16 @@
     radarWake();
   }
   $('rad-play').addEventListener('click',function(){radarView.blend=null;radarEchoDirty=true;if(radarReduced()){radarView.singleSweep=!radarView.singleSweep;radarView.paused=!radarView.singleSweep;radarView.current=radarView.good;radarEchoDirty=true;}else radarView.paused=!radarView.paused;radarUpdateReady();radarPruneFrames();radarLoopSync();if(!radarReduced())$('rad-play').animate([{opacity:.5},{opacity:1}],{duration:120});});
-  function radarPreload(r){if(!radarView.active)return;var frames=(r.tiles&&r.tiles.frames||[]).slice(-8),have=new Map(radarView.loaded.map(f=>[radarFrameKey(f),f]));
+  function radarWindowKey(r){return JSON.stringify([r.sourceId,r.siteId,r.center,r.tiles?.z,r.tiles?.grid,r.tiles?.revision,r.legend]);}
+  function radarPreload(r){if(!radarView.active)return;
+    var windowKey=radarWindowKey(r);if(radarView.windowKey&&radarView.windowKey!==windowKey)radarRelease();radarView.windowKey=windowKey;
+    var incoming=r.tiles&&r.tiles.frames||[],frames=incoming.slice(-8),newest=r.observedTs??incoming.at(-1)?.ts??radarView.good?.ts,
+      listed=new Set(incoming.map(f=>f.stamp)),have=new Map(radarView.loaded.map(f=>[radarFrameKey(f),f]));
     radarView.loaded=frames.map(f=>{var identity={...f,sourceId:r.sourceId,revision:r.tiles.revision},key=radarFrameKey(identity),old=have.get(key);if(old){Object.assign(old,identity);have.delete(key);return old;}return {...identity,ready:false,hasEcho:false};});
-    have.forEach(f=>radarView.retired.push(f));
+    // An omitted scan is not a deletion. A truncated publish can arrive while
+    // newest is pending; retain its decoded history until the hour expires.
+    have.forEach(f=>{if(!listed.has(f.stamp)&&f.ts>=newest-3600&&f.ts<=newest)radarView.loaded.push(f);else radarView.retired.push(f);});
+    radarView.loaded.sort((a,b)=>a.ts-b.ts);
     if(radarCompositeJob&&!radarView.loaded.includes(radarCompositeJob.f))radarCompositeJob=null;
     radarView.good=radarView.loaded.at(-1)||null;
     // Cold acquisition may paint partial newest tiles. Running/paused displays

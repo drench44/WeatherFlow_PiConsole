@@ -832,9 +832,27 @@ The blend is **temporal**, never spatial smoothing or a fabricated scan. The rea
 names the frame whose weight is ≥0.5 (next wins the tie). Reduced motion uses
 hard cuts and an opt-in single sweep.
 
-**v4.6 playback state machine (page-only; no new wire fields):** `loaded` is the
-latest manifest window, `readyFrames` is every decoded composite in time order,
-and `cycle` is the fixed playable snapshot for the underway pass. A missing middle
+**v4.7 manifest continuity (no new wire fields):** A scheduled stamp advance
+at unchanged source, site timeline, station, viewport bounds/zoom, render revision
+and legend retains the previously published frames whose timestamps are within
+3600 seconds of the incoming newest (inclusive). After discovery is validated,
+the engine lists the newest as pending before native tile I/O: a warm 31-frame
+MRMS hour becomes 31 listed / 30 complete, with only the expired oldest removed.
+Every partial-tile publish carries that window; completion updates the newest in
+place. Backfill retains historical `siteScans` exactly, even if fresh per-site
+listings would choose different scan pairs. Site windows slide by actual scan
+stamps. The existing 25-second primary deadline may leave newest pending for a
+retry, but does not collapse history. Cold start and changed geometry still
+publish their first measurement with a new window.
+
+**v4.6 playback state machine, with v4.7 reconciliation:** `loaded` contains the
+latest eight listed scans plus previously held scans omitted by a truncated
+manifest while they remain within the incoming newest's hour. An omission alone
+cannot close a composite or remove it from the decoded inventory. Source/site,
+station, tile grid/zoom, render revision or legend changes release the old window.
+When the complete manifest returns, normal latest-eight selection applies again.
+`readyFrames` is the latest eight decoded composites in time order, and `cycle`
+is the fixed playable snapshot for the underway pass. A missing middle
 frame does not exclude older decoded scans. `good` names acquisition's newest;
 `current` names the drawn scan. Acquisition remains newest-first.
 
@@ -882,9 +900,11 @@ decoded frames change those positions only at the wrap. While paused it tracks
 the updated decoded set, clamped to the oldest position if the held scan aged out.
 The read has neither status role nor aria-live; the corner note describes pass
 progress and owns that live region and its existing 600ms suppression. No scans
-are duplicated or padded. The browser retains up to eight window composites,
-plus outgoing frames still needed by a cycle/display/blend; all count against the
-existing 40MiB graphics cap and are closed when released. One supplied frame is
+are duplicated or padded. The browser normally retains eight window composites,
+plus outgoing frames still needed by a cycle/display/blend. A truncated manifest
+also retains omitted in-hour composites (eight old plus one pending scan in the
+stamp-advance regression); they remain subject to the existing 40MiB graphics
+admission cap and are closed on expiry or release. One supplied frame is
 static; clear data keeps the cluster visible and enabled. Hidden pages idle.
 The loop never changes `#rad-base`.
 
@@ -936,3 +956,11 @@ per-frame pan/pinch draw time/count, bilinear basemap draw time, cached first
 paint, memory and GPU information. It restores the original camera afterward.
 The GPU-enabled Pi measurements, not development-machine timings, decide the
 4ms performance target. Renderer generation likewise needs Pi median/p95 evidence.
+
+The v4.7 regression runner (`tests/verify_radar_v47.py`) uses only a 127.0.0.1
+fixture server. In both themes it verifies zero-fetch same-stamp truncation,
+bitmap lifetime and identity/expiry boundaries, then holds new-scan native HTTP
+responses for 25 seconds and prints loaded/ready/read once per second. The eight
+retained scans keep cycling and the new scan joins at a later wrap. Engine tests
+(`tests/test_radar_v47.py`) inspect the first and every partial publish for warm
+MRMS and per-site windows, including primary-deadline exit and retry.

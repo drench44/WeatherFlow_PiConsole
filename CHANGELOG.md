@@ -7,6 +7,16 @@ to shared upstream code that the classic console benefits from too.
 ## 2026-09-14
 
 ### Radar
+- **Radar v4.7 keeps the manifest sliding during a new scan.** At unchanged
+  source, geometry and legend, the first pending-newest publish retains the
+  previous hour's frames and complete counts. Slow newest tiles cannot replace
+  the window with one frame; completion updates that scan in place. Site history
+  keeps its original per-site scan identities. Cold starts and new geometry keep
+  their existing first-measurement behavior. The page independently retains
+  omitted in-hour frames across truncated manifests, preserving composites,
+  playback deadlines and scan-time reads; true identity changes release them.
+  Mocked engine tests and both-theme loopback checks cover a 25-second newest
+  fetch, retained bitmaps, zero old-scan fetches and adoption at the v4.6 wrap.
 - **Radar v4.6 slides the window at the wrap.** Manifest updates keep the running
   scan, 120ms crossfade and deadline intact. After the old-newest 1100ms hold,
   playback wraps to the slid window's oldest decoded scan and reaches the new

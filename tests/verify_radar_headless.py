@@ -107,13 +107,15 @@ def radar_server():
         requests=[];request_times=[]
         class Handler(server_module.Handler):
             def do_GET(self):
+                if state.request_hook is not None: state.request_hook(self.path)
                 requests.append(self.path);request_times.append(dict(path=self.path,at=time.time()*1000))
                 return super().do_GET()
             def log_message(self,*args): pass
         server_module.WEB=str(root);server_module.DATA=str(root/'wx.json')
         server=server_module.http.server.ThreadingHTTPServer(('127.0.0.1',0),Handler)
         thread=threading.Thread(target=server.serve_forever,daemon=True);thread.start()
-        try:yield SimpleNamespace(root=root,data=data,requests=requests,request_times=request_times,url=f'http://127.0.0.1:{server.server_port}',module=server_module)
+        state=SimpleNamespace(root=root,data=data,requests=requests,request_times=request_times,url=f'http://127.0.0.1:{server.server_port}',module=server_module,request_hook=None)
+        try:yield state
         finally:server.shutdown();server.server_close();thread.join()
 
 

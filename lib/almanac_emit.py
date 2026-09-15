@@ -1508,6 +1508,19 @@ class AlmanacEmitter:
                 # The executor drains active requests, whose successes enter LRU
                 # even when the main worker has already detected supersession.
 
+    def _radar_sliding_frames(self, source, newest, ctx):
+        """Retain published scan identities only within the same render geometry."""
+        snap = self._radar_result
+        if (not snap.available or snap.source_id != source or
+                snap.site_id != (ctx.get('site_id') if source == 'iem-nexrad-n0b' else None) or
+                snap.zoom != ctx['zoom'] or snap.bounds != ctx['bounds'] or
+                snap.center != dict(lat=ctx['station'][0], lon=ctx['station'][1]) or
+                snap.legend != _RADAR_SOURCES[source]['legend'] or
+                not snap.tiles or snap.tiles.get('revision') != _radar_render_revision()):
+            return {}
+        return {f['ts']: dict(f) for f in snap.frames
+                if newest - RADAR_HISTORY_SEC <= f['ts'] <= newest}
+
     def _radar_fill_frame(self, source, ts, ctx, deadline, tile_url, archive_url=None, layers=None, on_validated=None):
         """Fill independent immutable tiles; never allocate viewport RGBA buffers."""
         self._radar_checkpoint(ctx)
@@ -1525,6 +1538,15 @@ class AlmanacEmitter:
                 ctx['last_error']=str(error)
                 return frame
         if on_validated is not None: on_validated()
+        # A validated discovery can list a pending scan before its first slow tile.
+        # Cold starts and changed geometry still publish on first measurement.
+        retained = self._radar_sliding_frames(source, ts, ctx)
+        if (retained and not ctx.get('prefetch') and self._radar_result.ts_frame < ts):
+            retained[ts] = dict(frame)
+            window = tuple(retained[t] for t in sorted(retained))
+            self._radar_result = self._radar_result._replace(frames=window, ts_frame=ts,
+                tiles=_radar_tile_manifest(source, window, ctx))
+            self._radar_emit_now()
         drawn = []; present = set()
         for site,stamp,url in work:
             try:
@@ -1550,10 +1572,13 @@ class AlmanacEmitter:
                             site_id=ctx.get('site_id'),sites=tuple(ctx.get('sites',())),
                             sites_considered=ctx.get('sites_considered',0),
                             tiles=_radar_tile_manifest(source,[frame],ctx))
-                        # Keep existing history during a same-stamp viewport warm-up.
-                        if snap.source_id==source and snap.ts_frame==ts and snap.frames:
-                            partial=partial._replace(frames=snap.frames,
-                                tiles=_radar_tile_manifest(source,snap.frames,ctx),ts_fetch=snap.ts_fetch)
+                        retained = self._radar_sliding_frames(source, ts, ctx)
+                        if retained:
+                            retained.setdefault(ts, dict(frame))
+                            window = tuple(retained[t] for t in sorted(retained))
+                            partial = partial._replace(frames=window,
+                                tiles=_radar_tile_manifest(source, window, ctx),
+                                ts_fetch=snap.ts_fetch if snap.ts_frame == ts else partial.ts_fetch)
                         self._radar_result=partial
                         self._radar_emit_now()
                 drawn.append((site,stamp))
@@ -1812,7 +1837,11 @@ class AlmanacEmitter:
         slots = slots or list(range(newest - RADAR_HISTORY_SEC, newest + 1, settings['cadence']))
         frames = {t: _radar_frame(source, t, ctx, _radar_site_pairs(ctx, t)
                   if source == 'iem-nexrad-n0b' else None) for t in slots}
+        # Discovery may revise per-site lists. Existing published frames retain
+        # their exact siteScans; never recombine an old scan under its old stamp.
+        frames.update(self._radar_sliding_frames(source, newest, ctx))
         frames[newest] = latest
+        slots = sorted(frames)
         previous = ctx.get('previous_result',self._radar_result)
         newest_reasons = dict(ctx.get('site_reasons', {}))
         fetched = time.time()

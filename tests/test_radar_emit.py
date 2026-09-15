@@ -217,7 +217,16 @@ def test_never_raises_keeps_last_good_and_warns_once(make_emitter, radar_net, mo
     if failure == 'save':
         monkeypatch.setattr(Image.Image, 'save', lambda *a, **k: (_ for _ in ()).throw(OSError('disk full')))
     emitter._do_radar()
-    assert emitter._radar_result is previous
+    if failure == 'manifest':
+        assert emitter._radar_result is previous
+    else:
+        # v4.7: validated discovery lists a pending newest even when its tiles
+        # fail. Last-good frames and fetchedAt survive; no completed scan is lost.
+        result = emitter._radar_result
+        assert result.frames[:-1] == previous.frames
+        assert result.frames[-1]['ts'] == radar_net['times'][-1]
+        assert not result.frames[-1]['complete']
+        assert result.ts_fetch == previous.ts_fetch
     assert len(warnings) == 3 and len(retries) == 1
     assert all('candidates=' in w and 'elapsed=' in w for w in warnings[:2])
     assert retries[0] == ('radar', emitter._check_radar, 120)

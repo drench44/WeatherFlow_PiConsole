@@ -16,7 +16,7 @@ def function(name):
 
 def run(body):
     script = '\n'.join(function(name) for name in (
-        'radarFrameKey', 'radarPruneFrames', 'radarReady', 'radarPlayback',
+        'radarWindowKey', 'radarFrameKey', 'radarPruneFrames', 'radarReady', 'radarPlayback',
         'radarUpdateReady', 'radarCouldLoop', 'radarPreload')) + '''
 let reduced=false;const radarReduced=()=>reduced,document={hidden:false},radarGesture={state:'idle'};
 const radarQueueTiles=()=>{},radarWake=()=>{};let radarEchoDirty=false,radarCompositeJob=null;
@@ -49,7 +49,7 @@ console.log(JSON.stringify({before,after:radarReady().map(f=>f.ts),cycle:radarPl
 
 def test_stamp_advance_retains_identity_and_does_not_cut_or_close_blend():
     result = run('''
-const a=frame(1),b=frame(2),old=a.bitmap,key=radarFrameKey(b);
+const a=frame(-3600),b=frame(2),old=a.bitmap,key=radarFrameKey(b);
 radarView.loaded=[a,b];radarView.current=a;radarView.good=b;radarView.started=true;
 radarView.cycle=[a,b];radarView.blend={from:a,to:b,start:123};radarView.nextAt=456;
 radarPreload({sourceId:'a',tiles:{revision:'r1',frames:[{stamp:'2',ts:2},{stamp:'3',ts:3}]}});
@@ -59,5 +59,5 @@ radarView.cycle=radarView.loaded;radarView.current=b;radarPruneFrames();staged.b
 radarView.blend=null;radarPruneFrames();staged.closedAfterBlend=old.closed;
 console.log(JSON.stringify(staged));
 ''')
-    assert result == dict(current=1, deadline=456, blend=123, closed=0, retained=True,
+    assert result == dict(current=-3600, deadline=456, blend=123, closed=0, retained=True,
                           key=True, dirty=False, pinned=True, blendRetained=True, closedAfterBlend=1)

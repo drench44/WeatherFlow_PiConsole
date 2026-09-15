@@ -180,7 +180,13 @@ def test_supersede_tile_boundary_immediate_new_pass(make_emitter, hybrid, monkey
     closed = []
     monkeypatch.setattr(ae.RadarSession, 'close', lambda self: closed.append(self))
     emitter._check_radar()
-    assert emitter._radar_result is old and emitter._radar_restart
+    # Discovery already slid the old geometry before the superseding intent
+    # arrived at a tile boundary. Keep that published hour until the next pass.
+    pending = emitter._radar_result
+    assert pending.frames[:-1] == old.frames[1:]
+    assert not pending.frames[-1]['complete'] and pending.ts_frame == hybrid.latest
+    assert pending.zoom == old.zoom and pending.bounds == old.bounds
+    assert emitter._radar_restart
     assert emitter._radar_restart and not emitter._radar_negative
     assert not list(Path(ae.RADAR_DIR).rglob('*.tmp.*'))
     assert not closed and not emitter._inflight
@@ -398,9 +404,12 @@ def test_real_worker_supersede_at_network_barrier(make_emitter,hybrid,tmp_path):
         assert entered.wait(10)
         (tmp_path/'radar_intent').write_text(json.dumps(dict(seq=42,zoom=9,source='mosaic',center='station')))
         assert 'geometryOnly' not in emitter._build_payload()['radar']
-        assert emitter._radar_result is old
+        pending = emitter._radar_result
+        assert pending.frames[:-1] == old.frames[1:]
+        assert not pending.frames[-1]['complete'] and pending.ts_frame == hybrid.latest
+        assert pending.zoom == old.zoom and pending.bounds == old.bounds
     finally:release.set();worker.join(10)
-    assert not worker.is_alive() and emitter._radar_restart and emitter._radar_result is old
+    assert not worker.is_alive() and emitter._radar_restart and emitter._radar_result is pending
     assert not emitter._radar_negative and not list(Path(ae.RADAR_DIR).rglob('*.tmp.*'))
 
 
