@@ -80,23 +80,34 @@ anywhere on Earth: in the US it leads with NOAA's MRMS composite at two-minute
 frames, and everywhere else — or whenever that feed can't be reached — it falls
 back to a global ten-minute mosaic, always saying which one is on screen. Every
 source's echoes are drawn on one reflectivity scale — nine bands from 10 to
-75 dBZ in the RadarScope tradition, the same pixels on paper and night, nothing
-below 10 dBZ so clear-air clutter never films the map, and no guessing at rain
-versus snow. Recent frames play as a smooth loop, five a second with a short
-crossfade and a hold on the newest, whose scan time is printed beside the clock
-and is never dressed up as "live"; opening the tab brings the loop up from cache
-in milliseconds, and play means play even while frames are still arriving. Two
+75 dBZ in the RadarScope tradition, sage through green for light rain before
+the yellows and reds, the same pixels on paper and night, nothing below 10 dBZ
+so clear-air clutter never films the map, and no guessing at rain versus snow.
+Recent frames play as a smooth loop, five a second with a short crossfade and
+a hold on the newest, whose scan time is printed beside the clock and is never
+dressed up as "live"; opening the tab brings the loop up from cache in
+milliseconds, and play means play even while frames are still arriving. Two
 buttons choose the picture: **Region**, many radars blended with a new image
 every two minutes, or the nearest **NEXRAD** site by its callsign — its own
 scans at their real times, every neighbouring radar whose range reaches the
 view composited underneath, faint returns from 5 dBZ so a clear-air day still
 shows its texture, and a plain caption under the buttons that says which radar,
-how far, and how often. A tap answers at once and the switch lands in a second
-or two. A quiet +/− sets the zoom and remembers it across reboots; the station
-glyph shows where home is while you're away and the view drifts back to it
-after a minute and a half untouched.
+how far, and how often, with the radar's operating mode read from its own
+cadence: a scan every four minutes or so is precipitation mode, every ten is
+clear-air. The site button tells you before you tap when that radar is off the
+air or its last scan is stale, and a tap on a dark site says so in the same
+breath instead of trying for ten seconds. A tap answers at once and the switch
+lands in a second or two. A quiet +/− sets the zoom and remembers it across
+reboots — a zoom step keeps the loop you were watching playing until the new
+frames are in — and a **SMOOTH** toggle, off by default, softens the gate edges
+of every echo without inventing detail, interpolated on the reflectivity field
+so every pixel is still a legend colour. The station glyph shows where home is
+while you're away and the view drifts back to it after a minute and a half
+untouched.
 
-![The Radar tab: MRMS reflectivity over the Puget Sound coastline, roads and county lines](design/almanac/screenshots/radar.png)
+![The Radar tab in Region mode: MRMS reflectivity over the Puget Sound coastline, roads and county lines](design/almanac/screenshots/radar.png)
+
+![The Radar tab in high-resolution mode: the nearest NEXRAD site's own scans, with its operating mode in the caption](design/almanac/screenshots/radar-site.png)
 
 ![The recent frames looping on the Radar tab](design/almanac/screenshots/radar.gif)
 
