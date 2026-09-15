@@ -1,6 +1,10 @@
-# WeatherFlow PiConsole
+# WeatherFlow PiConsole — Almanac fork
 
-<a href="https://www.buymeacoffee.com/peted.davis" target="_blank"><img src="https://cdn.buymeacoffee.com/buttons/default-orange.png" alt="Buy Me A Coffee" height="41" width="174"></a>
+> This is a fork of [Peter Davis's WeatherFlow PiConsole](https://github.com/peted-davis/WeatherFlow_PiConsole),
+> the original and still-maintained console for WeatherFlow Tempest stations. Everything that
+> reads the station, talks to WeatherFlow, and draws the classic six-panel console is his work;
+> this fork adds the Almanac interface and its radar on top and keeps merging his fixes. If you
+> find the console useful, the person to thank is him.
 
 The WeatherFlow PiConsole is a Python console that displays the data collected
 by a WeatherFlow Tempest or Smart Home Weather Station. The console uses either
