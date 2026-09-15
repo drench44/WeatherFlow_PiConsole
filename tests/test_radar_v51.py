@@ -16,7 +16,7 @@ const nodes=new Map(),$=id=>{if(!nodes.has(id))nodes.set(id,{
   get scrollWidth(){return this.textContent.length}
 });return nodes.get(id)};
 const document={createTextNode:s=>s,createElement:()=>$('credit')};
-const radarNoteRender=()=>{},radarSource={desired:null},radarIntent={postedAt:0};
+const radarNoteRender=()=>{},radarSource={desired:null},radarIntent={postedAt:0},radarSwitch=null;
 const radarSiteTable=[{id:'KATX',name:'Camano Island'},{id:'KLGX',name:'Langley Hill'}];
 const sites=['KATX','KLGX','KRTX','KOTX'].map(id=>({id,contributing:true}));
 if(DARK)Object.assign(sites[0],{contributing:false,reason:'not reporting'});
@@ -70,7 +70,9 @@ from tests.test_radar_v49 import batch, engine  # noqa: E402,F401
 from tests.test_radar_keepalive import origin  # noqa: E402,F401
 
 
-def test_health_separates_hedge_and_failure_retry_in_same_batch(engine, origin):
+def test_health_separates_hedge_and_failure_retry_in_same_batch(engine, origin, monkeypatch):
+    # No idle warm lease: both failure modes must use their second attempt.
+    monkeypatch.setattr(engine._radar_session, "reserve_hedge", lambda url: None)
     def behavior(path, ordinal):
         if ordinal == 1:
             if path.endswith('/0'):
@@ -82,6 +84,6 @@ def test_health_separates_hedge_and_failure_retry_in_same_batch(engine, origin):
     result, _ = batch(engine, origin, count=3)
     health = engine._radar_health.snapshot()
     assert len(result) == 3
-    assert health['hedges'] == 1 and health['retries'] == 1
-    assert health['discardedHedges'] == 0  # the hedge won
+    assert health['hedges'] == 0 and health['retries'] == 2
+    assert health['discardedHedges'] == 0  # no hedge was admitted
     assert len(origin.requests) == len(engine._radar_request_times) == 5

@@ -44,6 +44,7 @@ def test_first_publish_slides_warm_hour(make_emitter, hybrid, multisite, tmp_pat
                     origin = next(Path(ae.RADAR_DIR).glob('t/*/*/*/*/*/*/*.png'))
                     dest.parent.mkdir(parents=True, exist_ok=True)
                     dest.write_bytes(origin.read_bytes())
+                    e._radar_disk_inventory.add((source,name,ae._radar_stamp_text(scan),ctx["zoom"],x,y),dest,dest.stat().st_size,ae._radar_tile_metadata(dest,source))
         frames.append(f)
     e._radar_result = snap._replace(frames=tuple(frames), tiles=ae._radar_tile_manifest(source, frames, ctx))
     previous = e._radar_result
@@ -72,7 +73,7 @@ def test_first_publish_slides_warm_hour(make_emitter, hybrid, multisite, tmp_pat
         yield from batch(*args, **kwargs)
     monkeypatch.setattr(e, '_radar_tile_batch', slow)
     e._do_radar(intent_triggered=False)
-    advanced = [s for s in seen if s.ts_frame == hybrid.latest]
+    advanced = [s for s in seen if s.frames and s.frames[-1]['ts'] == hybrid.latest]
     assert advanced
     first = advanced[0]
     payload = e._radar_payload(first, ae.time.time(), timezone.utc)

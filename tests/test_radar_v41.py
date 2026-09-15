@@ -8,7 +8,7 @@ from tests.test_radar_hybrid import hybrid
 
 
 def ctx(lat=47.61,lon=-122.33,z=7):
-    return dict(center=dict(lat=lat,lon=lon),zoom=z)
+    return dict(center=dict(lat=lat,lon=lon),zoom=z,inventory=set())
 
 
 def test_render_revision_changes_urls(monkeypatch,tmp_path):
@@ -26,6 +26,7 @@ def test_dateline_manifest_is_unwrapped_and_row_major(tmp_path,monkeypatch,lon):
     tiles=ae._radar_grid(c)
     for x,y,_,_ in tiles:
         p=ae._radar_tile_path('rainviewer',None,f['ts'],7,x,y);p.parent.mkdir(parents=True,exist_ok=True);p.write_bytes(b'tile')
+        c['inventory'].add(('rainviewer',None,ae._radar_stamp_text(f['ts']),7,x % 2**7,y))
     m=ae._radar_tile_manifest('rainviewer',[f],c);g=m['grid']
     assert g['w']<=5 and g['h']<=3 and g['w']*g['h']==len(tiles)
     assert int(m['newest']['mask'],16)==(1<<len(tiles))-1
@@ -40,11 +41,13 @@ def test_coverage_and_missing_acquisition_are_distinct(tmp_path,monkeypatch):
     for site in sites:
         for x,y,_,_ in ae._radar_site_tiles(c,site):
             p=ae._radar_tile_path('iem-nexrad-n0b',site,stamp,7,x,y);p.parent.mkdir(parents=True,exist_ok=True);p.write_bytes(b'tile');paths.append(p)
+            c['inventory'].add(('iem-nexrad-n0b',site,ae._radar_stamp_text(stamp),7,x,y))
     m=ae._radar_tile_manifest('iem-nexrad-n0b',[f],c)
     assert m['newest']['expectedMask']==m['newest']['completeMask']
     assert m['frames'][0]['levels']['7']
     assert int(m['newest']['expectedMask'],16)!=(1<<(m['grid']['w']*m['grid']['h']))-1
-    paths[len(paths)//2].unlink()
+    victim=paths[len(paths)//2];victim.unlink()
+    c['inventory'].remove(('iem-nexrad-n0b',victim.parts[-5],ae._radar_stamp_text(stamp),7,int(victim.parts[-2]),int(victim.stem)))
     partial=ae._radar_tile_manifest('iem-nexrad-n0b',[f],c)
     assert partial['newest']['completeMask']!=partial['newest']['expectedMask']
     assert not partial['frames'][0]['levels']['7']
@@ -69,6 +72,8 @@ def test_first_view_warms_missing_history_and_checks_disk(hybrid,tmp_path,make_e
     assert e._radar_inventory_valid(e._radar_result)
     f=e._radar_result.frames[-1];g=e._radar_result.tiles['grid']
     p=ae._radar_tile_path(e._radar_result.source_id,None,f['ts'],e._radar_result.zoom,g['x0'],g['y0']);p.unlink()
+    Path(e.output_path).with_name('radar_bad_tiles').write_text(json.dumps([p.relative_to(Path(e.output_path).parent).as_posix()]))
+    e._radar_consume_bad_tiles()
     assert not e._radar_inventory_valid(e._radar_result)
 
 

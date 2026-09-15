@@ -110,9 +110,10 @@ def test_unviewed_builds_only_latest(make_emitter, radar_net, radar_dir, tmp_pat
     assert [f['ts'] for f in frames] == radar_net['times'][-7:]
     assert all(not f['complete'] and 'url' not in f for f in frames[:-1])
     assert frames[-1]['complete'] and emitter._radar_ts_frame == frames[-1]['ts']
-    assert len(list(radar_dir.rglob('*.png'))) == 35
-    assert len(tile_calls(radar_net)) == 35
-    assert len(radar_net['calls']) == 36
+    grid=emitter._radar_result.tiles['grid']; visible=grid['w']*grid['h']
+    assert len(list(radar_dir.rglob('*.png'))) == visible
+    assert len(tile_calls(radar_net)) == visible
+    assert len(radar_net['calls']) == visible+1
 
 
 
@@ -232,7 +233,7 @@ def test_never_raises_keeps_last_good_and_warns_once(make_emitter, radar_net, mo
     assert len(warnings) == 1 and len(retries) == 1
     assert 'candidates=' in warnings[0] and 'elapsed=' in warnings[0]
     assert retries[0][:2] == ('radar', emitter._check_radar)
-    if failure in ('tile', 'decode'):
+    if failure == 'tile':
         assert 29 <= retries[0][2] <= 30  # probe the newly opened host circuit
     else:
         assert retries[0][2] == 2  # bounded retry before the failed-pass threshold
@@ -331,12 +332,11 @@ def test_cold_start_rate_limit_covers_all_frames(make_emitter, radar_net, monkey
     radar_viewed.write_text(str(ae.time.time()))
     emitter = make_emitter(); emitter._do_radar()
     assert len(emitter._radar_frames) == 7
-    assert sum(f['complete'] for f in emitter._radar_frames) == 3
+    assert sum(f['complete'] for f in emitter._radar_frames) == 7  # visible native footprint fits the cap
     clock[0] += 60; emitter._do_radar()
     assert all(f['complete'] for f in emitter._radar_frames)
-    assert len(list(radar_dir.rglob('*.png'))) == 129
-    assert len(radar_net['calls']) == 131
-    assert len(starts) == 129  # newest margin, adjacent levels and history grids
+    assert len(list(radar_dir.rglob('*.png'))) == len(starts)
+    assert len(radar_net['calls']) == len(starts)+2
     assert all(sum(t <= v < t + 60 for v in starts) <= 90 for t in starts)
 
 
@@ -371,7 +371,7 @@ def test_r8_manifest_exact_disk_mask_and_levels(make_emitter,radar_net,radar_dir
                 for y in range(math.floor(g['y0']*scale),math.ceil((g['y0']+g['h'])*scale))
                 for x in range(math.floor(g['x0']*scale),math.ceil((g['x0']+g['w'])*scale)))
             assert complete==expected
-    retired={'latest','frames','geometryOnly','basemap','marker','centered','bounds','viewport','metersPerPixel','intent','scaleBar'}
+    retired={'latest','frames','geometryOnly','basemap','marker','centered','bounds','viewport','metersPerPixel','scaleBar'}
     assert not retired.intersection(r)
     assert all(not {'id','url','complete'}.intersection(f) for f in m['frames'])
     assert all(set(ring)=={'meters','label'} for ring in r['rings'])
@@ -379,14 +379,17 @@ def test_r8_manifest_exact_disk_mask_and_levels(make_emitter,radar_net,radar_dir
 
 def test_r9_disk_served_lru_protects_current_hour(make_emitter,radar_dir):
     emitter=make_emitter();now=1800000000
-    emitter._radar_result=ae._RADAR_NONE._replace(ts_frame=now,zoom=8)
+    emitter._radar_result=ae._RADAR_NONE._replace(ts_frame=now,zoom=8,source_id='iem-mrms-lcref',
+        frames=({'ts':now,'siteScans':[]},),tiles={'grid':dict(x0=0,y0=0,w=1,h=1)})
     old=datetime.fromtimestamp(now-7200,ae.timezone.utc).strftime('%Y%m%d%H%M')
     protected=ae._radar_tile_path('iem-mrms-lcref',None,now,8,0,0)
     protected.parent.mkdir(parents=True);protected.write_bytes(b'p');os.utime(protected,(1,1))
+    emitter._radar_disk_inventory.add(('iem-mrms-lcref',None,ae._radar_stamp_text(now),8,0,0),protected,1,{})
     paths=[]
     for i in range(8099):
         path=ae._radar_tile_path('iem-mrms-lcref',None,old,9,i//256,i%256)
         path.parent.mkdir(parents=True,exist_ok=True);path.write_bytes(b't');os.utime(path,(10+i,10+i));paths.append(path)
+        emitter._radar_disk_inventory.add(('iem-mrms-lcref',None,old,9,i//256,i%256),path,1,{})
     emitter._radar_prune()
     remaining=list((radar_dir/'t').rglob('*.png'))
     assert len(remaining)==8000 and sum(p.stat().st_size for p in remaining)<=64_000_000
@@ -394,6 +397,7 @@ def test_r9_disk_served_lru_protects_current_hour(make_emitter,radar_dir):
 
 
 def test_partial_tiles_publish_before_full_view(make_emitter,radar_net,monkeypatch):
+    monkeypatch.setattr(ae,'_radar_zoom_for',lambda lat:7)  # more than one six-worker batch
     emitter=make_emitter();seen=[]
     monkeypatch.setattr(emitter,'_radar_emit_now',lambda:seen.append(emitter._radar_result))
     emitter._do_radar()

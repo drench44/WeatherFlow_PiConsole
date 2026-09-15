@@ -195,12 +195,12 @@ def test_unviewed_counts_and_open_warms_unchanged(make_emitter, hybrid, monkeypa
     monkeypatch.setattr(ae, 'RADAR_REQUESTS_PER_MIN', 90)  # the counts below are budget-relative
     monkeypatch.setattr(ae, 'RADAR_HISTORY_RESERVE', 17)
     emitter = make_emitter(); emitter._do_radar()
-    assert len(hybrid.calls) == 32  # metadata + HEAD + 30 viewport and margin tiles
+    assert len(hybrid.calls) == 14  # metadata + HEAD + 12 visible tiles
     assert sum(f['complete'] for f in emitter._radar_frames) == 1
     hybrid.calls.clear(); emitter._do_radar()
     assert len(hybrid.calls) == 1
     hybrid.view(); hybrid.mono += 60; hybrid.calls.clear(); emitter._do_radar()
-    assert len(hybrid.calls) <= 73 and sum(f['complete'] for f in emitter._radar_frames) > 1
+    assert len(hybrid.calls) <= 90 and sum(f['complete'] for f in emitter._radar_frames) > 1
 
 
 def test_build_limit_and_real_gap_spacing(make_emitter, hybrid, monkeypatch):
@@ -217,8 +217,8 @@ def test_build_limit_and_real_gap_spacing(make_emitter, hybrid, monkeypatch):
     r = emitter._build_payload()['radar']
     assert r['completeFrameCount'] == 2 and r['historyGaps']
     assert r['frameSpacingSec'] == 240 and r['cadenceSec'] == 120
-    assert len(hybrid.calls) == 54  # metadata, newest 30, neighbours 8, history 12, three HEADs
-    assert sum('/7/' in c[2] or '/9/' in c[2] for c in hybrid.calls) == 8
+    assert len(hybrid.calls) == 28  # metadata, two visible grids, three HEADs
+    assert sum('/7/' in c[2] or '/9/' in c[2] for c in hybrid.calls) == 0  # no optional work before four
 
 
 def test_negative_archive_cache_and_expiry(make_emitter, hybrid):

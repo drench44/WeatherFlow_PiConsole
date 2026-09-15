@@ -168,6 +168,181 @@ its next poll only after `render()` returned, and the server credits that mark o
 from a loopback client. The launcher's watchdog reads `renders`, because a request
 count never proved anything reached the screen.
 
+## Radar v5.7 — ordered intent and bounded acquisition
+
+This section is normative for fetch scheduling, intent, publication and switch
+completion. It supersedes the older version-specific behavior below; rendering,
+reflectivity palettes and legend specifications are unchanged.
+
+### Switch contract
+
+With at least four available scans, a healthy provider path and sufficient
+capacity in the shared rolling **240 requests/minute** window, a mode tap or zoom
+must reach **four decoded visible frames and an advancing painted loop within
+20 seconds of input**. “Ready” metadata and one target tile do not satisfy this
+contract. A mode tap synchronously paints `Switching to <choice> · showing
+<displayed source>`; zoom synchronously paints `Updating view · showing
+<displayed source>`. Both are observable in the first animation frame.
+
+At 20 seconds, any unfinished transaction enters visible `Retrying` copy even
+if polling has stopped responding. It retains the requested choice, scheduled
+acquisition and the old usable bitmap/loop. Rate-limited work exposes `nextRetry`
+as a wall-clock epoch and the page displays the remaining seconds. A retry does
+not silently choose another source. Paused, reduced-motion and clear-weather
+loops explicitly retain their corresponding static states instead of claiming
+advancing playback. The 20-second acceptance gate is measured on loopback; it is
+not a new claim about Pi CPU performance.
+
+### Intent protocol and ownership
+
+The page owns `{session, generation, camera, zoomPolicy, preferredMode}`.
+`radarSession` and `radarGeneration` accompany activity. `radarCommit=1`,
+`radarSource=mosaic|site`, `radarPolicy=auto|manual`, `radarGeoZoom` and
+`radarGeoCenter` form one settled transaction. A mode tap commits immediately;
+settling increments generation before the network debounce. Heartbeats carry a
+separate increasing `radarHeartbeat` ordinal and never invent a new intent.
+
+A reload first claims generation zero with `radarClaim=<acknowledged owner>`.
+This compare-and-swap is read-only with respect to camera preferences. The page
+reconciles the accepted runtime intent before committing any restored camera;
+new input during reconciliation remains authoritative. Old sessions, generations
+and reordered heartbeats are rejected before intent **or activity** changes.
+`X-Radar-Intent` returns `{intent, session, generation, acceptedGeneration}`.
+Runtime records include session, generation, resolved numeric zoom, zoomPolicy,
+source, center, acceptedAt and the existing worker sequence. A 250ms debounce
+persists `auto` as policy, not its resolved number. Payload/displayed source is
+never implicitly sent back as preference after a failed attempt.
+
+Motion continues reporting/polling during gestures, without committing the
+intermediate camera. Moving ownership expires after five seconds; geo work
+resumes after settlement or lease expiry. A true camera/policy no-op retains
+all decoded frames. Policy-only Auto changes commit without invalidating them;
+rapid zoom presses accumulate from the pending animation target.
+
+### One worker and fixed work order
+
+One radar worker coalesces the newest transaction. Explicit pending newest,
+four-frame, eight-frame and optional work survives discovery and busy-worker
+wakeups. Unchanged metadata cannot discard unfinished acquisition. Supersession
+stops old admissions; bounded paid-for tile work may finish into immutable cache.
+Every unfinished mandatory task retains a continuation.
+
+| Priority | Work |
+| --- | --- |
+| 1 | Visible newest tiles, nearest first |
+| 2 | Four complete visible frames, newest first |
+| 3 | Eight complete visible frames |
+| 4 | Newest margin, opposite mode, then adjacent zoom warming |
+| 5 | Deep history after the continuous-view gate |
+
+Optional work reserves missing mandatory tiles across every required site layer
+plus the existing deep-history headroom. Mandatory acquisition does not reserve
+capacity for optional work. All attempts, metadata and archive probes share the
+240/minute gate. Margin completeness never determines visible playback readiness.
+Source transitions stage four complete server frames and four decoded browser
+frames behind the retained source before acceptance (or all available frames
+when the provider offers fewer than four, with the retry contract still visible).
+
+Camera footprint, echo native level and basemap level are explicit: basemap uses
+camera level; capped echo coverage scales 956×490 by `2**(native-camera)` before
+tile enumeration. Every optional target honors its adapter limit, including
+MRMS ≤9 when site camera zoom is 10 and RainViewer ≤7.
+
+### Bounded work and failure ownership
+
+HTTP retains six leases and two concurrent TLS setups per host, warm-only
+hedges, at most two attempts, and absolute deadlines through admission, DNS,
+connect, TLS, headers and body. Ordinary/background tile work retains its six
+second budget. Mandatory committed-camera work uses a **two-second total tile
+budget**, first attempt up to 750ms and a warm hedge after 500ms, leaving time
+for fresh retry. The source/pass caps remain 16/25 seconds. No exception creates
+a third tile attempt.
+
+DNS and local route/resource errors are local; a silent reused connection is
+ambiguous until a fresh path supplies evidence. Neither category contributes
+provider-failure samples. A fresh service timeout or invalid service response
+can. Three consecutive failures to deliver the acquisition objective qualify
+fallback even if most individual requests succeeded. Local rate admission is
+separate. Five-minute dwell applies to elective recovery while fallback remains
+usable; three failed active-source passes permit emergency escape.
+
+The page shares four bounded echo/geography slots. Each job has a 2.5-second
+absolute deadline covering headers, body and cancellable image decode, owns an
+AbortController and always releases admission. Superseded jobs are cancelled;
+late completion cannot publish into another generation. Echo work precedes geo
+work. Composites yield after three seconds without progress and retry after two
+seconds, allowing another usable frame to compose.
+
+Metadata is limited to 128 entries with one-hour age pruning, negative entries
+to 512 with expiry, archive positives to 128, and active process-wide resolver
+jobs to four even across HTTP session replacement. Browser negative maps are
+also bounded at 512. Existing 400 native tiles, 8,000 disk files/64MB and 40MiB
+browser accounting remain. Disk protection pins the exact current and retained
+visible eight-frame loops, not every recently accessed camera. A process-owned
+validated inventory is built once on `radar-inventory`, started at boot before
+the first provider poll. Normal passes never walk/stat/open cached PNGs. Writes
+atomically add the key `(source, site, stamp, z, x, y)`, byte length and validated
+metadata; evictions remove it. Frame/level masks are cached by scan/level mutation
+generation (1,024 bounded entries); site coverage is cached by geometry (512).
+The existing cached geography/render revision functions remain in place.
+
+Startup visits at most 40,000 directory entries and validates at most 8,000 PNGs /
+64 MB, yielding after each 32 files. An early UI intent yields the radar lane
+until this separate worker finishes. A truncated startup inventory refuses new
+writes rather than extending an unaccounted disk cache. Existing indexed imagery
+remains usable. Normal caches within the existing limits finish in one scan.
+No periodic filesystem reconciliation is performed.
+
+The local page reports an unexpected tile 404 or invalid PNG through loopback-only
+`POST /radar-bad-tile` (one canonical tile path, at most 256 bytes). The server
+atomically retains at most 128 paths in `radar_bad_tiles`. The engine reads only
+changed report files, validates only reported indexed tiles, invalidates damage,
+and resumes acquisition. Healthy reported tiles remain cached. External cache
+maintenance must notify the index owner or restart the emitter. This replaces
+silent external deletion detection on every pass.
+
+Per-pass work is `O(M + W + P + E)`, independent of the total disk inventory:
+`M` is missing tiles, `W` is the bounded requested frame/site/zoom footprint,
+`P` is the bounded displayed/retained pins at pressure, and `E` is evicted tiles.
+Discovery/intent reads are constant or bounded by four selected sites; planning
+looks up the requested footprint in memory; cached masks avoid repeated geometry
+work; each changed scan/level recomputes only its requested mask. Raster work and
+one atomic file write per new tile run on tile workers. Pressure eviction walks
+victims and displayed pins, with no directory enumeration or stat. The counting
+gate covers radar-cache paths: zero stat/open on warm passes, and at most one
+open per written tile plus two constant operations on cold passes. Intent/view
+marker checkpoints are separate control I/O, proportional to completed work.
+`wx.json` serialization remains on the two-second emit tick; intermediate worker
+snapshots coalesce there. No per-tile JSON write is scheduled.
+
+### Publication and measurement
+
+Immutable inventory includes its own `intent`, `geometry`, `camera` and
+`publishedAt`. `radar.intent` identifies those pixels; `radar.refresh.intent`
+identifies acquisition in progress, which can be newer while old imagery is
+retained. `advertisedTs`, `acquiredTs` (also legacy `observedTs`), pending work,
+nextRetry and switchDeadlineSec=20 are explicit. Completed inventory and progress
+are captured under the same publication lock. A panned camera uses station
+identity plus camera bounds/native zoom/source identity for regression checks;
+newer matching frames cannot disappear when metadata goes backward.
+
+The page separately labels the frame actually painted and ages it using a
+monotonic clock. A newly advertised stamp cannot move acquired time before a
+tile lands. Failure copy works even without an observation timestamp.
+
+`/health.radar` includes bounded phase/request records: intent, monotonic and CPU
+time, requests, bytes, queue wait and failure class. Browser `radarMetrics.path`
+records tap, accepted intent, publication, first visible tile, decode/four frames,
+advancing paint and deadline retry. Correlate records by session/generation;
+server/page monotonic clocks have different origins. The loopback harness records
+publication and request traces alongside these measurements.
+
+Acceptance: `test_radar_v57.py`, the request-sequence tests in
+`test_radar_priority.py`, `verify_radar_v57_browser.py` (both themes),
+`verify_radar_v57.py --flaky` (30% first-attempt hangs, zoom 8→7→6→7→8 and
+Region↔site), and `--cold-switch --sites 2|4` with 30 requests already used.
+The full offline suite and both-theme `verify_radar_headless.py` remain required.
+
 ## Radar v4 — the panel owns the map
 
 `radar` is an independent side artifact. It never changes `ts`, `obsAgeSec`, or
@@ -270,9 +445,10 @@ daemon resolver thread. Every cold caller waits on the shared event only until
 its deadline; a late result may populate the cache, but cannot issue a request.
 Cached callers never wait for resolution.
 
-**v5.3 request isolation, warm hedges and deadlines.** Each immutable tile gets at
-most two attempts sharing one six-second tile deadline, including DNS, pool waits, TCP,
-TLS, send and every raw header/body read. A failed tile does not abort siblings.
+**Transport baseline (v5.7 mandatory-camera timings above take precedence).** Each immutable tile gets at
+most two attempts, each with a six-second timeout including DNS, pool waits, TCP,
+TLS, send and every raw header/body read. Their race is bounded by twelve seconds
+and by the unchanged source/batch/pass deadline, whichever expires first. A failed tile does not abort siblings.
 The winner must be a complete, bounded, decoded 256×256 native PNG; truncated,
 placeholder and invalid responses cannot win. A fast failure retries immediately
 on a fresh connection. A partial-body failure may also retry the immutable tile.
@@ -281,13 +457,15 @@ No third attempt is possible, including through the v4.8 transport retry path.
 For newest only, no first response byte after `RADAR_HEDGE_SEC = 2` launches the
 second attempt only on a reserved warm connection while the first remains eligible to win.
 A received status/header byte suppresses the hedge; slow bodies keep the six-second
-absolute cap. First valid response wins. The loser is shut down, drained/joined
+absolute cap per attempt. First valid response wins. The loser is shut down, drained/joined
 and discarded before cache mutation. At most `floor(len(ctx.tiles)/2)` hedges are
 reserved per source pass, shared by its site layers; every admitted hedge/retry
 uses the rolling rate gate. The cap is conservative for multi-site views (the
 viewport count, rather than the sum of layer tiles). Six busy primaries leave no
 hedge capacity. Reused primaries still have a three-second first-byte deadline;
-a sequential retry can use the remainder of the same six-second tile budget.
+a sequential retry has its own up-to-six-second attempt budget within the remaining
+batch/pass deadline. Without a warm hedge, a six-second timeout must not consume
+the second attempt's entire budget.
 There are no extra rescue slots or hedge pool waiters.
 History and warming have four tile workers, sequential retries and no hedges.
 An incomplete newest publishes its partial inventory and requests another pass
@@ -304,11 +482,12 @@ knowledge and stale-while-refresh DNS remove that wait on warm paths.
 `RADAR_BUILD_DEADLINE_SEC = RADAR_PRIMARY_DEADLINE_SEC = 25` remains the shared
 absolute pass deadline. Each source gets at most 16 seconds to acquire newest,
 leaving up to nine seconds for the next source. Only three consecutive failed
-provider passes advance the site → MRMS → RainViewer chain. A successful/unchanged pass resets the streak. Local setup,
-pool and pass-budget failures retain the source and cannot trigger fallback.
+provider passes advance the site → MRMS → RainViewer chain. A successful/unchanged pass resets the streak. Local setup, pool and rate-budget failures retain the source; provider-caused
+acquisition deadline exhaustion qualifies objective failure.
 The previous source's manifest and frames remain published until the candidate
 has at least four complete frames (also when staging off-tab). An automatic
-fallback dwells for 300 seconds before preferred-source recovery is attempted;
+usable fallback dwells for 300 seconds before elective preferred-source recovery;
+three failed active-source passes permit emergency escape;
 explicit source/mode choices can change that chain. Each committed switch logs
 old/new source and its reason. A failed recovery continues refreshing the active
 fallback. Candidate tiles remain reusable between passes.
@@ -397,10 +576,11 @@ Successful partial tiles survive another tile's failure or a budget yield.
 
 | Priority | Work |
 | --- | --- |
-| 1 | Newest, integer Z, viewport plus one-tile margin, nearest first; at most 35 tiles per mosaic |
-| 2 | Other mode newest at the current camera/Z first, then newest centre 2×2 at Z−1 and Z+1 and other-mode neighbours |
-| 3 | History slots 2–8, viewport only, at most 15 tiles per mosaic |
-| 4 | History 9–31, viewport only, after 20 seconds of continuous viewing at this view |
+| 1 | Visible newest tiles, nearest first |
+| 2 | Four complete visible frames |
+| 3 | Eight complete visible frames |
+| 4 | Newest margin, opposite mode, adjacent zoom |
+| 5 | Deep history, after 20 seconds of continuous viewing at this view |
 
 Multi-site retains eight source slots. Other-mode warming retains its existing
 adjacent-level work after its current-level tiles, within the same reserve.
@@ -474,9 +654,8 @@ Invalid entries are removed and rebuilt. Native bytes retain their separate
 The existing HTTP/1.1 static handler serves valid, existing tile and geometry
 paths with `Cache-Control: public, max-age=31536000, immutable`. Missing files
 return ordinary 404, without immutable caching; there is no 202, long poll or
-new dynamic route. Last-served tile atime drives eviction. The cache retains
-stamps within 3600 seconds of newest at the current level and levels touched in
-the last 15 minutes. Outside that protected set, oldest-served tiles yield first.
+new dynamic route. Last-served tile atime drives eviction. The cache pins the exact current and retained visible eight-frame inventories.
+Outside that protected set, oldest-served tiles yield first.
 Caps are 8,000 files and 64,000,000 bytes. Admission yields if protection leaves
 no room: it cannot both exceed the cap and promise retention. The first remapper
 revision run removes owned crop and SVG directories and obsolete remapped tiles.
@@ -731,26 +910,16 @@ reports its initial camera. AS OF ordering is scoped to source/station/primary
 identity. Newer accepted transitions invalidate old pending source generations.
 Failed viewport reports remain pending until delivered; only a newer settled
 camera supersedes them. First tab entry skips acquisition only after the full
-required eight-frame inventory has been checked on disk. Publishable partial
+required eight-frame inventory has been checked against the validated memory index. Publishable partial
 frames are distinct from complete sets in completion counters and retry work.
 
 ### Loopback reports and the single note
 
-The page sends `radarGeoZoom` (settled integer 4–10), `radarGeoCenter` (ASCII
-decimal latitude/longitude bounded by ±85.05112878/±180), `radarSource`, theme
-and moving state on the existing loopback poll. It no longer sends a second
-`radarZoom`/requested/auto/sequence intent. Auto selects a camera level locally;
-that settled numeric camera is what the engine builds.
-
-The server validates and atomically replaces one runtime `radar_intent` record
-`{seq, zoom, source, center, camera:true}` only when settled geometry/source
-changes. Server-generated sequence numbers fence obsolete workers. Duplicate
-polls do not change the runtime inode or restart work. After 250ms without another
-change, durable zoom/source writes follow through the existing symlinks and fsync
-writer. Runtime camera/centre remains transient and is never symlinked. The
-page also saves its camera in sessionStorage. Legacy intent endpoints are accepted
-only until the first modern camera report; they cannot overwrite a live camera.
-Before a runtime record exists, durable zoom/source supply cold-start defaults.
+The page sends the v5.7 session/generation transaction and independent heartbeat
+ordinal described above, using `radarGeoZoom`, `radarGeoCenter`, `radarSource`
+and `radarPolicy` on the existing loopback poll. Runtime intent wins over durable
+defaults; reload reconciles ownership first. The resolved numeric camera drives
+acquisition and Auto remains an independently durable policy.
 
 Camera reports occur on activation and after settle's 120ms trailing debounce.
 **v4.3 source input** renders intent synchronously on primary pointer contact;
@@ -760,14 +929,14 @@ channel, coalescing a synchronous burst and aborting an obsolete in-flight poll.
 The pointer's compatibility click does not send a duplicate transaction. Source
 input below the site floor snaps the camera to zoom 7 before sending.
 
-Ordinary polling remains 2s and is omitted during gestures/inertia. A source
+Ordinary polling remains 2s and continues reporting motion during gestures/inertia. A source
 choice polls every 300ms until the payload acknowledges its source preference,
 for at most 20s; hidden/inactive Radar never gets accelerated polling. Pending
 presentation lasts until that source's tiles land, even after fast polling ends.
 New plate activity cancels an unposted camera report. An in-flight tile is
 allowed to finish into the LRU; the pending queue is rebuilt for the new camera.
-Four concurrent page tile requests leave room for wx.json. Newest-visible tiles
-precede margin, adjacent 2×2 and newest-first history. During gestures only newly
+Four concurrent, cancellable page tile jobs leave room for wx.json. Visible
+newest/four/eight-frame demand precedes margin and adjacent warming. During gestures only newly
 visible demand is added. Missing tiles back off at least two seconds and the
 manifest mask suppresses requests for known unavailable newest positions.
 
@@ -776,11 +945,9 @@ The only status corner is `#rad-note`, a fixed 14px box at top418/right12 with
 report it stays suppressed. Priority is refused-source copy (v4.3b), newest/history refresh, failure naming
 the visible scan, upper zoom-cap copy, then `KATX resumes at zoom 7`. Copy remains
 `Refreshing · newest frame`, `Refreshing · frame 4 of 8`, and
-`Couldn't refresh · showing 17:12`. The failure copy requires both
-`refresh.state=failed` and a known newest measurement strictly older than two
-`cadenceSec` intervals; one failed pass with fresh newest shows no failure note.
-The visible loop read still names its displayed scan, and AS OF names the newest
-measurement, never fetch completion time. Only a 120ms opacity transition is used,
+`Couldn't refresh · showing 17:12`. Failure copy names the retained scan, or an em dash before any measurement.
+The 20-second retry state takes priority. Both the loop read and AS OF name the
+actually painted scan, never fetch completion time. Only a 120ms opacity transition is used,
 disabled for reduced motion. There is no Updating pill, spinner, second note,
 or `aria-busy` write on the interactive plate.
 
@@ -789,25 +956,21 @@ or `aria-busy` write on the interactive plate.
 `#rad-src` and the requested segment carry `data-state="pending"`; the group
 carries `aria-busy="true"`. The requested segment has a static dotted underline,
 while `aria-pressed` continues to identify the displayed source. The caption
-continues describing that displayed source. After the note's same 600ms grace
-(`radarIntent.postedAt`), it appends `· switching`, including when no new frame
-or poll arrives. A matching payload starts tile acquisition; the new caption
-and confirmed state replace pending when a tile is available to draw.
-An acknowledged preference that cannot be displayed clears pending and shows
-`Couldn't switch · showing <subject>` in the existing 14px note. A preference
-ack during newest/history acquisition alone does not claim a refused switch.
-A decoded tile can complete the transition without another fetch. Repeated
-payloads for the same transition retain its in-flight work; a newer choice
-invalidates the old transition. Refresh progress remains in the existing note.
+synchronously names the requested choice and retained displayed source in the
+input frame. Only the corner note has a 600ms grace. A matching inventory starts
+acquisition; four decoded target frames replace pending. Failed attempts retain
+the preference and enter visible retry by the 20-second deadline. Repeated
+payloads retain in-flight work; a newer generation cancels obsolete jobs.
 No new animation is introduced, including under reduced motion.
 
 The emitter's existing idle tier writes both native LRU bytes and the immutable
 remapped disk paths used by `serve.py` and the v4 page. Opposite-mode newest at
 the current camera takes precedence over optional zoom neighbours. Source
 cooldowns cannot block another source's eligible round; the shared 240/minute
-cap, 34-request reserve and 60-slot round admission still apply. A round is
-remembered only after all its tiles succeed; missing disk files invalidate the
-completion shortcut. Interrupted rounds resume using paid-for native/disk tiles.
+cap and footprint/layer-aware mandatory reserve apply (v5.7 replaces the fixed
+34-request reserve). A round is
+remembered only after all its tiles succeed; indexed evictions or reported disk
+damage invalidate the completion shortcut. Interrupted rounds resume using paid-for native/disk tiles.
 A warm eight-frame tab return publishes immediately and resumes missing
 opposite-mode work on the next 100ms watcher tick in the same radar flight lane. Expired
 current-source metadata prevents warming its own neighbours, but does not prevent
@@ -1110,7 +1273,8 @@ the offline suite. Existing v4.4/v4.5 blend/pixel checks remain in force.
 intent, 20-second polling-bound and integrated warm emitter-to-canvas checks,
 including a Region return that refills the decoded loop with zero additional
 native provider tile requests;
-first-frame captions describe the old source and acquire `switching` after 600ms. Independent instrumentation
+v5.7 supersedes its former delayed-caption assertion: pending copy is required
+in the first animation frame, with four decoded frames and advancing playback. Independent instrumentation
 tracks canvas/bitmap allocation and draw calls. Headless wall times are reported,
 not treated as Pi acceptance. The cold-outage fixture has no measurement frames.
 Stills and timing logs default to `/tmp/wfp-radar-v41/`.

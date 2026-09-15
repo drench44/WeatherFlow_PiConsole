@@ -7,6 +7,44 @@ to shared upstream code that the classic console benefits from too.
 ## 2026-09-15
 
 ### Radar
+- **Radar v5.8 removes cache inventory from the worker's filesystem path.** A
+  bounded startup worker validates the disk cache once; writes, evictions and
+  explicit page damage reports maintain its memory index. Warm hits skip PNG
+  decode/read-back and executor work. Scan/level masks and site coverage are
+  reused and pressure eviction uses indexed records. Geography raster palette
+  composition now uses Pillow operations
+  with identical output pixels. JSON publication remains on its two-second tick.
+- **Ordinary tile retries retain their second attempt.** Each attempt may use
+  six seconds within the unchanged batch/pass deadline; committed-camera tiles
+  retain their two-second total deadline and warm-only hedges. No-warm-lease
+  timeout/failure and synchronized warm-hedge regressions cover both policies.
+- Local before/after worker profiles, cache-I/O counting tests, bounded startup
+  measurements and the real TLS/page switch harness cover the v5.8 root fix.
+  The three-site warm switch and cold 15-tile Region newest both reach eight
+  decoded frames in both themes; no Pi or LAN access is needed by these checks.
+- **Radar v5.7 makes intent ordered and switch completion bounded.** Session,
+  generation and heartbeat fencing prevent delayed requests or old failure
+  payloads from replacing a newer choice. Reload reconciles accepted intent;
+  Auto survives durable restart. Pending captions paint in the input frame.
+  Healthy switches/zoom with rate capacity must decode four frames and advance
+  playback within 20 seconds; expiry visibly retries while keeping old imagery.
+- **Mandatory visible work comes first:** newest → four → eight frames, then
+  margin/opposite-source/adjacent-zoom warming, then deep history. Pending work
+  survives discovery and busy-worker wakeups. Reserves count actual missing
+  tiles and site layers; camera footprint controls capped-source coverage.
+- **Both sides now bound acquisition.** Mandatory camera tiles get two seconds
+  for at most two attempts; browser headers/body/decode get 2.5 seconds and
+  cancellation, with a three-second compositor progress escape. DNS/local and
+  ambiguous reused-path errors do not blame providers. Acquisition-objective
+  failures qualify fallback, and failed fallback can escape recovery dwell.
+- **Publication and long sessions retain honest state.** Panned regression
+  guards preserve newer history; captions age the painted frame. Bounded caches,
+  process-wide resolver ownership and exact visible-loop disk pins prevent
+  accumulated work. Publication uses inventory membership rather than per-tile
+  filesystem probes (v5.8 extends this ownership across passes). Phase/request telemetry and deterministic plus real TLS
+  loopback acceptance cover both themes, budget pressure and 30% hangs.
+
+### Radar v5.3 baseline (superseded where v5.7 differs)
 - **Radar v5.3 uses one settled camera intent.** Activity reports supply runtime
   zoom and centre; durable zoom follows after a debounce and is used only for
   cold start. Stepper, pinch and restored cameras share this path. Provider zoom

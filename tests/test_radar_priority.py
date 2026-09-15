@@ -53,26 +53,27 @@ def test_request_order_loop_neighbours_deep_and_resume(make_emitter, hybrid, tmp
     emitter._schedule_retry = lambda key, callback, delay: retries.append(delay)
     emitter._do_radar()
     newest = hybrid.latest
-    expected = [(stamp(newest),8)]*30 + [(stamp(newest),7)]*4 + [(stamp(newest),9)]*4
-    expected += [(stamp(newest-120*i),8) for i in range(1,9) for _ in range(12)]
+    expected = [(stamp(newest-120*i),8) for i in range(8) for _ in range(12)]
+    expected += [(stamp(newest),8)]*18 + [(stamp(newest),7)]*4 + [(stamp(newest),9)]*4
+    expected += [(stamp(newest-120*i),8) for i in range(8,10) for _ in range(12)]
     assert tiles(hybrid.calls) == expected
-    assert sum(f['complete'] for f in emitter._radar_frames) == 9
-    assert len(emitter._radar_request_times) == 144
-    assert ae.RADAR_REQUESTS_PER_MIN-len(emitter._radar_request_times) >= 34+60
+    assert sum(f['complete'] for f in emitter._radar_frames) == 10
+    assert len(emitter._radar_request_times) == 157
+    assert ae.RADAR_REQUESTS_PER_MIN-len(emitter._radar_request_times) >= 14+60
     assert retries[-1] == 60
     assert emitter._radar_refresh['state'] == 'idle'
     assert not emitter._radar_negative
     # A retry with no capacity cannot consume any deep-history headroom.
     hybrid.calls.clear(); emitter._do_radar(intent_triggered=False)
     assert not tiles(hybrid.calls)
-    assert len(emitter._radar_request_times) == 145  # scheduled metadata only
+    assert len(emitter._radar_request_times) == 158  # scheduled metadata only
     # Natural expiry resumes the pending older slots, without re-warming this stamp.
     hybrid.mono += 60; viewing(hybrid, tmp_path); hybrid.calls.clear()
     emitter._do_radar(intent_triggered=False)
-    assert tiles(hybrid.calls)[0] == (stamp(newest-120*9), 8)
+    assert tiles(hybrid.calls)[0] == (stamp(newest-120*10), 8)
     assert {z for _, z in tiles(hybrid.calls)} == {8}
     assert sum(f['complete'] for f in emitter._radar_frames) > 9
-    assert len(emitter._radar_request_times) <= 146
+    assert len(emitter._radar_request_times) <= ae.RADAR_REQUESTS_PER_MIN-74
 
 
 def test_scheduled_new_stamp_repeats_tiers_before_deep(make_emitter, hybrid, tmp_path):
@@ -175,9 +176,9 @@ def test_deep_transport_retries_preserve_atomic_floor(make_emitter, hybrid, tmp_
     hybrid.failure = retry
     emitter._do_radar()
     assert retried and emitter._radar_transport_retries
-    assert len(emitter._radar_request_times) == 146
+    assert len(emitter._radar_request_times) == 156
     assert emitter._radar_refresh['state'] == 'idle'
-    assert sum(f['complete'] for f in emitter._radar_frames) == 8
+    assert sum(f['complete'] for f in emitter._radar_frames) == 9
     assert not emitter._radar_negative
 
 

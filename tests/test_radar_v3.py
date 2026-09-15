@@ -184,7 +184,7 @@ def test_supersede_tile_boundary_immediate_new_pass(make_emitter, hybrid, monkey
     # arrived at a tile boundary. Keep that published hour until the next pass.
     pending = emitter._radar_result
     assert pending.frames[:-1] == old.frames[1:]
-    assert not pending.frames[-1]['complete'] and pending.ts_frame == hybrid.latest
+    assert not pending.frames[-1]['complete'] and pending.ts_frame == old.ts_frame
     assert pending.zoom == old.zoom and pending.bounds == old.bounds
     assert emitter._radar_restart
     assert emitter._radar_restart and not emitter._radar_negative
@@ -241,7 +241,7 @@ def test_site_preference_auto_swap_and_return(make_emitter, hybrid, multisite, t
     assert r['sourceMode']=='mosaic' and r['sourceFallback']=='site-zoom-floor'
     assert r['sourcePref']=='site' and r['sitePreferred'] and r['siteResumeZoom']==7
     assert r['tiles']['z']==5 and r['zoomMin']==4 and not r['zoomCapped']
-    assert 'intent' not in r and 'forSeq' not in r['refresh']
+    assert r['intent']['source']=='site' and 'forSeq' not in r['refresh']
     assert pref.read_bytes()==before
     hybrid.mono+=60; (tmp_path/'radar_zoom').write_text('7'); emitter._do_radar()
     r=emitter._build_payload()['radar']
@@ -355,7 +355,9 @@ def test_corrupt_warm_cache_rebuilt(make_emitter,hybrid,bad):
     if bad=='revision':meta['revision']='old'
     info=PngInfo();info.add_text('radarRemap','broken' if bad=='json' else json.dumps(meta));image.save(path,pnginfo=info)
     if bad=='truncated':path.write_bytes(path.read_bytes()[:80])
+    Path(emitter.output_path).with_name('radar_bad_tiles').write_text(json.dumps([path.relative_to(Path(emitter.output_path).parent).as_posix()]))
     hybrid.calls.clear();emitter._do_radar()
+    ae._radar_tile_metadata(path, 'iem-mrms-lcref')
     assert not any('mrms::' in c[2] for c in hybrid.calls)  # rebuild from native LRU
     with Image.open(path) as im:im.load();assert im.size==(256,256)
     assert emitter._radar_refresh['state']=='idle'
@@ -409,7 +411,7 @@ def test_real_worker_supersede_at_network_barrier(make_emitter,hybrid,tmp_path):
         assert 'geometryOnly' not in emitter._build_payload()['radar']
         pending = emitter._radar_result
         assert pending.frames[:-1] == old.frames[1:]
-        assert not pending.frames[-1]['complete'] and pending.ts_frame == hybrid.latest
+        assert not pending.frames[-1]['complete'] and pending.ts_frame == old.ts_frame
         assert pending.zoom == old.zoom and pending.bounds == old.bounds
     finally:release.set();worker.join(10)
     assert not worker.is_alive() and emitter._radar_restart and emitter._radar_result is pending

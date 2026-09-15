@@ -184,7 +184,7 @@ def test_prefetch_requires_fresh_view_idle_and_headroom(make_emitter, hybrid, mo
     if blocked == 'expired': (tmp_path/'radar_viewed').write_text(str(hybrid.now - ae.RADAR_VIEW_TTL))
     if blocked == 'busy': ctx['refresh']['state'] = 'history'
     if blocked == 'budget':
-        emitter._radar_request_times = [0.] * (ae.RADAR_REQUESTS_PER_MIN-ae.RADAR_HISTORY_RESERVE-60+1)
+        emitter._radar_request_times = [0.] * (ae.RADAR_REQUESTS_PER_MIN-emitter._radar_mandatory_reserve(source,ctx,[emitter._radar_result.ts_frame])-60+1)
     if blocked == 'cooldown': emitter._radar_cooldowns[source] = 10
     if blocked == 'deadline': ctx['deadline'] = 0
     hybrid.calls.clear()
@@ -268,7 +268,7 @@ def test_adapters_select_six_newest_then_four_history(make_emitter, hybrid, monk
         yield from original(source, stamp, ctx, *args)
     monkeypatch.setattr(emitter, '_radar_tile_batch', record)
     emitter._do_radar()
-    assert batches == [(False, 6), (True, 4), (True, 4), (False, 4)]
+    assert batches == [(False, 6), (False, 4), (True, 4), (True, 4), (True, 4)]
 
 
 def test_prefetch_error_does_not_change_published_frame_or_retry(make_emitter, hybrid, monkeypatch):

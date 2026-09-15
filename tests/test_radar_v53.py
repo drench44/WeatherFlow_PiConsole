@@ -187,7 +187,7 @@ def test_alternating_passes_retain_source_three_failures_stage_four_then_dwell(m
     assert any('reason=preferred source recovered after 300s dwell' in m for m in messages)
 
 
-def test_two_attempts_share_one_tile_deadline(origin, make_emitter, monkeypatch):
+def test_two_attempts_have_individual_timeouts_within_batch_deadline(origin, make_emitter, monkeypatch):
     e = make_emitter(); e._radar_session = http.RadarSession()
     monkeypatch.setattr(ae, 'RADAR_TILE_TIMEOUT_SEC', .4)
     origin.behavior = lambda path, ordinal: 'fail' if ordinal == 1 else 'hang'
@@ -205,7 +205,7 @@ def test_two_attempts_share_one_tile_deadline(origin, make_emitter, monkeypatch)
         assert not result and ctx['missing_tiles']
         assert time.monotonic()-started < .8
         assert len(origin.requests) == len(deadlines) == 2
-        assert deadlines[0] == deadlines[1] < started+.5
+        assert started < deadlines[0] <= deadlines[1] < started+.8
     finally:
         e._radar_session.close()
 

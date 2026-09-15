@@ -1,4 +1,6 @@
 """Bounded persistent IPv4/SNI transport, shared across radar passes."""
+import errno
+import weakref
 import http.client
 import io
 import re
@@ -23,6 +25,64 @@ class LocalTransportError(socket.timeout):
     """Client connection setup/resource deadline; not evidence of host health."""
 
 
+class AmbiguousTransportError(socket.timeout):
+    """A reused connection failed before a service response; retry fresh first."""
+
+
+def failure_class(error):
+    if isinstance(error, AmbiguousTransportError):
+        return 'ambiguous'
+    if isinstance(error, (LocalTransportError, socket.gaierror)) or (
+            isinstance(error, OSError) and error.errno in {
+                errno.ENETUNREACH, errno.EHOSTUNREACH, errno.ENETDOWN,
+                errno.EADDRNOTAVAIL, errno.EMFILE, errno.ENFILE, errno.ENOBUFS, errno.ENOMEM}):
+        return 'local'
+    return 'host'
+
+
+# Only active lookups are shared. A resolver that never returns occupies one of
+# four process-wide slots across pool replacement; it cannot spawn successors.
+_dns_lock = threading.Lock()
+_dns_jobs = {}
+
+
+def _shared_resolve(session, key, event):
+    with _dns_lock:
+        job = _dns_jobs.get(key)
+        if job is not None:
+            job.append((weakref.ref(session), event))
+            return
+        if len(_dns_jobs) >= 4:
+            session._dns_errors[key] = LocalTransportError('radar resolver capacity')
+            session._resolving.pop(key, None)
+            event.set()
+            return
+        _dns_jobs[key] = [(weakref.ref(session), event)]
+    def run():
+        addresses, error = None, None
+        try:
+            addresses = socket.getaddrinfo(*key, socket.AF_INET, socket.SOCK_STREAM)
+            if not addresses:
+                raise socket.gaierror('no radar IPv4 addresses')
+        except OSError as caught:
+            error = caught
+        with _dns_lock:
+            subscribers = _dns_jobs.pop(key)
+        for reference, done in subscribers:
+            owner = reference()
+            if owner is not None:
+                with owner._condition:
+                    if not owner._closed:
+                        if error is not None:
+                            owner._dns_errors[key] = error
+                        else:
+                            owner.addresses[key] = addresses
+                            owner._resolved_at[key] = time.monotonic()
+                    owner._resolving.pop(key, None)
+            done.set()
+    threading.Thread(target=run, name='radar-dns', daemon=True).start()
+
+
 class WarmUnavailable(LocalTransportError):
     pass
 
@@ -39,7 +99,7 @@ class _WarmLease:
                 self.session._release(self.key, self.conn)
 
 
-class _StaleFirstByteTimeout(socket.timeout):
+class _StaleFirstByteTimeout(AmbiguousTransportError):
     """A reused socket accepted a request but returned no HTTP response byte."""
 
 
@@ -294,8 +354,7 @@ class RadarSession:
         if resolve:
             # The system resolver is not cancellable. Even the cold leader waits
             # on the event only until its deadline; late results may seed cache.
-            threading.Thread(target=self._resolve, args=(key, event),
-                             name='radar-dns', daemon=True).start()
+            _shared_resolve(self, key, event)
         if cached is not None:
             return cached  # stale-while-refresh: first tile never waits for DNS
         if not event.wait(max(0, end - time.monotonic())):
@@ -362,7 +421,8 @@ class RadarSession:
             raise ValueError('radar requires an HTTPS host')
         control = getattr(req, "radar_attempt", None)
         key = (url.hostname, url.port or 443)
-        end = min(time.monotonic() + timeout, self._pass_deadline)
+        queued_at = time.monotonic()
+        end = min(queued_at + timeout, self._pass_deadline)
         for attempt in range(1 if control is not None else 2):
             if time.monotonic() >= end:
                 raise TimeoutError('radar pass exceeded deadline')
@@ -420,6 +480,7 @@ class RadarSession:
                         control.attach(conn.sock)
                 if conn.sock:
                     conn.sock.settimeout(remaining)
+                req.radar_queue_wait = time.monotonic()-queued_at
                 conn.request(req.get_method(), url.path + ('?' + url.query if url.query else ''),
                              headers=dict(req.header_items()))
                 remaining = end - time.monotonic()
@@ -438,10 +499,12 @@ class RadarSession:
                 return _Response(self, key, conn, response)
             except Exception as error:
                 self._release(key, conn, broken=True)
+                if req.get_method() in ('GET','HEAD') and reused and not conn.response_bytes and is_transport_error(error) and not isinstance(error, LocalTransportError):
+                    error = AmbiguousTransportError(str(error)) if not isinstance(error, _StaleFirstByteTimeout) else error
                 if (control is not None or attempt or not reused or req.get_method() not in ('GET', 'HEAD') or
                         not is_transport_error(error) or conn.response_bytes or
                         time.monotonic() >= end):
-                    raise
+                    raise error
                 first_byte = isinstance(error, _StaleFirstByteTimeout)
                 failure = getattr(req, 'radar_retry_failure', None)
                 if failure is not None:
@@ -470,6 +533,9 @@ class RadarSession:
                     self._release(key, conn, broken=True)
 
     def close(self):
+        with _dns_lock:
+            for key, subscribers in _dns_jobs.items():
+                _dns_jobs[key] = [(ref, event) for ref, event in subscribers if ref() is not self and ref() is not None]
         with self._condition:
             self._closed = True
             for key, conns in list(self.connections.items()):

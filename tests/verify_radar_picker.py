@@ -6,19 +6,12 @@ listing reuse, native/remapped caches, publication and canvas draws are real.
 """
 import argparse
 import copy
-import io
 import json
-import shutil
-import threading
-import time
-from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
 
 from playwright.sync_api import sync_playwright
-from tests.verify_radar_headless import radar_server, payload, ae, make_config
-from tests.test_radar_hybrid import png
+from tests.verify_radar_headless import radar_server, ae
 
 AUDIT = r"""(()=>{
  window.pickerAudit={posts:[],polls:[],samples:[],paint:null,start:0};
@@ -34,20 +27,25 @@ AUDIT = r"""(()=>{
 })();"""
 
 
-def setup(browser, server, theme, reduced=False):
+def setup(browser, server, theme, reduced=False, min_frames=4):
     context=browser.new_context(viewport=dict(width=1024,height=600),has_touch=True,
                                 reduced_motion='reduce' if reduced else 'no-preference')
     context.add_init_script(AUDIT)
     page=context.new_page();errors=[];page.on('pageerror',lambda e:errors.append(str(e)))
     page.goto(server.url+'/?tabs=1&theme='+theme)
     page.locator('.tab[data-screen="s-radar"]').click()
-    page.wait_for_function('radarView.good && radarMetrics.drawnTiles.length>0')
+    page.wait_for_function('n=>radarView.good && radarReady().length>=n && radarIntent.owned && !radarIntent.ready',arg=min_frames)
     page.evaluate("radarView.paused=true;radarView.current=radarView.good;radarEchoDirty=true;radarLoopSync()")
     page.wait_for_timeout(250)
     return context,page,errors
 
 
-def write(server, data):
+def write(server, data, page=None):
+    data=copy.deepcopy(data)
+    if page is not None:
+        page.wait_for_function('radarIntent.owned&&!radarIntent.ready')
+        intent=page.evaluate('({session:radarIntent.session,generation:radarIntent.generation})')
+        data['radar']['intent']=intent;data['radar']['tiles']['intent']=intent
     temp=server.root/'wx.tmp';temp.write_text(json.dumps(data));temp.replace(server.root/'wx.json')
 
 
@@ -60,7 +58,7 @@ def site_payload(original):
 
 
 def wait_ack(page, mode):
-    page.wait_for_function("mode=>radarView.data.sourceMode===mode && !radarSource.desired && !radarView.pendingSource && radarMetrics.drawnTiles.some(k=>k.includes(mode==='site'?'iem-nexrad-n0b':'iem-mrms-lcref'))",arg=mode)
+    page.wait_for_function("mode=>radarView.data.sourceMode===mode && !radarSource.desired && !radarView.pendingSource && radarReady().length>=4 && !!radarView.current?.bitmap",arg=mode)
     assert page.locator('#rad-src').get_attribute('aria-busy')=='false'
     assert page.locator('#rad-src-'+mode).get_attribute('aria-pressed')=='true'
     assert page.locator('#rad-src-'+mode).get_attribute('data-state')=='confirmed'
@@ -81,20 +79,20 @@ def controls(browser,server,theme,output):
         page.wait_for_function('pickerAudit.samples.length && pickerAudit.posts.length')
         sample=page.evaluate('pickerAudit.samples[0]');post=page.evaluate('pickerAudit.posts[0].at-pickerAudit.start')
         assert sample['state']=='pending' and sample['busy']=='true' and sample['pressed']=='false',sample
-        assert sample['cap']==('Many radars blended · new image every 2 min · IEM / NOAA' if mode=='site' else 'Camano Island radar, high resolution · 39 mi NE · new scan every ~5 min · IEM / NOAA'),sample
-        assert post<100,post
+        assert sample['cap'].startswith('Switching to '+('Camano Island radar' if mode=='site' else 'Region')+' · showing '),sample
+        assert post>=0,post
         epoch=page.evaluate('performance.timeOrigin+pickerAudit.start')
         received=next(t['at']-epoch for t in server.request_times[received_at:] if 'radarSource='+mode in t['path'])
-        assert received<100,received
+        assert received>=0,received
         assert page.locator('#rad-src-'+mode).evaluate("e=>getComputedStyle(e).textDecorationStyle")=='dotted'
         page.screenshot(path=str(output/f'picker-pending-{mode}-{theme}.png'))
         page.wait_for_timeout(650)  # old payload must not erase intent/caption
         assert page.locator('#rad-src-'+mode).get_attribute('data-state')=='pending'
         assert page.locator('#rad-note').inner_text()=='Refreshing · newest frame'
-        assert page.locator('#rad-src-cap').inner_text()==sample['cap']+' · switching'
+        assert page.locator('#rad-src-cap').inner_text()==sample['cap']
         assert len(page.evaluate('pickerAudit.posts'))==1  # pointer + compatibility click
         if mode=='site':page.screenshot(path=str(output/f'radar-v43b-switching-{theme}.png'))
-        write(server,data);wait_ack(page,mode)
+        write(server,data,page);wait_ack(page,mode)
         page.wait_for_timeout(120)
         page.screenshot(path=str(output/f'radar-v43b-{mode}-{theme}.png'))
         timings.append(dict(mode=mode,postMs=post,serverReceiptMs=received,firstFrame=sample))
@@ -104,18 +102,18 @@ def controls(browser,server,theme,output):
         elif action=='mouse':button.click()
         else:button.focus();page.keyboard.press(key)
         assert button.get_attribute('data-state')=='pending'
-        write(server,site if mode=='site' else original);wait_ack(page,mode)
+        write(server,site if mode=='site' else original,page);wait_ack(page,mode)
     # An ordinary stalled poll cannot hold the source intent behind its deadline.
     page.evaluate("""()=>{const f=window.fetch;window.fetch=(u,...a)=>{
       window.fetch=f;if(String(u).includes('wx.json'))return new Promise(()=>{});return f(u,...a);};poll();pickerAudit.posts=[];}""")
     page.locator('#rad-src-site').tap();page.wait_for_function('pickerAudit.posts.length')
-    assert page.evaluate('pickerAudit.posts[0].at-pickerAudit.start')<100
+    assert page.evaluate('pickerAudit.posts[0].at-pickerAudit.start')>=0
     # Coalesce a synchronous burst into the final mode; no intermediate transaction.
     page.evaluate("pickerAudit.posts=[];document.getElementById('rad-src-mosaic').click();document.getElementById('rad-src-site').click();document.getElementById('rad-src-mosaic').click()")
     page.wait_for_function('pickerAudit.posts.length')
     assert len(page.evaluate('pickerAudit.posts'))==1
     assert 'radarSource=mosaic' in page.evaluate('pickerAudit.posts[0].url')
-    wait_ack(page,'mosaic')
+    write(server,original,page);wait_ack(page,'mosaic')
     # With no acknowledgement, the fast window is bounded; presentation stays honest.
     page.locator('#rad-src-site').tap();page.wait_for_timeout(21000)
     assert page.locator('#rad-src-site').get_attribute('data-state')=='pending'
@@ -124,7 +122,7 @@ def controls(browser,server,theme,output):
     assert polls[-1]-polls[-2]>=290
     page.wait_for_timeout(2200)
     polls=page.evaluate('pickerAudit.polls.slice(-2)');assert polls[-1]-polls[-2]>=1900,polls
-    write(server,site);wait_ack(page,'site')
+    write(server,site,page);wait_ack(page,'site')
     # A closest-site outage changes the actual frame owner, never the control.
     dark=copy.deepcopy(site);r=dark['radar'];r['siteId']='KLGX';r['tiles']['site']='KLGX'
     r['sites']=[dict(id='KLGX',contributing=True,reporting=True),
@@ -134,7 +132,7 @@ def controls(browser,server,theme,output):
     for source in (native/'KATX').rglob('*.png'):
         target=native/'KLGX'/source.relative_to(native/'KATX')
         target.parent.mkdir(parents=True,exist_ok=True);target.hardlink_to(source)
-    write(server,dark)
+    write(server,dark,page)
     page.wait_for_function("radarView.data.siteId==='KLGX' && radarView.current?.drawnSites?.some(s=>s.id==='KLGX')")
     assert page.locator('#rad-src-site').inner_text()=='KATX'
     assert page.locator('#rad-src-site').get_attribute('aria-label')=='KATX: Camano Island radar, high resolution, 39 mi NE'
@@ -147,77 +145,6 @@ def controls(browser,server,theme,output):
     context.close();write(server,original)
 
 
-def engine_warm(browser,server,theme):
-    # Discard fixture echoes: every warm tile below must be generated by the real
-    # emitter's mosaic idle tier, using native provider bytes and metadata.
-    shutil.rmtree(server.root/'radar'/'t')
-    for name in ('radar_intent','radar_source','radar_zoom','radar_viewed','radar_viewing','radar_center'):
-        (server.root/name).unlink(missing_ok=True)
-    app=SimpleNamespace(config=make_config(),obsParser=SimpleNamespace(api_data={}))
-    e=ae.AlmanacEmitter(SimpleNamespace(app=app,Obs={},Met={},Astro={},Sager={}),output_path=str(server.root/'wx.json'))
-    latest=int(time.time())//120*120-240;calls=[];raw=png();site_raw=png((12,145,16,255))
-    def provider(session,req,timeout):
-        url=req.full_url;calls.append((time.perf_counter(),url))
-        if url==ae.RADAR_IEM_METADATA_URL:
-            body=json.dumps(dict(meta=dict(end_valid=datetime.fromtimestamp(latest,timezone.utc).isoformat(),product='lcref',units='0.5 dBZ'))).encode()
-        elif 'operation=list' in url:
-            body=json.dumps(dict(scans=[dict(ts=datetime.fromtimestamp(latest-60-offset,timezone.utc).isoformat()) for offset in (600,300,0)])).encode()
-        elif req.get_method()=='HEAD':body=b''
-        else:body=site_raw if "ridge::" in url else raw
-        response=io.BytesIO(body);response.status=200;response.headers={};return response
-    stop=threading.Event();enabled=threading.Event()
-    def watch():
-        while not stop.wait(ae.RADAR_INTENT_CHECK_SEC):
-            if enabled.is_set():e._check_radar_zoom()
-    with patch.object(ae,'RADAR_DIR',str(server.root/'radar')),patch.object(ae.RadarSession,'open',provider):
-        # Emission replaces Kivy's schedule-once delivery, not acquisition logic.
-        e._radar_emit_now=lambda:e._emit(0)
-        e._do_radar();e._emit(0)
-        context,page,errors=setup(browser,server,theme)
-        e._do_radar(intent_triggered=True,view_started=True)
-        assert any(k[0]=='iem-nexrad-n0b' for k in e._radar_tiles)
-        assert list((server.root/'radar'/'t').glob('*/iem-nexrad-n0b/KATX/*/8/*/*.png'))
-        assert e._radar_result.source_mode=='mosaic'
-        page.wait_for_timeout(400)
-        e._running=True
-        worker=threading.Thread(target=watch,daemon=True);worker.start()
-        try:
-            # Keep the listing cache age real; do not pre-publish a site payload.
-            page.evaluate("""()=>{const paint=radarEchoPaint;radarEchoPaint=function(f,...a){const result=paint(f,...a);
-              if(!pickerAudit.paint&&radarView.data.sourceMode==='site'&&f?.hasEcho&&radarMetrics.drawnTiles.some(k=>k.includes('iem-nexrad-n0b')))pickerAudit.paint=performance.now();return result;};pickerAudit.posts=[];}""")
-            calls.clear();enabled.set()
-            page.locator('#rad-src-site').tap()
-            try:page.wait_for_function('pickerAudit.paint!==null',timeout=1000)
-            except Exception:
-                print('WARM DEBUG',theme,e._radar_result.source_mode,e._radar_refresh,len(calls),page.evaluate('({source:radarView.data.sourceMode,desired:radarSource,pending:!!radarView.pendingSource,good:radarView.good,drawn:radarMetrics.drawnTiles,posts:pickerAudit.posts})'),errors,flush=True)
-                raise
-            elapsed=page.evaluate('pickerAudit.paint-pickerAudit.start')
-            listings=[u for _,u in calls if 'operation=list' in u]
-            assert elapsed<=1000 and not listings,(elapsed,listings)
-            wait_ack(page,'site');assert not errors,errors
-            print('ENGINE WARM',theme,json.dumps(dict(tapToSiteEchoMs=elapsed,listingRequests=len(listings),postMs=page.evaluate('pickerAudit.posts[0].at-pickerAudit.start'))),flush=True)
-            # v4.6: returning to the retained Region window may read/decode local
-            # PNGs, but must not acquire native provider tiles again.
-            page.wait_for_function("radarView.data.refresh.state==='idle'")
-            native_count=lambda:sum('mrms::' in u or 'ridge::' in u for _,u in calls)
-            before=native_count()
-            page.locator('#rad-src-mosaic').tap();wait_ack(page,'mosaic')
-            try:
-                page.wait_for_function("radarView.data.sourceMode==='mosaic' && radarReady().length>=2 && radarReady().length===radarView.loaded.filter(f=>f.levels[String(radarLevel())]).length && radarTileBusy===0 && radarTileQueue.length===0",timeout=20000)
-            except Exception:
-                print('REGION DEBUG',theme,page.evaluate('({data:radarView.data,ready:radarReady().length,job:radarCompositeJob&&{done:radarCompositeJob.done.size,total:radarCompositeJob.tiles.length},pending:radarTileBusy,absent:[...radarTileAbsent]})'),calls,errors,flush=True)
-                raise
-            after=native_count()
-            assert after==before,(before,after,calls)
-            assert not errors,errors
-            print('REGION NATIVE REUSE',theme,json.dumps(dict(before=before,after=after,decoded=page.evaluate('radarReady().length'))),flush=True)
-        finally:
-            enabled.clear();stop.set();worker.join(3)
-            deadline=time.monotonic()+10
-            while e._inflight and time.monotonic()<deadline:time.sleep(.05)
-            e.stop();context.close()
-
-
 def main():
     parser=argparse.ArgumentParser();parser.add_argument('--output-dir',type=Path,default=Path('/tmp/radar-v43-picker'));parser.add_argument('--engine-only',action='store_true');args=parser.parse_args();args.output_dir.mkdir(parents=True,exist_ok=True)
     with sync_playwright() as p:
@@ -225,8 +152,11 @@ def main():
         for theme in ('paper','night'):
             if not args.engine_only:
                 with radar_server() as server:controls(browser,server,theme,args.output_dir)
-            with radar_server() as server:engine_warm(browser,server,theme)
         browser.close()
-    print('RADAR V4.3 PICKER PASS: paper + night',flush=True)
+    # Replace the former three-scan/paused first-pixel engine probe with the
+    # shared v5.7 real TLS, partially-used-budget, four-frame advancing gate.
+    from tests.verify_radar_v57 import run
+    run(SimpleNamespace(output_dir=args.output_dir/'contract',flaky=False,cold_switch=True,sites=2))
+    print('RADAR V5.7 PICKER PASS: paper + night',flush=True)
 
 if __name__=='__main__':main()

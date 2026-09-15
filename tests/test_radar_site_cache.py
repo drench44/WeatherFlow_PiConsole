@@ -96,7 +96,9 @@ def test_settled_mode_press_has_zero_listing_and_newest_requests(scene, hybrid, 
     else:
         emitter._radar_prefetch(MRMS, ctx)
     hybrid.calls.clear(); multisite.calls.clear()
-    # Stop at newest publication: the remaining cold loop is deliberately lazy.
+    cached_urls={ae.RADAR_SITE_TILE_TEMPLATE.format(site=k[1][1:],stamp=ae.datetime.fromtimestamp(k[3],ae.timezone.utc).strftime('%Y%m%d%H%M'),z=k[4],x=k[5],y=k[6])
+        if k[0]==SITE else ae.RADAR_IEM_TILE_TEMPLATE.format(stamp=ae.datetime.fromtimestamp(k[3],ae.timezone.utc).strftime('%Y%m%d%H%M'),z=k[4],x=k[5],y=k[6]) for k in emitter._radar_tiles}
+    # A switch stages four frames; newest remains a cache hit, history may fetch.
     (tmp_path/'radar_viewed').unlink()
     (tmp_path/'radar_source').write_text(mode)
     (tmp_path/'radar_zoom').write_text(str(zoom))
@@ -104,7 +106,8 @@ def test_settled_mode_press_has_zero_listing_and_newest_requests(scene, hybrid, 
     assert emitter._radar_result.source_mode == mode
     assert emitter._radar_result.zoom == zoom
     assert emitter._radar_result.available
-    assert not hybrid.calls and not multisite.calls
+    assert all(c[0]=='tile' and c[2] not in cached_urls for c in multisite.calls)
+    assert all(c[2] not in cached_urls and c[2]!=ae.RADAR_IEM_METADATA_URL for c in hybrid.calls)
 
 
 def test_intent_cancels_site_warming_at_tile_boundaries(scene, hybrid, multisite, tmp_path):
@@ -166,7 +169,7 @@ def test_settled_mosaic_newest_precedes_cross_mode_warm_and_press(make_emitter, 
     emitter._do_radar()
     first_site = next(i for i,(s,u) in enumerate(events) if s == SITE)
     preceding = [u for s,u in events[:first_site] if 'mrms::' in u]
-    assert len(preceding) == 30  # newest, then current-camera site before optional zoom neighbours
+    assert len(preceding) == 114  # eight visible grids, then newest margin
     assert 2<=sum(f['complete'] for f in emitter._radar_result.frames)<=8  # cross-mode tier may consume this pass's reserve
     # Let the real rolling window expire, retaining continuous viewed demand.
     hybrid.mono = 60; hybrid.view(); emitter._do_radar(intent_triggered=False)
@@ -175,12 +178,12 @@ def test_settled_mosaic_newest_precedes_cross_mode_warm_and_press(make_emitter, 
     publish = emitter._radar_publish_refresh
     def capture(ctx, **changes):
         publish(ctx, **changes)
-        if changes.get('frameIndex') == 1: publications.append(list(events))
+        if emitter._radar_result.source_mode=='site': publications.append(sum(f['complete'] for f in emitter._radar_result.frames))
     monkeypatch.setattr(emitter, '_radar_publish_refresh', capture)
     (tmp_path/'radar_source').write_text('site'); (tmp_path/'radar_zoom').write_text('7')
     emitter._do_radar()
     assert emitter._radar_result.source_mode == 'site'
-    assert publications and publications[0] == []
+    assert publications and publications[0] >= min(4,len(emitter._radar_result.frames))
     assert not any('operation=list' in u for _,u in events)
 
 
@@ -198,7 +201,7 @@ def test_other_mode_metadata_and_tiles_use_background_reserve(scene, hybrid, tmp
         return request(source,url,*args,**kwargs)
     monkeypatch.setattr(emitter, '_radar_request', record)
     emitter._radar_prefetch(SITE, ctx)
-    assert reserves and set(reserves) == {34}
+    assert reserves and set(reserves) == {emitter._radar_mandatory_reserve(SITE,ctx,[emitter._radar_result.ts_frame])}
 
 
 def test_site_loop_cannot_evict_warmed_mode_or_zoom_tiles(scene, hybrid, multisite, tmp_path, monkeypatch):

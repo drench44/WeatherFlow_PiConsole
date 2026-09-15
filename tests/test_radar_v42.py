@@ -105,8 +105,9 @@ def test_freshness_and_view_gate_only_viewport(make_emitter,fast_tiles,age,viewe
 @pytest.mark.parametrize('age',[0,200])
 def test_moving_suppresses_both_queues_until_settled(make_emitter,fast_tiles,age):
     e=make_emitter();activity(e,moving=True,at=ae.time.time()-age)
-    e._radar_geo_work();assert not fast_tiles
-    activity(e,moving=False);e._radar_geo_work();assert len(fast_tiles)==1
+    e._radar_geo_work();assert len(fast_tiles)==(0 if age<5 else 1)
+    before=len(fast_tiles)
+    activity(e,moving=False);e._radar_geo_work();assert len(fast_tiles)==before+1
 
 
 def test_background_sleep_and_viewed_priority(make_emitter,fast_tiles,monkeypatch):

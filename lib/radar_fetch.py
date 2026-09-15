@@ -5,7 +5,7 @@ import socket
 import threading
 import time
 from urllib.parse import urlsplit
-from lib.radar_http import LocalTransportError
+from lib.radar_http import LocalTransportError, failure_class
 
 
 class CircuitOpen(OSError):
@@ -63,6 +63,7 @@ class HostHealth:
         self.hedge_events = deque()
         self.hedge_until = 0
         self.local_failures = 0
+        self.ambiguous_failures = 0
         self.last_success = None
         self.last_error = None
 
@@ -126,8 +127,11 @@ class HostHealth:
             s = self._host(source, url)
             if error is not None:
                 self.last_error = str(error) or type(error).__name__
-            if isinstance(error, LocalTransportError):
-                self.local_failures += 1
+            if error is not None and failure_class(error) != 'host':
+                if failure_class(error) == 'local':
+                    self.local_failures += 1
+                else:
+                    self.ambiguous_failures += 1
                 if probe:
                     s['probe'] = False
                 return
@@ -169,7 +173,7 @@ class HostHealth:
                 successRate60s=sum(samples)/len(samples) if samples else None,
                 hedges=self.hedges, retries=self.retries, discardedHedges=self.discarded,
                 breaker='open' if 'open' in states else 'half' if 'half' in states else 'closed',
-                lastError=self.last_error, localFailures=self.local_failures,
+                lastError=self.last_error, localFailures=self.local_failures, ambiguousFailures=self.ambiguous_failures,
                 hedgeSuspendedSec=max(0, self.hedge_until-time.monotonic()), hosts=hosts)
 
 
@@ -201,7 +205,7 @@ def tile_race(request, deadline, hedge, claim_hedge, discarded):
                 failed = not pending
                 eligible = hedge is not None and not controls[0].first_byte.is_set()
                 lease = claim_hedge() if eligible and not failed else None
-                if failed or lease:
+                if (failed and error is not None and isinstance(error, OSError) and not isinstance(error, (CircuitOpen, AttemptCancelled))) or lease:
                     second = True
                     control = Attempt(fresh=failed, hedged=not failed, warm_lease=lease)
                     controls.append(control)

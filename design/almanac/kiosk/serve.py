@@ -240,6 +240,48 @@ def _write_radar_intent(params):
 _camera_persist_timer = None
 
 
+# A reload claims ownership with compare-and-swap against the acknowledged owner.
+# Generation zero only reconciles; it never commits a restored camera.
+_radar_owner = None
+
+def _camera_transaction(activity, params):
+    global _radar_owner
+    session = params.get('radarSession', [''])[0]
+    generation = params.get('radarGeneration', [''])[0]
+    if not re.fullmatch(r'[A-Za-z0-9-]{16,64}', session) or not re.fullmatch(r'[0-9]{1,9}', generation):
+        return False
+    generation = int(generation)
+    old = _read_radar_intent()
+    if _radar_owner is None:
+        _radar_owner = dict(session=old.get('session', ''), generation=old.get('generation', 0))
+    if generation == 0:
+        if params.get('radarClaim') == [_radar_owner['session']]:
+            _radar_owner = dict(session=session, generation=0)
+        return session == _radar_owner['session'] and _radar_owner['generation'] == 0
+    if session != _radar_owner['session'] or generation < _radar_owner['generation']:
+        return False
+    heartbeat = params.get('radarHeartbeat', ['0'])[0]
+    if not re.fullmatch(r'[0-9]{1,12}', heartbeat):
+        return False
+    heartbeat = int(heartbeat)
+    if heartbeat and heartbeat <= _radar_owner.get('heartbeat', 0):
+        return False
+    if params.get('radarCommit') == ['1']:
+        if generation > _radar_owner['generation']:
+            if activity.get('moving') or 'zoom' not in activity or 'center' not in activity:
+                return False
+            if params.get('radarSource') not in (['site'], ['mosaic']) or params.get('radarPolicy') not in (['auto'], ['manual']):
+                return False
+            if not _write_settled_camera(activity, params):
+                return False
+            _radar_owner = dict(session=session, generation=generation)
+    elif generation != _radar_owner['generation']:
+        return False
+    if heartbeat:
+        _radar_owner['heartbeat'] = heartbeat
+    return True
+
+
 def _write_settled_camera(activity, params):
     """Activity is the only live camera input; durable zoom is an output."""
     global _camera_persist_timer
@@ -256,8 +298,11 @@ def _write_settled_camera(activity, params):
     if source not in ('site', 'mosaic'):
         source = 'mosaic'
     record = dict(zoom=activity['zoom'], center=activity['center'], source=source, camera=True)
+    if 'radarSession' in params:
+        record.update(session=params['radarSession'][0], generation=int(params['radarGeneration'][0]),
+                      zoomPolicy=params['radarPolicy'][0], acceptedAt=time.time())
     if all(old.get(k) == v for k, v in record.items()):
-        return
+        return True
     record['seq'] = min(999999999999, max(old['seq']+1, int(time.time()*100)))
     marker = os.path.join(os.path.dirname(DATA), 'radar_intent')
     tmp = marker+'.tmp'
@@ -274,11 +319,12 @@ def _write_settled_camera(activity, params):
     def persist():
         with _count_lock:
             if _read_radar_intent() == record:
-                _write_radar_zoom([str(record['zoom'])])
+                _write_radar_zoom(['auto' if record.get('zoomPolicy') == 'auto' else str(record['zoom'])])
                 _write_radar_source([record['source']])
     _camera_persist_timer = threading.Timer(.25, persist)
     _camera_persist_timer.daemon = True
     _camera_persist_timer.start()
+    return True
 
 
 def _radar_activity(params):
@@ -298,6 +344,32 @@ class Handler(http.server.SimpleHTTPRequestHandler):
     def __init__(self, *a, **k):
         super().__init__(*a, directory=WEB, **k)
 
+    def do_POST(self):
+        # The engine alone owns tile eviction. A page may report corruption or
+        # an unexpected 404; bounded hints are validated against its own index.
+        if self.path != '/radar-bad-tile' or self.client_address[0] not in LOOPBACK:
+            self.send_error(403)
+            return
+        try:
+            length = int(self.headers.get('Content-Length','0'))
+            if not 0 < length <= 256:
+                raise ValueError('report length')
+            path = self.rfile.read(length).decode('ascii').lstrip('/')
+            if not re.fullmatch(r'radar/t/[a-f0-9]{12}/(?:iem-mrms-lcref|iem-nexrad-n0b|rainviewer)/(?:-|[A-Z0-9]{4})/[0-9]{12}/[0-9]{1,2}/[0-9]{1,4}/[0-9]{1,4}\.png',path,re.ASCII):
+                raise ValueError('tile path')
+            with _count_lock:
+                marker = os.path.join(os.path.dirname(DATA),'radar_bad_tiles')
+                try:
+                    with open(marker) as f: paths = json.load(f)
+                    if not isinstance(paths,list): paths=[]
+                except (OSError,ValueError): paths=[]
+                paths = [p for p in paths[-127:] if p != path]+[path]
+                with open(marker+'.tmp','w') as f: json.dump(paths,f)
+                os.replace(marker+'.tmp',marker)
+            self.send_response(204);self.send_header('Content-Length','0');self.end_headers()
+        except (OSError,ValueError,UnicodeError):
+            self.send_error(400)
+
     def do_GET(self):
         self._immutable_radar = False
         path, _, query = self.path.partition("?")
@@ -313,24 +385,27 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 if rendered:
                     _renders += 1
                 if self.client_address[0] in LOOPBACK:
-                    _write_radar_viewing(viewed_radar)
                     params = parse_qs(query, keep_blank_values=True)
                     camera_report = viewed_radar and params.get('radarTheme',[''])[0] in ('paper','night')
-                    if camera_report:
+                    ordered = 'radarSession' in params
+                    accepted = _camera_transaction(_radar_activity(params), params) if ordered and camera_report else not ordered and _radar_owner is None
+                    if accepted:
+                        _write_radar_viewing(viewed_radar)
+                    if camera_report and accepted:
                         marker=os.path.join(os.path.dirname(DATA),'radar_activity');tmp=marker+'.tmp'
                         try:
                             with open(tmp,'w') as f:json.dump(_radar_activity(params),f)
                             os.replace(tmp,marker)
                         except OSError:pass
-                    if camera_report:
+                    if camera_report and accepted and not ordered:
                         _write_settled_camera(_radar_activity(params), params)
-                    elif not _read_radar_intent().get('camera') and 'radarSeq' in params:
+                    elif not ordered and accepted and not _read_radar_intent().get('camera') and 'radarSeq' in params:
                         _write_radar_intent(params)  # older pages, until the first camera report
-                    elif set(_read_radar_intent()) == {'seq'}:
+                    elif not ordered and accepted and set(_read_radar_intent()) == {'seq'}:
                         _write_radar_zoom(params.get('radarZoom', []))
                         _write_radar_center(params.get('radarCenter', []))
                         _write_radar_source(params.get('radarSource', []))
-                if viewed_radar:
+                if viewed_radar and accepted:
                     # Share only a timestamp with the emitter. Serialize writers
                     # and replace atomically so it never reads a partial epoch.
                     marker = os.path.join(os.path.dirname(DATA), "radar_viewed")
@@ -375,6 +450,11 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         return super().send_head()
 
     def end_headers(self):
+        if self.path.split('?')[0] == '/wx.json' and self.client_address[0] in LOOPBACK:
+            with _count_lock:
+                record = _read_radar_intent()
+                owner = _radar_owner or dict(session=record.get('session', ''), generation=record.get('generation', 0))
+                self.send_header('X-Radar-Intent', json.dumps(dict(intent=record, acceptedGeneration=owner['generation'], **owner), separators=(',', ':')))
         if getattr(self, '_immutable_radar', False):
             self.send_header('Cache-Control', 'public, max-age=31536000, immutable')
         super().end_headers()

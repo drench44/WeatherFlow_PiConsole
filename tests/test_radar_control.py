@@ -43,6 +43,8 @@ def test_intent_only_tiles_and_validation_clock_does_not_slide(make_emitter, hyb
     # Force native requests even for a source-only/restart pass at the same crop.
     for path in (tmp_path/'radar').rglob('*.png'):
         path.unlink()
+    for key in list(emitter._radar_disk_inventory.records):
+        emitter._radar_invalidate_tile(key)
     emitter._radar_tiles.clear()
     emitter._do_radar()
     assert kinds(hybrid.calls) and set(kinds(hybrid.calls)) == {'TILE'}

@@ -19,11 +19,12 @@ from tests.fixtures.config import make_config
 
 
 
-def test_immediate_emit_coalesces_and_stays_on_clock_thread(make_emitter, monkeypatch):
+def test_worker_publications_wait_for_two_second_emit_tick(make_emitter, monkeypatch):
     emitter = make_emitter()
     clock = FakeClock()
     monkeypatch.setattr(ae, 'Clock', clock)
     emitter._running = True
+    emitter._schedule(emitter._emit,2,interval=True)
     main = threading.get_ident()
     built = []
     def build():
@@ -38,10 +39,10 @@ def test_immediate_emit_coalesces_and_stays_on_clock_thread(make_emitter, monkey
     worker = threading.Thread(target=burst)
     worker.start(); worker.join(5)
     assert not worker.is_alive() and not built
-    assert len(clock.events) == 1 and clock.events[0].timeout == 0
-    assert clock.events[0].callback == emitter._emit
-    clock.advance(0)
-    assert built == [7] and not clock.events and not emitter._events
+    assert len(clock.events) == 1 and clock.events[0].timeout == 2
+    clock.advance(1.99); assert not built
+    clock.advance(.01)
+    assert built == [7] and len(clock.events)==len(emitter._events)==1
     burst(); assert len(clock.events) == 1
     emitter.stop(); assert not clock.events
 
@@ -50,11 +51,12 @@ def test_pan_reuses_native_tiles_without_requests(make_emitter, hybrid, tmp_path
     emitter = make_emitter(); emitter._do_radar()
     first = emitter._radar_result.tiles
     cached = set(emitter._radar_tiles)
-    assert len(cached) == 30
+    assert len(cached) == 12
     hybrid.calls.clear()
     (tmp_path/'radar_center').write_text('47.611,-122.331')
     emitter._do_radar()
-    assert emitter._radar_result.tiles == first
+    assert emitter._radar_result.tiles['grid'] == first['grid']
+    assert emitter._radar_result.tiles['frames'] == first['frames']
     assert set(emitter._radar_tiles) == cached
     assert not any('mrms::' in call[2] for call in hybrid.calls)
     # Palette revisions change remapped tiles, never immutable native tile bytes.

@@ -49,6 +49,7 @@ def test_completed_round_repairs_deleted_disk_tile(scene, multisite):
     key = next(k for k in e._radar_tiles if k[0] == SITE and k[4] == ctx['zoom'])
     path = ae._radar_tile_path(key[0], key[1], key[3], key[4], key[5], key[6])
     path.unlink()
+    e._radar_invalidate_tile((key[0],key[1],ae._radar_stamp_text(key[3]),key[4],key[5],key[6]))
     e._radar_tiles.pop(key)
     multisite.calls.clear()
     e._radar_prefetch(MRMS, ctx)
@@ -75,7 +76,7 @@ def test_complete_mosaic_return_retries_site_warming(make_emitter, hybrid, multi
     assert e._radar_result.source_mode == 'mosaic'
 
 
-def test_older_site_volume_publishes_first_tile_before_full_viewport(make_emitter, hybrid, multisite, tmp_path, monkeypatch):
+def test_older_site_volume_stages_complete_frames_before_publication(make_emitter, hybrid, multisite, tmp_path, monkeypatch):
     (tmp_path/'radar_source').write_text('mosaic')
     e = make_emitter();e._do_radar()
     mosaic_ts = e._radar_result.ts_frame
@@ -85,12 +86,12 @@ def test_older_site_volume_publishes_first_tile_before_full_viewport(make_emitte
     def publish():
         r = e._radar_result
         if r.source_mode == 'site' and r.ts_frame is not None:
-            seen.append((r.ts_frame, len(list(Path(ae.RADAR_DIR).glob('t/*/iem-nexrad-n0b/*/*/8/*/*.png')))))
+            seen.append((r.ts_frame, sum(f['complete'] for f in r.frames), len(r.frames)))
             raise ae._RadarSuperseded('stop after first published measurement')
     monkeypatch.setattr(e, '_radar_emit_now', publish)
     e._do_radar()
     assert seen and seen[0][0] == mosaic_ts-60
-    assert 1 <= seen[0][1] <= ae.RADAR_NEWEST_TILE_WORKERS
+    assert seen[0][1] >= min(4,seen[0][2])
 
 
 def test_idle_warm_watcher_yields_to_new_source_and_single_flight(scene, tmp_path, monkeypatch):

@@ -44,11 +44,11 @@ def test_unviewed_hour_accumulates_and_warm_view_has_zero_http(make_emitter, hyb
         hybrid.calls.clear(); e._do_radar(intent_triggered=False)
         assert e._build_payload()['radar']['completeFrameCount']==min(i+1,31)
         tile_calls=[c for c in hybrid.calls if '/mrms::' in c[2]]
-        assert len(tile_calls)==30
+        assert len(tile_calls)==12
         assert len(list(Path(ae.RADAR_DIR).rglob('*.png'))) <= 8000
     files=list(Path(ae.RADAR_DIR).rglob('*.png'))
     current=[p for p in files if hybrid.latest-3600<=datetime.strptime(p.parts[-4],'%Y%m%d%H%M').replace(tzinfo=timezone.utc).timestamp()<=hybrid.latest]
-    assert len(current)==31*30
+    assert len(current)==31*12
     hybrid.calls.clear(); hybrid.view(); e._running=True
     start=time.perf_counter(); e._check_radar_zoom()
     deadline=start+1

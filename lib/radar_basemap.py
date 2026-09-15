@@ -256,13 +256,14 @@ def evenodd_mask(rings):
 
 def tile(theme,z,x,y,data_path=None):
     """256px opaque PNG-8; fixed 162-entry palette, no dither or alpha."""
-    from PIL import Image,ImageDraw
+    from PIL import Image,ImageDraw,ImageChops
     import io
     if theme not in STYLES or type(z) is not int or not 4<=z<=10 or any(type(n) is not int or not 0<=n<2**z for n in (x,y)):
         raise ValueError('invalid basemap tile')
     started=time.perf_counter()
     layers=tile_layers(z,x,y,data_path)
-    fill=evenodd_mask(layers[0]+layers[1]);backdrop=fill.tobytes();pixels=bytearray(backdrop)
+    fill=evenodd_mask(layers[0]+layers[1]);pixels=fill.copy()
+    backdrop=fill.point([v*16 if v<2 else 0 for v in range(256)])
     coverage=Image.new('L',(1024,1024));draw=ImageDraw.Draw(coverage)
     for layer in range(2,7):
         draw.rectangle((0,0,1024,1024),fill=0)
@@ -279,12 +280,17 @@ def tile(theme,z,x,y,data_path=None):
                             draw.line(points,fill=255,width=4)
                         pos+=step;phase=(phase+step)%7
         reduced=coverage.reduce(4)
-        for i,value in enumerate(reduced.tobytes()):
-            if value: pixels[i]=2+(layer-2)*32+backdrop[i]*16+min(16,(value+8)//16)-1
+        # The exact former integer palette expression, evaluated in Pillow C
+        # across the raster. Only the fixed 256-entry LUT is built in Python.
+        indices=reduced.point([1+(layer-2)*32+min(16,(v+8)//16) for v in range(256)])
+        combined=ImageChops.add(indices,backdrop)
+        mask=reduced.point([0]+[255]*255)
+        pixels.paste(combined,(0,0),mask)
+        indices.close();combined.close();mask.close()
         reduced.close()
-    image=Image.frombytes('P',(256,256),bytes(pixels));image.putpalette([v for color in palette(theme) for v in color])
+    image=pixels.convert('P');image.putpalette([v for color in palette(theme) for v in color])
     out=io.BytesIO();image.save(out,'PNG',optimize=False,compress_level=9)
-    image.close();fill.close();coverage.close()
+    image.close();fill.close();coverage.close();pixels.close();backdrop.close()
     raw=out.getvalue()
     RENDER_TIMES.append(dict(theme=theme,z=z,x=x,y=y,ms=(time.perf_counter()-started)*1000,bytes=len(raw)))
     return raw

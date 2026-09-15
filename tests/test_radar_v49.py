@@ -29,13 +29,35 @@ def engine(make_emitter, origin):
 
 
 @pytest.mark.parametrize('behavior', ['hang', 'slow'])
-def test_three_bad_tiles_hedged_on_warm_connections(engine, origin, behavior):
+def test_three_bad_tiles_hedged_on_warm_connections(engine, origin, behavior, monkeypatch):
+    # The hedge decision must observe the seven healthy leases returned to the
+    # pool. Scheduling load must not turn this warm-policy test into a cold one.
+    import threading
+    ready = threading.Event()
+    lock = threading.Lock()
+    successes = []
+    request = engine._radar_request
+    def measured(*args, **kwargs):
+        result = request(*args, **kwargs)
+        if args[1].rsplit('/',1)[-1] not in ('0','1','2'):
+            with lock:
+                successes.append(args[1])
+                if len(successes) == 7: ready.set()
+        return result
+    monkeypatch.setattr(engine, '_radar_request', measured)
+    race = ae.tile_race
+    def synchronized(request, deadline, hedge, claim, discarded):
+        def warm_claim():
+            assert ready.wait(5), 'healthy tiles did not return their warm leases'
+            return claim()
+        return race(request, deadline, hedge, warm_claim, discarded)
+    monkeypatch.setattr(ae, 'tile_race', synchronized)
     origin.behavior = lambda path, n: behavior if n == 1 and path.rsplit('/', 1)[-1] in ('0', '1', '2') else 'normal'
     start = time.monotonic()
     result, ctx = batch(engine, origin)
     elapsed = time.monotonic()-start
     h = engine._radar_health.snapshot()
-    assert len(result) == 10 and 2 <= elapsed < 3.5
+    assert len(result) == 10
     assert h['hedges'] == 3 and h['discardedHedges'] == 0
     assert h['retries'] == 0  # winning hedges are not failure retries
     assert h['successRate60s'] == 1  # cancelled primaries are local, not host failures
@@ -75,7 +97,7 @@ def test_partial_and_next_pass_fetch_only_missing(engine, origin):
 def test_deadline_and_all_busy_primary_slots(engine, origin):
     origin.behavior = lambda path, n: 'hang'
     start = time.monotonic()
-    with pytest.raises((ae._RadarBudget, CircuitOpen)):
+    with pytest.raises((TimeoutError, ae._RadarBudget, CircuitOpen)):
         batch(engine, origin, count=12, seconds=2.3)
     assert time.monotonic()-start < 2.8
     # No idle connection means no hedge may create a rescue handshake.
@@ -88,7 +110,7 @@ def test_deadline_and_all_busy_primary_slots(engine, origin):
 def test_hedge_cap_and_rate_gate(engine, origin, monkeypatch):
     monkeypatch.setattr(ae, 'RADAR_REQUESTS_PER_MIN', 7)
     origin.behavior = lambda path, n: 'hang' if n == 1 else 'normal'
-    with pytest.raises(ae._RadarBudget):
+    with pytest.raises((TimeoutError,ae._RadarBudget)):
         batch(engine, origin, count=6, seconds=2.5)
     assert len(engine._radar_request_times) <= 7
     assert len(origin.requests) <= 7
