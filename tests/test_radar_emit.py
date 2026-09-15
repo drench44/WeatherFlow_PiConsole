@@ -231,7 +231,7 @@ def test_never_raises_keeps_last_good_and_warns_once(make_emitter, radar_net, mo
         assert not result.frames[-1]['complete']
         assert result.ts_fetch == previous.ts_fetch
     assert len(warnings) == 1 and len(retries) == 1
-    assert 'candidates=' in warnings[0] and 'elapsed=' in warnings[0]
+    assert 'radar rainviewer failed:' in warnings[0] and 'suppressed=0' in warnings[0]
     assert retries[0][:2] == ('radar', emitter._check_radar)
     if failure == 'tile':
         assert 29 <= retries[0][2] <= 30  # probe the newly opened host circuit

@@ -100,7 +100,8 @@ def test_stickiness_logs_failure_then_switch_and_recovery(make_emitter,hybrid,mo
         if 'iastate.edu' in req.full_url: raise OSError('test source down')
     hybrid.failure=fail;hybrid.calls.clear();emitter._do_radar()
     assert emitter._radar_result is first and not any(c[0]=='rainviewer' for c in hybrid.calls)
-    assert any('iem-mrms-lcref' in w and 'test source down' in w and 'candidates=' in w and 'elapsed=' in w for w in warnings)
+    assert any('iem-mrms-lcref' in w and 'test source down' in w and 'suppressed=0' in w for w in warnings)
+    assert any('radar pass outcome=failed' in line and 'elapsed=' in line for line in infos)
     hybrid.mono=241;emitter._do_radar();emitter._do_radar()
     assert emitter._radar_result.source_id=='rainviewer'
     assert any('SWITCH iem-mrms-lcref -> rainviewer' in m for m in infos)

@@ -7,6 +7,21 @@ to shared upstream code that the classic console benefits from too.
 ## 2026-09-15
 
 ### Radar
+- **Radar v6.2 bounds routine outage logging.** Each pass reports outcome,
+  attempted source/site, elapsed time, request totals and failure classes, hedges,
+  breaker state, next retry seconds and one escaped, bounded error. Independent
+  pass counters include inner transport retries and survive history eviction;
+  the two 128-entry histories remain unchanged in `/health.radar`.
+- Identical `(source, exception class, message)` warnings repeat at most every
+  ten minutes (five 120-second discovery backoff intervals). Changed failures
+  report immediately; reminders, changes and verified recovery account for
+  suppressed repeats. Concurrent site-listing failures share the same policy.
+  Retry timing, transport admission and fallback decisions are unchanged.
+- The reproducible offline 1,800-pass/hour benchmark reduces Region logger
+  messages from 69,866,789 to 427,300 bytes/hour and Site from 71,198,989 to
+  399,043, including newlines, excluding logger-specific prefixes. Actual pass
+  lines are 237/221 bytes; regression tests enforce <768 bytes even with both
+  histories saturated and a long escaped error. No panel measurement is claimed.
 - **Radar v6.1 keeps Smooth within the native page memory model.** The engine
   interpolates weighted reflectivity/coverage at 2×, then area-reduces to 256px
   before applying the legend LUT. Tiles, merge scratch, 128 KiB response limits

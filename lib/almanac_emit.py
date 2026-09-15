@@ -28,7 +28,7 @@ FOR A PARTICULAR PURPOSE. See the GNU General Public License for more details.
 from kivy.logger import Logger
 from kivy.clock  import Clock
 
-from collections import OrderedDict, deque, namedtuple
+from collections import Counter, OrderedDict, deque, namedtuple
 from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED
 from datetime import datetime, timedelta, timezone
 import json
@@ -71,6 +71,7 @@ AQI_CHECK_INTERVAL     = 600   # seconds (10 min) — refresh air quality; short
 ALERTS_CHECK_INTERVAL  = 900   # seconds (15 min) — NWS alerts change slowly; be gentle on api.weather.gov
 FORECAST_CHECK_INTERVAL = 3600 # seconds (1 h) — the daily outlook barely moves intra-hour
 FORECAST_RETRY_SEC      = 120  # seconds — boot retry cadence until the FIRST forecast succeeds
+RADAR_FAILURE_LOG_SEC = 5 * DiscoverySchedule.BACKOFF  # ten-minute outage reminders
 RADAR_RETRY_SEC = 120
 RADAR_HISTORY_SEC = 3600
 RADAR_IEM_FRAME_INTERVAL_SEC = 120
@@ -1009,6 +1010,9 @@ class AlmanacEmitter:
         self._radar_bad_stamp = None
         self._radar_phase_metrics = []
         self._radar_request_metrics = []
+        self._radar_failure_logs = {}
+        self._radar_log_retry_at = None
+        self._radar_begin_log_pass()
         self._radar_metadata_at = {}
         self._radar_restart = False
         # scheduling registry: EVERY handle we hand to Clock (intervals and
@@ -1181,6 +1185,8 @@ class AlmanacEmitter:
         multiply for as long as the network is down. """
         def _retry(dt):
             self._retries.pop(key, None)
+            if key == 'radar':
+                self._radar_log_retry_at = None
             callback(dt)
 
         with self._life_lock:
@@ -1189,6 +1195,8 @@ class AlmanacEmitter:
             handle = self._schedule(_retry, timeout)
             if handle is not None:
                 self._retries[key] = handle
+                if key == 'radar':
+                    self._radar_log_retry_at = time.time()+timeout
 
     def _check_radar(self, _dt=None):
         with self._life_lock:
@@ -1357,7 +1365,9 @@ class AlmanacEmitter:
     def _radar_resume_warm(self):
         if self._radar_idle_context is None:
             return
+        self._radar_begin_log_pass()
         source, warm = self._radar_idle_context
+        self._radar_pass.update(source=source, site=warm.get('site_id'))
         warm = dict(warm, viewed=True, refresh=dict(state='idle'),
                     deadline=time.monotonic()+RADAR_BUILD_DEADLINE_SEC)
         try:
@@ -1365,7 +1375,7 @@ class AlmanacEmitter:
                 self._radar_session.begin_pass(warm['deadline'])
             self._radar_prefetch(source, warm)
         except _RadarSuperseded:
-            pass  # the watcher owns the newer camera/source
+            self._radar_pass['outcome'] = 'superseded'  # the watcher owns the newer camera/source
         finally:
             self._radar_log_pass(warm['deadline']-RADAR_BUILD_DEADLINE_SEC)
 
@@ -1532,6 +1542,8 @@ class AlmanacEmitter:
             return max(0, window, self._radar_cooldowns.get(source, 0)-now)
 
     def _radar_budget_retry(self, source, needed, min_delay=0):
+        if self._radar_pass["outcome"] != "failed":
+            self._radar_pass["outcome"] = "deferred"
         delay = max(min_delay, self._radar_headroom_delay(source, needed))
         # Build/deadline yields with free transport resume on the next watcher.
         delay = delay if delay > 0 else 2
@@ -1552,12 +1564,87 @@ class AlmanacEmitter:
             Logger.info(f'almanac_emit: radar source SWITCH {old.source_id} -> {source}; '
                         f'reason={self._radar_switch_reason}')
 
+    def _radar_begin_log_pass(self):
+        # The radar lane is single-flight; tile/listing workers share its lock.
+        # These counters never depend on the size or retention of /health history.
+        self._radar_pass = dict(counts=Counter(), source=None, site=None,
+            outcome='idle', error=None, failures=set(), recovered=set(), validated=set(),
+            hedges=self._radar_health.hedges)
+
+    @staticmethod
+    def _radar_log_text(value, limit=240):
+        # Bound the encoded field, including quotes, controls and Unicode escapes.
+        text = json.dumps(str(value), ensure_ascii=True)[1:-1]
+        return text if len(text) <= limit else text[:limit-3]+'...'
+
+    def _radar_log_failure(self, source, error, scope='pass'):
+        key = (source, type(error).__name__, str(error) or type(error).__name__)
+        now = time.monotonic()
+        with self._radar_lock:
+            self._radar_pass['failures'].add(key)
+            self._radar_pass['error'] = key[1]+': '+key[2]
+            prior = self._radar_failure_logs.get(key)
+            if prior is not None:
+                prior['scopes'].add(scope)
+            if prior is not None and now-prior['at'] < RADAR_FAILURE_LOG_SEC:
+                prior['suppressed'] += 1
+                return
+            suppressed = prior['suppressed'] if prior else 0
+            self._radar_failure_logs[key] = dict(at=now, suppressed=0,
+                scopes=prior['scopes'] if prior else {scope})
+            Logger.warning(f'almanac_emit: radar {source} failed: '
+                f'{self._radar_log_text(key[1]+": "+key[2])}; suppressed={suppressed}')
+
+    def _radar_count_request(self, outcome, error=None):
+        with self._radar_lock:
+            self._radar_pass['counts'][outcome] += 1
+            if error is not None:
+                self._radar_pass['error'] = type(error).__name__+': '+str(error)
+
     def _radar_log_pass(self, started):
-        health = self._radar_health_payload()
-        health.update(source=self._radar_result.source_id, zoom=self._radar_result.zoom,
-                      switchReason=self._radar_switch_reason,
-                      elapsedSec=round(time.monotonic()-started, 3))
-        Logger.info('almanac_emit: radar pass '+json.dumps(health, sort_keys=True))
+        with self._radar_lock:
+            p = self._radar_pass
+            # Only verified source success ends an episode. Cached/budget-only
+            # passes and successful fallback requests cannot recover its primary.
+            failed_sources = {key[0] for key in p['failures']}
+            for source in sorted({source for source, _ in p['recovered']} - failed_sources):
+                scopes = {scope for src, scope in p['recovered'] if src == source}
+                keys = [key for key, prior in self._radar_failure_logs.items()
+                        if key[0] == source and ('pass' in scopes or prior['scopes'] <= scopes)]
+                if keys:
+                    suppressed = sum(self._radar_failure_logs.pop(key)['suppressed'] for key in keys)
+                    Logger.info(f'almanac_emit: radar {source} recovered; suppressed={suppressed}')
+            # A changed error starts a new episode; retire obsolete signatures,
+            # reporting their pending repeats once instead of retaining history.
+            for key in list(self._radar_failure_logs):
+                if key[0] in failed_sources and key not in p['failures']:
+                    prior = self._radar_failure_logs.pop(key)
+                    if prior['suppressed']:
+                        Logger.warning(f'almanac_emit: radar {key[0]} failure changed; '
+                            f'previous={self._radar_log_text(key[1]+": "+key[2])}; '
+                            f'suppressed={prior["suppressed"]}')
+            counts = p['counts']
+            failed = {k: v for k, v in sorted(counts.items()) if k != 'ok'}
+            retry_at = self._radar_log_retry_at if 'radar' in self._retries else None
+            retry_times = [t for t in (retry_at, self._radar_discovery.due) if t is not None]
+            retry = max(0, min(retry_times)-time.time()) if retry_times else None
+            # Deliberately do not build/serialize the rolling health payload here.
+            with self._radar_health.lock:
+                states = {self._radar_health.state(s) for s in self._radar_health.hosts.values()}
+                breaker = 'open' if 'open' in states else 'half' if 'half' in states else 'closed'
+                hedges = self._radar_health.hedges-p['hedges']
+            source = p['source'] or self._radar_result.source_id
+            site = p['site'] if p['source'] is not None else self._radar_result.site_id
+            outcome = p['outcome']
+            if outcome == 'idle' and counts:
+                outcome = 'partial' if failed else 'ok'
+            Logger.info('almanac_emit: radar pass '
+                f'outcome={outcome} source={self._radar_log_text(source, 40)} '
+                f'site={self._radar_log_text(site, 12)} elapsed={time.monotonic()-started:.3f}s '
+                f'requests={sum(counts.values())} ok={counts["ok"]} failed={sum(failed.values())} '
+                f'classes={json.dumps(failed, separators=(",", ":"))} hedges={hedges} '
+                f'breaker={breaker} nextRetrySec={round(retry, 3) if retry is not None else None} '
+                f'error={self._radar_log_text(p["error"]) if p["error"] else "None"}')
 
     def _radar_retained_refresh(self, state):
         snap = self._radar_result
@@ -1629,8 +1716,12 @@ class AlmanacEmitter:
                 headers.update(cached[1])
         request_started, request_cpu = time.monotonic(), time.thread_time()
         outcome, byte_count = 'success', 0
+        count_outcome = 'ok'
         req = urllib.request.Request(url, headers=headers, method=method)
-        req.radar_retry_failure = lambda error: self._radar_health.record(source, url, False, error)
+        def retry_failure(error):
+            self._radar_health.record(source, url, False, error)
+            self._radar_count_request(failure_class(error), error)
+        req.radar_retry_failure = retry_failure
         req.radar_retry_check = lambda: self._radar_health.admit(source, url)
         if attempt is not None or probe:
             req.radar_attempt = attempt or Attempt(fresh=True)
@@ -1665,9 +1756,13 @@ class AlmanacEmitter:
                 return raw
         except urllib.error.HTTPError as error:
             outcome = 'http-'+str(error.code)
+            count_outcome = 'http'
             if error.code == 304 and metadata and cached:
+                count_outcome = 'ok'
                 self._radar_health.record(source, url, True, probe=probe)
                 return cached[0]
+            with self._radar_lock:
+                self._radar_pass['error'] = type(error).__name__+': '+str(error)
             self._radar_health.record(source, url, error.code == 404, error, probe=probe)
             if error.code == 429:
                 retry = error.headers.get('Retry-After', '') if error.headers else ''
@@ -1694,6 +1789,9 @@ class AlmanacEmitter:
                     error = TimeoutError("radar response exceeded tile deadline")
             if not getattr(req, "radar_gate_failed", False):
                 self._radar_health.record(source, url, False, error, probe=probe)
+            count_outcome = 'cancelled' if isinstance(error, AttemptCancelled) else failure_class(error)
+            with self._radar_lock:
+                self._radar_pass['error'] = type(error).__name__+': '+str(error)
             # Validation errors occur after open(); discard that untrusted pool.
             # Transport errors already discarded their own lease only.
             if isinstance(error, ValueError):
@@ -1701,6 +1799,10 @@ class AlmanacEmitter:
             raise
         finally:
             with self._radar_lock:
+                if not getattr(req, 'radar_gate_failed', False):
+                    self._radar_count_request(count_outcome)
+                    if count_outcome == 'ok':
+                        self._radar_pass['validated'].add(source)
                 self._radar_request_metrics.append(dict(at=request_started,elapsedSec=time.monotonic()-request_started,
                     cpuSec=time.thread_time()-request_cpu,source=source,method=method,bytes=byte_count,
                     failureClass=outcome,queueWaitSec=getattr(req,'radar_queue_wait',0)))
@@ -2117,7 +2219,11 @@ class AlmanacEmitter:
         except Exception as error:
             stamps = []
             reason = 'scan unavailable'
-            Logger.warning(f'almanac_emit: radar site {site["id"]} listing failed: {type(error).__name__}: {error}')
+            self._radar_log_failure(source, error, scope=site["id"])
+        else:
+            if known is None:
+                with self._radar_lock:
+                    self._radar_pass["recovered"].add((source, site["id"]))
         newest = stamps[-1] if stamps else None
         site.update(reason=None if newest is not None and now-newest < RADAR_SITE_MAX_AGE_SEC else reason)
         site.update(reporting=newest is not None and now-newest < RADAR_SITE_MAX_AGE_SEC,
@@ -2165,6 +2271,8 @@ class AlmanacEmitter:
             ctx.setdefault('site_failure', 'scan unavailable' if any(s['reason']=='scan unavailable' for s in sites) else 'not reporting')
             raise ValueError('no site reporting in viewport')
         ctx['site_id'] = reporting[0]['id']
+        if self._radar_pass['source'] == 'iem-nexrad-n0b':
+            self._radar_pass['site'] = ctx['site_id']
         for site in sites:
             site.update(primary=site['id']==ctx['site_id'], contributing=site['reporting'],
                         reason=None if site['reporting'] else site['reason'])
@@ -2698,6 +2806,8 @@ class AlmanacEmitter:
 
     def _radar_failed_pass(self, source, error, ctx):
         """Only consecutive provider failures may advance the fallback chain."""
+        self._radar_pass["outcome"] = "failed"
+        self._radar_log_failure(source, error)
         local = (failure_class(error) != 'host' or ctx.get('local_failure')
                  or self._radar_health.local_failures > ctx.get('local_failure_start', self._radar_health.local_failures))
         if local:
@@ -2731,6 +2841,7 @@ class AlmanacEmitter:
 
     def _do_radar(self, intent_triggered=None, view_started=False, discovery=False):
         """Primary-first orchestration; radar failures never alter engine health."""
+        self._radar_begin_log_pass()
         pass_deadline = time.monotonic() + RADAR_BUILD_DEADLINE_SEC
         self._radar_probe_reuse.clear()
         stamp_names = self._radar_stamp_names()
@@ -2765,6 +2876,7 @@ class AlmanacEmitter:
             lat = _num(_cfg(config, 'Station', 'Latitude'))
             lon = _num(_cfg(config, 'Station', 'Longitude'))
             if lat is None or lon is None or not (-90 <= lat <= 90 and -180 <= lon <= 180):
+                self._radar_pass.update(outcome='failed', error='no location')
                 self._radar_result = _RADAR_NONE._replace(reason='no location')
                 self._radar_retained_refresh('failed')
                 return
@@ -2890,6 +3002,7 @@ class AlmanacEmitter:
                 adapters = [active]  # five-minute dwell includes transport recovery probes
             errors = []
             for source, adapter in adapters:
+                self._radar_pass.update(source=source, site=site["id"] if source == "iem-nexrad-n0b" and site else None)
                 ctx.pop('local_failure', None)
                 ctx['local_failure_start'] = self._radar_health.local_failures
                 ctx.pop('staging_source', None)
@@ -2956,7 +3069,6 @@ class AlmanacEmitter:
                     self._radar_publish_refresh(ctx, state='idle')
                     self._radar_budget_retry(source, needed)
                     return
-                started = time.monotonic()
                 try:
                     for probe_url, is_metadata in probes:
                         raw = self._radar_request(source, probe_url, ctx['deadline'],
@@ -2975,6 +3087,10 @@ class AlmanacEmitter:
                     if source == 'iem-nexrad-n0b' and self._radar_refuse_dark_site(ctx):
                         return
                     if not ctx.get('retained_failed'):
+                        if source in self._radar_pass['validated']:
+                            self._radar_pass['recovered'].add((source, 'pass'))
+                        if self._radar_pass['outcome'] != 'deferred':
+                            self._radar_pass['outcome'] = 'ok'
                         self._radar_transport_failures.pop(source, None)
                     try:
                         self._radar_prune(previous)
@@ -2990,6 +3106,9 @@ class AlmanacEmitter:
                         self._schedule_retry('radar', self._check_radar, max(1, probe_delay))
                     return
                 except _RadarUnchanged:
+                    self._radar_pass['outcome'] = 'unchanged'
+                    if source in self._radar_pass['validated']:
+                        self._radar_pass['recovered'].add((source, 'pass'))
                     self._radar_transport_failures.pop(source, None)
                     self._radar_retained_refresh('idle')
                     return
@@ -3014,8 +3133,6 @@ class AlmanacEmitter:
                     self._radar_session.close()
                     self._radar_session = None
                     errors.append(str(error))
-                    Logger.warning(f'almanac_emit: radar {source} failed: {type(error).__name__}: {error}; '
-                                   f'candidates={ctx["candidates"]}; elapsed={time.monotonic()-started:.3f}s')
                     if source == 'iem-nexrad-n0b':
                         ctx['sources'][1].update(available=False, reason=ctx.get('site_failure', 'scan unavailable'))
                     if not self._radar_failed_pass(source, error, ctx):
@@ -3025,6 +3142,7 @@ class AlmanacEmitter:
                     errors[-1] = f'{source}: 3 consecutive failed passes ({type(error).__name__}: {error})'
             raise ValueError('; '.join(errors))
         except _RadarSuperseded:
+            self._radar_pass['outcome'] = 'superseded'
             self._radar_restart = True
             # The worker's single-flight guard releases before its immediate wakeup.
             # The 100 ms watcher also sees the unserved preference stamp.
@@ -3043,7 +3161,8 @@ class AlmanacEmitter:
                 else:
                     self._radar_publish_refresh(ctx, state='failed')
             self._radar_health.last_error = str(error) or type(error).__name__
-            Logger.warning(f'almanac_emit: radar fetch failed - {error}')
+            self._radar_pass['outcome'] = 'failed'
+            self._radar_log_failure(self._radar_pass['source'] or self._radar_result.source_id, error)
             probe_delay = self._radar_probe_delay()
             self._schedule_retry('radar', self._check_radar,
                 RADAR_RETRY_SEC if probe_delay is None else max(1, probe_delay))

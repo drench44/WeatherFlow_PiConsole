@@ -604,15 +604,48 @@ Sequential failure retries remain available. A new observation window begins
 after suspension; old losses cannot repeatedly retrigger it.
 `breaker` is the worst state across known hosts (`open`, `half`, `closed`), so a
 working fallback does not hide the primary outage. `lastError` retains the last
-request error even after recovery. Every ordinary fetch pass emits this object at
-INFO with effective tile zoom and last switch reason; the v4.8 retry line still carries `transport_retries` and
-`stale_first_byte_retries`. Radar faults do not change the engine/sensor HTTP health
-verdict. Health reflects the latest engine payload, like other `/health` fields.
+request error even after recovery. Radar faults do not change the engine/sensor
+HTTP health verdict. Health reflects the latest engine payload, like other
+`/health` fields.
+
+**v6.2 logging (no wire-field changes).** The per-pass INFO message is a compact
+summary, separate from the health object: `outcome`, attempted `source`/`site`,
+`elapsed` seconds, `requests` attempted, `ok`, `failed`, failure `classes`,
+per-pass `hedges`, aggregate `breaker`, `nextRetrySec`, and one `error` from this
+pass (not historical `lastError`). Counts cover admitted transport attempts,
+including inner stale-connection retries, and are independent of the rolling
+128-record histories. Validated HTTP 304 is OK; HTTP failures (including missing
+404 tiles), local, host, ambiguous and cancelled attempts have distinct classes.
+Denied retry admission adds no extra attempt. `nextRetrySec` is the nonnegative
+delay to the earliest scheduled acquisition retry or discovery, null if neither
+is scheduled. This is logging telemetry only; scheduling is unchanged.
+Errors are escaped onto one line and limited to 240 encoded characters. Tests
+require a complete pass message plus newline under 768 UTF-8 bytes even with
+saturated histories and long Unicode/control-character errors. The complete
+request/phase histories stay in `/health.radar`; no DEBUG history duplicate is
+emitted. The v4.8 transport retry INFO retains `transport_retries` and
+`stale_first_byte_retries`.
+
+Failure WARNING messages are keyed by `(source, exception class, full message)`;
+clipping affects display only. The first occurrence and changed failures log
+immediately. Identical failures, including concurrent site listings, repeat
+only every 600 monotonic seconds: five 120-second discovery backoff intervals
+provide a ten-minute reminder during an extended outage. Reminder, change and
+recovery lines include the number of suppressed warning occurrences (not passes).
+Verified source recovery emits INFO once and resets its episode. Budget-only or
+cached passes and success on another source do not announce recovery; successful
+listings can resolve listing errors, but cannot resolve tile-acquisition errors.
+`PYTHONPATH=. ./venv-test/bin/python tools/benchmark_radar_logging.py` measures
+1,800 passes at two-second intervals in Region and Site with fake transport and
+clocks, no network or sleeps. `--revision HEAD` runs the identical harness against
+the local git baseline without altering the tree. Byte counts include UTF-8 log
+messages and newlines, excluding logger-specific prefixes.
 
 v5.0 adds `health.discovery`: `expectedReadyTs`, `nextPollTs`, `lastPollTs`
 (Unix seconds, null before known), `fastPolls` (0–6), `backingOff` (the bounded
 fast window is exhausted), and `ageSec` (current newest measurement age, null
-without a measurement). These appear in `/health.radar` and per-pass INFO too.
+without a measurement). These remain in `/health.radar`; per-pass INFO includes
+only the next retry delay, not this discovery object.
 `nextPollTs` includes budget/breaker delays and busy-lane rearming. Age is computed
 when telemetry is emitted, never frozen at fetch time.
 
