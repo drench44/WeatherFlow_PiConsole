@@ -16,6 +16,11 @@ to shared upstream code that the classic console benefits from too.
   a two-second retry over it. Ambiguous stalls on a reused socket are classified
   apart from local failures: they still never advance the fallback chain, but
   they keep the two-second retry. The fallback chain itself is unchanged.
+- **A tap on the mode already showing is silent.** After the engine refused a
+  site tap, tapping Region said "Switching to Region · showing Region" and put
+  the segment into its pending state, although Region never left the screen.
+  The tap now records the preference and posts the intent without entering a
+  switch, so the caption and the picker stay settled.
 
 ## 2026-09-15
 

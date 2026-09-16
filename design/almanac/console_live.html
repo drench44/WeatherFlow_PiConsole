@@ -3189,7 +3189,13 @@
     if(!radarView.active||!radarCamera||$('rad-src-'+mode).disabled||radarSource.desired===mode&&!radarSwitch?.overdue)return;
     // Native click covers keyboard/assistive activation; pointerdown responds on
     // contact. Its subsequent compatibility click is idempotent.
-    if(!radarSource.desired&&radarView.data.sourceMode===mode&&(radarIntent.preferredMode||radarView.data.sourcePref||mode)===mode)return;
+    var showing=!radarSource.desired&&radarView.data.sourceMode===mode;
+    if(showing&&(radarIntent.preferredMode||radarView.data.sourcePref||mode)===mode)return;
+    // Already on screen but not the recorded preference: a refused site tap left
+    // preferredMode on 'site' while Region kept showing. Record the preference
+    // and tell the engine; there is nothing to switch to, so no pending state
+    // and no "Switching to Region · showing Region" caption.
+    if(showing){radarIntent.edited=true;radarSource.refused=false;radarIntent.preferredMode=mode;radarPostIntent(true);radarSourceRender();radarNoteRender();return;}
     radarIntent.edited=true;radarGestureCancel();radarSource.refused=false;radarSource.lastRefresh=radarView.refresh.state;radarSource.desired=mode;radarIntent.preferredMode=mode;radarCancelJobs();radarSwitchStart();radarSource.fastUntil=Date.now()+20000;
     if(radarView.pendingSource){radarView.pendingSource=null;radarView.transition=(radarView.transition||0)+1;}
     if(mode==='site'&&radarCamera.zoom<7){radarZoom.auto=false;radarCameraSet({...radarCamera,zoom:7});radarSettle();}
