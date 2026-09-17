@@ -20,7 +20,7 @@ class TileInventory:
     MAX_ENTRIES = 40000
     FREE_SPACE_SHARE = 0.02
     MAX_BYTES_CEILING = 256_000_000
-    MAX_FILES_CEILING = 16000
+    MAX_FILES_CEILING = 12000  # panel-measured 5 ms per validated tile at boot: ~60 s
     TYPICAL_TILE_BYTES = 8192
 
     def __init__(self, root=None):

@@ -72,8 +72,8 @@ def test_caps_follow_free_space_between_floor_and_ceiling(tmp_path, monkeypatch)
     import lib.radar_cache as rc
     usage = namedtuple('usage', 'total used free')
     for free, files, size in ((1_000_000, 8000, 64_000_000),          # tiny disk: the floor
-                              (110_000_000_000, 16000, 256_000_000),  # the Pi 4: the ceiling
-                              (5_000_000_000, 12207, 100_000_000)):   # in between: 2 % of free
+                              (110_000_000_000, 12000, 256_000_000),  # the Pi 4: the ceiling
+                              (4_000_000_000, 9765, 80_000_000)):     # in between: 2 % of free
         monkeypatch.setattr(rc.shutil, 'disk_usage', lambda p, free=free: usage(free*2, free, free))
         cache = TileInventory(tmp_path/'missing'/'radar')             # a root that does not exist yet
         assert (cache.MAX_FILES, cache.MAX_BYTES) == (files, size), (free, cache.MAX_FILES, cache.MAX_BYTES)

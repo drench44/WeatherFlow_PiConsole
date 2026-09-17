@@ -7,21 +7,24 @@ to shared upstream code that the classic console benefits from too.
 ## 2026-09-16
 
 ### Radar
-- **A full tile cache is trimmed at boot, never frozen.** The Pi 4 rebooted with
-  8,592 cached tiles against an 8,000-file cap. The boot scan stopped at the
-  cap, marked the cache read-only for the life of the process, and every tile
-  after that was fetched, rendered and discarded once its directory existed:
-  no radar all evening, and the pass log said `outcome=deferred error=None`.
-  The scan now indexes newest-first within its entry bound, removes the stamp
+- **A full tile cache is trimmed at boot, never frozen.** The Pi 4 rebooted
+  with a full cache: 8,000 tiles, exactly where the running prune keeps it.
+  The boot scan stopped at the cap with directories still unvisited, counted
+  that as a bounded scan, and marked the cache read-only for the life of the
+  process. Every tile after that was fetched, rendered and discarded once its
+  directory existed: no radar all evening, and the pass log said
+  `outcome=deferred error=None`. Any full cache plus a restart did this. The
+  scan now indexes newest-first within its entry bound, removes the stamp
   directories a bounded scan never reached, evicts oldest-first down to the
-  caps, and stays writable. Files left unindexed by the old scan could never
-  be evicted, which is how the disk grew past the cap in the first place.
+  caps, and stays writable.
 - **Cache caps follow free space.** 2 % of the free space on the cache's disk,
-  between the old floor (8,000 files / 64 MB) and a ceiling of 16,000 files /
-  256 MB. The ceiling is the boot validation cost (every cached PNG is opened
-  once, on the inventory thread), not disk. `/health.radar.cache` reports the
-  caps, the live count and bytes, readiness and the startup scan summary, and
-  a pass that yields internally now logs `error=deferred: <reason>`.
+  between the old floor (8,000 files / 64 MB) and a ceiling of 12,000 files /
+  256 MB. The ceiling is the boot validation cost, not disk: the panel opens
+  every cached PNG once on the inventory thread at 5 ms each (8,000 tiles
+  took 40 s), and a pass waits 30 s for that scan before it retries. Tiles
+  average under 2 KB, so files bind long before bytes. `/health.radar.cache`
+  reports the caps, the live count and bytes, readiness and the startup scan
+  summary, and a pass that yields internally logs `error=deferred: <reason>`.
 - **Local failures back off.** A dead route or resolver is never the provider's
   fault, so it never opens a host breaker, and each failed pass retried after a
   flat two seconds for as long as the network stayed down. Consecutive local
