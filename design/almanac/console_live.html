@@ -2756,6 +2756,14 @@
   var radarGesture={state:'idle',pointers:new Map(),samples:[],idleTimer:null,animation:null,inertia:null};
   var radarBaseStyle={}, radarGeoTiles=new Map(), radarGeoQueue=[], radarGeoBusy=0, radarReserved=0, radarGeoPending=new Set(), radarGeoAbsent=new Map();
   var radarTiles=new Map(), radarTilePending=new Set(), radarTileAbsent=new Map(), radarTileQueue=[], radarTileBusy=0, radarPumpBlocked=null;
+  // A 404 is "not rendered yet" (a fresh zoom level, a history frame the engine
+  // has not reached), never a bad tile. Ask again with a growing pause per
+  // tile, and report to the engine only a tile that arrived and failed to
+  // decode or validate. 2026-09-16: every 404 was reported and re-fetched every
+  // 2 s; a three-step zoom-out posted 1,241 "bad tile" reports in one minute.
+  var radarTileAbsentTries=new Map();
+  function radarTileAbsentMark(key){var n=(radarTileAbsentTries.get(key)||0)+1;radarTileAbsentTries.set(key,n);radarTileAbsent.set(key,performance.now()+Math.min(30000,2000*2**(n-1)));}
+  function radarTileAbsentClear(key){radarTileAbsentTries.delete(key);radarTileAbsent.delete(key);}
   var radarScratch=new OffscreenCanvas(956,490), radarTileScratch=new OffscreenCanvas(256,256);
   var radarBaseDirty=true, radarCameraDirty=true, radarEchoDirty=true, radarRaf=null, radarLastPaint=-Infinity;
   var radarCompositeJob=null, radarCameraRevision=0, radarEchoEpoch=0, radarIdlePrefetchAt=0;
@@ -2970,13 +2978,13 @@
   }
   async function radarFetchTile(job) {
     var bitmap=null,meta={opaquePixels:0,unmatchedPixels:0,ambiguousPixels:0,unmatchedColors:0,opaqueColors:0,remapped:true},hasEcho=false;
-    var actualSites=[],partial=false;
+    var actualSites=[],partial=false,received=null;
     try {
       var scans=job.f.siteScans&&job.f.siteScans.length?job.f.siteScans:[{id:'-',ts:job.f.ts}];
       for(var scan of scans) {
         if(!radarSiteCovers(scan.id,job.z,job.x,job.y))continue;
         var url=radarTileURL(job.source,scan.id,radarStamp(scan.ts),job.z,job.x,job.y,job.f.revision),res=await radarAwait(fetch(url,{signal:job.controller.signal}),job);
-        if(!res.ok){if(res.status===404)fetch('radar-bad-tile',{method:'POST',body:url}).catch(()=>{});partial=true;continue;}var buf=await radarReadPNG(res,job);var m=radarPNGMeta(buf,job.f);
+        if(!res.ok){partial=true;continue;}received=url;var buf=await radarReadPNG(res,job);var m=radarPNGMeta(buf,job.f);
         var next=await radarDecode(buf,job),size=256;if(next.width!==size||next.height!==size){next.close();throw Error('tile size');}
         try{var cx=radarTileSurface();cx.imageSmoothingEnabled=false;cx.clearRect(0,0,size,size);if(bitmap)cx.drawImage(bitmap,0,0);cx.drawImage(next,0,0);}finally{next.close();}if(bitmap)bitmap.close();
         // One shared scratch, synchronous merge/transfer: never four RGBA site layers.
@@ -2987,12 +2995,12 @@
       meta.remapped=meta.unmatchedPixels<=.02*meta.opaquePixels&&!meta.ambiguousPixels;
       if(job.epoch!==radarEchoEpoch||!radarView.active){bitmap.close();bitmap=null;return;}
       var tile={bitmap,meta,hasEcho,z:job.z,x:job.x,y:job.y,key:job.key,sites:actualSites,partial,retryAt:performance.now()+2000};
-      bitmap=null;radarTileRemember(job.key,tile,job);
+      bitmap=null;if(!partial)radarTileAbsentClear(job.key);radarTileRemember(job.key,tile,job);
       if(radarView.pendingSource&&job.transition===radarView.transition&&radarFrameKey(job.f)===radarFrameKey(radarView.pendingSource.frame)){
         radarTrace('firstVisibleTile');
       }
       if(radarView.current&&!radarView.current.bitmap&&radarFrameKey(job.f)===radarFrameKey(radarView.current)){radarTileDamage.push({x:job.x,y:job.y,z:job.z});radarEchoDirty=true;}radarWake();
-    } catch(e){if(url&&!job.controller.signal.aborted&&e.name!=='AbortError')fetch('radar-bad-tile',{method:'POST',body:url}).catch(()=>{});radarTileAbsent.set(job.key,performance.now()+2000);}
+    } catch(e){if(received&&e.name!=='AbortError'&&!job.controller.signal.aborted&&/tile size|PNG|decode|meta|remap/i.test(String(e&&e.message||e)))fetch('radar-bad-tile',{method:'POST',body:received}).catch(()=>{});if(!job.controller.signal.aborted)radarTileAbsentMark(job.key);}
     finally {try{if(bitmap)bitmap.close();}finally{radarJobEnd(job);}}
   }
   function radarFindTile(f,z,x,y) {
@@ -3299,7 +3307,7 @@
         radarView.nextAt=now+(newest?RAD_HOLD_MS:radarInterval(ready.length));radarLoopSync();radarRetirePassed();radarPruneFrames();radarTrace('loopPaint',{stamp:next.stamp,hold:newest,holding:!!radarView.holdingWindow});painted=true;
       }
       if(radarView.blend){radarBlendPaint(now);painted=true;}
-      if(g.state==='idle'&&now>=radarIdlePrefetchAt){for(var cache of [radarTileAbsent,radarGeoAbsent]){for(var [key,until] of cache)if(until<now||cache.size>512)cache.delete(key);}radarIdlePrefetchAt=now+500;radarGeoRequest(true);}
+      if(g.state==='idle'&&now>=radarIdlePrefetchAt){for(var cache of [radarTileAbsent,radarGeoAbsent]){for(var [key,until] of cache)if(until<now||cache.size>512)cache.delete(key);}if(radarTileAbsentTries.size>512)radarTileAbsentTries.clear();radarIdlePrefetchAt=now+500;radarGeoRequest(true);}
     }
     // Paint deadlines win over acquisition. One composite and one native image
     // decode may start per animation frame, newest scan first.

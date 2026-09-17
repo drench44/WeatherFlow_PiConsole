@@ -40,6 +40,7 @@ from statistics import median
 import math
 import os
 import re
+import sys
 import threading
 from threading import Event as _Event, Thread as _InventoryThread, RLock as _RLock   # kept apart from `threading`, which tests stub
 import time
@@ -1686,6 +1687,11 @@ class AlmanacEmitter:
     def _radar_budget_retry(self, source, needed, min_delay=0, reason='budget'):
         if self._radar_pass["outcome"] != "failed":
             self._radar_pass["outcome"] = "deferred"
+            if not self._radar_pass.get("error"):
+                # Name the yield: a deferred pass with error=None hid a read-only
+                # cache for an evening and a 2 s one-request loop for an hour.
+                caller = sys._getframe(1)
+                self._radar_pass["error"] = f'deferred: {reason} needed={needed} at={caller.f_code.co_name}:{caller.f_lineno}'
         delay = max(min_delay, self._radar_headroom_delay(source, needed), self._radar_local_backoff())
         # Build/deadline yields with free transport resume on the next watcher.
         delay = delay if delay > 0 else 2

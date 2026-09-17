@@ -22,6 +22,7 @@ globalThis.setTimeout=fn=>{timers.set(++timer,fn);return timer};globalThis.clear
 let radarJobs=new Set(),radarReserved=0,radarTileBusy=0,radarGeoBusy=0;
 let radarTileQueue=[],radarGeoQueue=[],radarTilePending=new Set(),radarGeoPending=new Set();
 let radarTileAbsent=new Map(),radarGeoAbsent=new Map(),radarGeoTiles=new Map(),radarGeoDamage=[];
+let radarTileAbsentTries=new Map();function radarTileAbsentMark(k){radarTileAbsent.set(k,1)}function radarTileAbsentClear(k){radarTileAbsent.delete(k)}
 let radarBaseStyle={theme:'paper'},radarView={active:true,data:{geo:{version:'v'}}},radarEchoEpoch=0;
 const RAD_TILE_MS=2500,RAD_TILE_BYTES=262144;
 let radarPumpTiles=()=>{},radarTrace=()=>{},radarMemory=()=>radarReserved,radarBasemapLevel=()=>7;
