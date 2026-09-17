@@ -1005,7 +1005,7 @@ class AlmanacEmitter:
         self._radar_pending = {}
         self._radar_acquisition_pending = False
         from lib.radar_cache import TileInventory
-        self._radar_disk_inventory = TileInventory()
+        self._radar_disk_inventory = TileInventory(RADAR_DIR)  # caps sized to the disk it lives on
         self._radar_cache_ready = _Event()
         self._radar_cache_thread = None
         self._radar_manifest_cache = OrderedDict()
@@ -1287,6 +1287,9 @@ class AlmanacEmitter:
         health['requests'] = list(self._radar_request_metrics)
         health['pending'] = dict(self._radar_pending)
         health['discovery'] = self._radar_discovery.telemetry(time.time(), self._radar_result.ts_frame)
+        cache = self._radar_disk_inventory
+        health['cache'] = dict(files=len(cache), bytes=cache.bytes, maxFiles=cache.MAX_FILES,
+            maxBytes=cache.MAX_BYTES, ready=self._radar_cache_ready.is_set(), startup=dict(cache.startup))
         return health
 
     def _radar_probe_delay(self):
@@ -1953,10 +1956,9 @@ class AlmanacEmitter:
                                     except FileExistsError: pass
                                     self._radar_disk_inventory.directories.add(name)
                         length = len(rendered)
-                        if not self._radar_disk_inventory.writable:
-                            raise _RadarBudget('startup inventory limit reached')
                         self._radar_prune(incoming_size=length,incoming_files=1)
-                        if len(self._radar_disk_inventory)+1>8000 or self._radar_disk_inventory.bytes+length>64_000_000:
+                        cache = self._radar_disk_inventory
+                        if len(cache)+1 > cache.MAX_FILES or cache.bytes+length > cache.MAX_BYTES:
                             raise _RadarBudget('protected tile cache full')
                         tmp = str(target)+'.tmp'
                         try:
@@ -3183,9 +3185,12 @@ class AlmanacEmitter:
                     return
                 except _RadarSuperseded:
                     raise
-                except _RadarBudget:
+                except _RadarBudget as error:
                     # Local rate capacity does not erase earlier service failures.
-                    pass
+                    # The pass log names the yield: a deferred pass with error=None
+                    # hid a read-only tile cache for a whole evening (2026-09-16).
+                    with self._radar_lock:
+                        self._radar_pass['error'] = 'deferred: '+(str(error) or type(error).__name__)
                     self._radar_forget(source)
                     fresh = previous.available and previous.ts_frame is not None and 0 <= time.time()-previous.ts_frame < previous.stale_sec
                     if self._radar_result.ts_frame is None:

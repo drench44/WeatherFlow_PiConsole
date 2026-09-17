@@ -379,6 +379,7 @@ def test_r8_manifest_exact_disk_mask_and_levels(make_emitter,radar_net,radar_dir
 
 def test_r9_disk_served_lru_protects_current_hour(make_emitter,radar_dir):
     emitter=make_emitter();now=1800000000
+    emitter._radar_disk_inventory.MAX_FILES=8000  # the cap this test was written for; live caps follow free space
     emitter._radar_result=ae._RADAR_NONE._replace(ts_frame=now,zoom=8,source_id='iem-mrms-lcref',
         frames=({'ts':now,'siteScans':[]},),tiles={'grid':dict(x0=0,y0=0,w=1,h=1)})
     old=datetime.fromtimestamp(now-7200,ae.timezone.utc).strftime('%Y%m%d%H%M')
