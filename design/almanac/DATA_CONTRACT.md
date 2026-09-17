@@ -140,9 +140,11 @@ the HTML shows an em-dash for null. Emitter converts from the app's
 
 Rules: numbers are numbers (HTML formats). Clock strings follow the console's
 `Display/TimeFormat`: `"HH:MM"` on a 24 hr console, `"H:MM AM"` / `"H:MM PM"` on a
-12 hr one (labels such as `untilText` and `aqiPeakTime` drop `:00` on the hour:
+12 hr one (labels such as `fcHour`, `untilText` and `aqiPeakTime` drop `:00` on the hour:
 `"Wed 5 PM"`). Every clock string in the payload, whether the upstream modules or
-the emitter formatted it, uses the same setting; the page parses both forms. Angles/fractions
+the emitter formatted it, uses the same setting. Meridiems are uppercase, preceded
+by U+00A0 (no-break space); spaces in the examples are typographic shorthand.
+The page parses both colon-bearing clock forms; sparse labels are display text. Angles/fractions
 are numeric so the HTML can drive SVG geometry. The HTML treats any `null`/missing key as
 an em-dash and leaves that gauge at a neutral position. The emitter must never write a
 partial/invalid file (write to a temp path + atomic rename).
@@ -237,6 +239,16 @@ of retained/idle frames. Serialization independently omits an expired timestamp
 if timer dispatch is delayed. Cancelled callbacks cannot consume replacement
 timers.
 
+Consecutive local-failure passes back off 2, 4, 8, 16, 32, then at most 60 seconds.
+Both repair and discovery wakeups honor that floor. Explicit camera/source intent
+still gets an immediate attempt; its automatic continuations obey the floor.
+Success and ambiguous transport failures reset the streak. Permanent negative
+DNS results (`EAI_NONAME`/`EAI_FAIL`) count toward provider fallback. Transient DNS
+errors/timeouts cannot establish a client outage: they retain ordinary retry
+cadence and do not trip a host breaker. They remain in local health telemetry,
+but are excluded from the expanding outage streak, including synthetic incomplete
+frame errors wrapping underlying DNS failures.
+
 Closest-site off-air rechecks currently use `nexrad.nextCheckTs`/`nextCheckAt`
 and the discovery schedule, not a repair retry; they keep the measured off-air
 note and settled Region caption. `not reporting` is supported as a retry reason
@@ -328,8 +340,8 @@ seconds, allowing another usable frame to compose.
 Metadata is limited to 128 entries with one-hour age pruning, negative entries
 to 512 with expiry, archive positives to 128, and active process-wide resolver
 jobs to four even across HTTP session replacement. Browser negative maps are
-also bounded at 512. Existing 400 native tiles, 8,000 disk files/64MB and 40MiB
-browser accounting remain. Disk protection pins the exact current and retained
+also bounded at 512. Native tiles remain capped at 400 and browser accounting at
+40MiB. The two disk variants share the instance limits described below. Disk protection pins the exact current and retained
 visible eight-frame loops, not every recently accessed camera. A process-owned
 validated inventory is built once on `radar-inventory`, started at boot before
 the first provider poll. Normal passes never walk/stat/open cached PNGs. Writes
@@ -338,12 +350,26 @@ metadata; evictions remove it. Frame/level masks are cached by scan/level mutati
 generation (1,024 bounded entries); site coverage is cached by geometry (512).
 The existing cached geography/render revision functions remain in place.
 
-Startup visits at most 40,000 directory entries and validates at most 8,000 PNGs /
-64 MB, yielding after each 32 files. An early UI intent yields the radar lane
-until this separate worker finishes. A truncated startup inventory refuses new
-writes rather than extending an unaccounted disk cache. Existing indexed imagery
-remains usable. Normal caches within the existing limits finish in one scan.
-No periodic filesystem reconciliation is performed.
+At boot, disk caps are derived from the nearest existing ancestor's free space:
+bytes are 2% of free space, clamped to 64,000,000–256,000,000; files are bytes/8192,
+clamped to 8,000–12,000. Failure to query the disk uses the lower bounds. These
+are retention limits, not guaranteed boot durations or reserved free space.
+`MAX_ENTRIES` is max(40,000, 3×file cap). Both installed render trees are discovered
+together and admitted newest-stamp-first across sources/sites/variants. The
+entry budget bounds admission/PNG validation, yielding every 32 files; discovery
+of stamp directories and removal of unowned files must still traverse metadata
+outside that budget. `health.cache.startup.entries` counts charged admission
+entries; `discoveredEntries` separately counts source/site/stamp entries examined.
+An early UI intent yields the radar lane until this separate worker finishes;
+any wait for it precedes the provider acquisition deadline.
+
+Every unindexed file is removed, including abandoned temporary files and the
+unscanned remainder of a partially indexed stamp. Symlinks are removed without
+following their targets. Indexed records are sorted by stamp across both variants
+and evicted oldest-first to both instance caps. A full or truncated cache becomes
+writable after reconciliation. `health.cache` publishes actual files/bytes, caps,
+readiness and combined startup removal/eviction totals. Normal operation uses the
+process-owned inventory; no periodic filesystem reconciliation is performed.
 
 The local page reports an unexpected tile 404 or invalid PNG through loopback-only
 `POST /radar-bad-tile` (one canonical tile path, at most 256 bytes). The server
@@ -443,9 +469,9 @@ showing and even when tile acquisition subsequently fails:
 | `nexrad.ageSec` | Nonnegative whole seconds since `newestTs`, recomputed at publication; null without a scan. This clock advances while `checkedTs` stays fixed. |
 | `nexrad.reason` | Null when reporting, `not reporting` for an empty or over-age listing, `scan unavailable` for a failed/invalid listing; null before any check. |
 | `nexrad.checkedTs` | Wall-clock epoch of the listing attempt's observation time. Cache reuse and heartbeat publication do not advance it. Null before a check. |
-| `nexrad.checkedAt` | Station-local `HH:MM` rendering of `checkedTs`, or null. It is a check time, never a claimed outage start. |
+| `nexrad.checkedAt` | Station-local configured-clock rendering of `checkedTs`, or null. It is a check time, never a claimed outage start. |
 | `nexrad.nextCheckTs` | Current existing discovery wakeup epoch, or null when no wakeup is scheduled. Budget/busy-lane rescheduling changes this value. |
-| `nexrad.nextCheckAt` | Station-local `HH:MM` rendering of `nextCheckTs`, or null. |
+| `nexrad.nextCheckAt` | Station-local configured-clock rendering of `nextCheckTs`, or null. |
 | `refresh.reason` | `not reporting` for an empty-listing refusal; otherwise null/absent. Existing `refresh.intent` identifies the rejected session/generation. Refusal leaves Region's refresh state idle and does not mark its measurements stale. |
 
 `sourceFallback` adds `site-not-reporting`: the durable site preference is kept
@@ -796,9 +822,10 @@ Invalid entries are removed and rebuilt. Native bytes retain their separate
 The existing HTTP/1.1 static handler serves valid, existing tile and geometry
 paths with `Cache-Control: public, max-age=31536000, immutable`. Missing files
 return ordinary 404, without immutable caching; there is no 202, long poll or
-new dynamic route. Last-served tile atime drives eviction. The cache pins the exact current and retained visible eight-frame inventories.
-Outside that protected set, oldest-served tiles yield first.
-Caps are 8,000 files and 64,000,000 bytes. Admission yields if protection leaves
+new dynamic route. The process-owned insertion order drives runtime eviction;
+serving a tile does not stat it or update that inventory. Writes pin the exact
+current and retained visible eight-frame inventories. Outside that protected set,
+oldest inventory entries yield first. Both file and byte instance caps apply. Admission yields if protection leaves
 no room: it cannot both exceed the cap and promise retention. The first remapper
 revision run removes owned crop and SVG directories and obsolete remapped tiles.
 
@@ -1220,9 +1247,10 @@ currently playing cycle and fence cancelled job completions by epoch/revision.
 hash and `tiles.remapRevision` is `field-bilinear-2x-box-256-v61-1` when on. Frames retain
 that identity through asynchronous decode, source switches and retained playback.
 The server admits the two installed immutable revision trees, via
-`.tile-revision` and `.smooth-revision`. Both share **one 8,000-file / 64,000,000-byte
-inventory and eviction budget**, with a variant suffix on Smooth inventory keys.
-Startup validates both trees within the shared entry budget. Native byte LRU
+`.tile-revision` and `.smooth-revision`. Both share **one disk-sized inventory and
+eviction budget** (8,000–12,000 files / 64–256 million bytes), with a variant
+suffix on Smooth keys. Startup admits both trees in one global age order and
+within one shared entry budget. Native byte LRU
 identity is unchanged: toggling can remap cached native bytes without a provider
 request, and returning to an existing variant can reuse its rendered PNGs.
 Remap diagnostics count native pixels (≤65,536); `radarVisiblePixels` counts
@@ -1424,9 +1452,12 @@ Site centres inside the viewport have 2px `--ink-soft` dots and 11.5px labels
 (dx5, dy13), omitted unless the complete label fits y76–412 and the viewport.
 Station marker, rings, scale bar and displaced-station treatment retain their meanings.
 
-A source switch retains the previous visible scan and metadata until the first
-new-source tile decodes, then presents its matching source/legend/time together.
-It does not hold a second eight-frame loop: that would exceed the graphics cap.
+A source switch retains the previous visible scan and metadata until four target
+frames decode (or all available target frames for a shorter loop). It then
+presents matching source/legend/time together, choosing a decoded frame even
+when newest is pending. Outgoing and staged plates share the graphics budget;
+abandonment closes staged plates. A camera pan resets their pixels while
+preserving the target manifest and acquisition ownership.
 Same-source backwards times retain the newer scan and its true age. Each frame's
 actual drawn site list and remap quality drive its caption; a dark or missing
 site is not relabelled clear.
@@ -1456,6 +1487,11 @@ The blend is **temporal**, never spatial smoothing or a fabricated scan. The rea
 names the frame whose weight is ≥0.5 (next wins the tie). Reduced motion uses
 hard cuts and an opt-in single sweep.
 
+Late animation callbacks schedule the next interval from actual presentation.
+An elapsed blend is completed before admitting the next transition, so sustained
+callbacks slower than the frame interval still advance the loop rather than
+restarting the same blend at zero opacity.
+
 **v4.7 manifest continuity (no new wire fields):** A scheduled stamp advance
 at unchanged source, site timeline, station, viewport bounds/zoom, render revision
 and legend retains the previously published frames whose timestamps are within
@@ -1474,8 +1510,11 @@ latest eight listed scans plus previously held scans omitted by a truncated
 manifest while they remain within the incoming newest's hour. An omission alone
 cannot close a composite or remove it from the decoded inventory. A station
 change releases the old window. Source/site switches stage their existing
-source transition. Tile grid/zoom, camera pan, render revision and legend changes
-stage a replacement window while keeping playable outgoing composites (v5.9).
+source transition. Actual page-camera/native-level, render revision and legend
+changes stage a replacement window while keeping playable outgoing composites
+(v5.9). Engine coverage-grid/camera acknowledgements do not invalidate composites
+already rendered for the page camera. Source staging captures that actual camera
+as well; stamp/site-scan identity changes still replace the affected frames.
 When the complete manifest returns, normal latest-eight selection applies again.
 `readyFrames` is the latest eight decoded incoming composites in time order.
 During geometry or Smooth-preference acquisition `radarReady()` reports the retained playable window

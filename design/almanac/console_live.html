@@ -2904,8 +2904,8 @@
     // A source's newest stamp can advance during decode. Reconcile the whole
     // window by immutable frame identity; geometry changes invalidate plates.
     var pending=radarView.pendingSource;
-    if(pending&&radarWindowKey(pending.data)!==radarWindowKey(r)){radarDropPendingSource();pending=null;}
-    if(!pending){radarCancelJobs();radarCompositeJob=null;radarView.transition=(radarView.transition||0)+1;pending={frames:[]};}
+    if(pending&&(radarWindowKey(pending.data)!==radarWindowKey(r)||JSON.stringify(pending.camera)!==JSON.stringify(radarCamera))){radarDropPendingSource();pending=null;}
+    if(!pending){radarCancelJobs();radarCompositeJob=null;radarView.transition=(radarView.transition||0)+1;pending={frames:[],camera:{...radarCamera}};}
     var held=new Map(pending.frames.map(f=>[radarFrameKey(f),f]));
     pending.frames=(r.tiles.frames||[]).slice(-8).map(f=>{
       var identity={...f,sourceId:r.sourceId,revision:r.tiles.revision,smooth:!!r.tiles.smooth,remapRevision:r.tiles.remapRevision};
@@ -3053,7 +3053,11 @@
     radarPruneFrames();
   }
   function radarRetarget(){
-    radarDropPendingSource();
+    // A pan invalidates plates, not the target source manifest. Keep its
+    // acquisition owner while releasing every raster made for the old camera.
+    var pending=radarView.pendingSource;radarDropPendingSource();
+    if(pending){pending.frames.forEach(f=>{f.ready=false;f.compositeRetry=0;});pending.camera={...radarCamera};radarView.pendingSource=pending;}
+    radarView.windowKey=radarWindowKey(radarView.data);
     radarCompositeJob=null;radarView.holdingWindow=true;
     radarView.retired.push(...radarView.loaded);
     radarView.loaded=radarView.loaded.map(f=>({...f,bitmap:null,ready:false,compositeRetry:0}));
@@ -3089,7 +3093,10 @@
     radarWake();
   }
   $('rad-play').addEventListener('click',function(){radarView.blend=null;radarEchoDirty=true;if(radarReduced()){radarView.singleSweep=!radarView.singleSweep;radarView.paused=!radarView.singleSweep;radarView.current=radarView.good;radarEchoDirty=true;}else radarView.paused=!radarView.paused;radarUpdateReady();radarPruneFrames();radarLoopSync();if(!radarReduced())$('rad-play').animate([{opacity:.5},{opacity:1}],{duration:120});});
-  function radarWindowKey(r){return JSON.stringify([r.sourceId,r.siteId,r.center,r.tiles?.z,r.tiles?.grid,r.tiles?.camera,r.tiles?.revision,r.tiles?.smooth,r.legend]);}
+  // radarSettle owns camera/level invalidation. A later engine coverage/intent
+  // acknowledgement cannot invalidate plates already decoded for that camera.
+  // Source staging likewise owns the actual camera used to decode its plates.
+  function radarWindowKey(r){return JSON.stringify([r.sourceId,r.siteId,r.center,r.tiles?.revision,r.tiles?.smooth,r.legend]);}
   function radarStartCount(r=radarView.data){return Math.min(4,Math.max(r?.tiles?.frames?.length||0,r?.frameCount||0,r?.refresh?.frameTotal||0))||4;}
   function radarPreload(r){if(!radarView.active||document.hidden)return;
     var windowKey=radarWindowKey(r);
@@ -3265,6 +3272,9 @@
     if(cameraMoved){radarGeoRequest();radarQueueTiles();radarZoomRender();}
     if((radarEchoDirty||cameraMoved)&&!(radarView.nextAt&&now>=radarView.nextAt)){radarView.blend=null;radarEchoPaint(radarView.current);radarTileDamage=[];radarEchoDirty=false;radarUpdateReady();radarLoopSync();var key=JSON.stringify([radarView.current&&radarView.current.stamp,radarView.current&&radarView.current.legend,radarView.current&&radarView.current.drawnSites,radarView.clear]);if(key!==radarView.captionKey){radarView.captionKey=key;radarSourceRender();radarState();}painted=true;}
     {
+      // Sustained slow RAFs can miss every step deadline. Finish the outgoing
+      // transition first, or each callback restarts the same target at alpha 0.
+      if(radarView.blend&&now-radarView.blend.start>=RAD_BLEND_MS)radarBlendPaint(now);
       if(radarView.nextAt&&now>=radarView.nextAt){var ready=radarPlayback(),index=ready.indexOf(radarView.current)+1,previous=radarView.current;
         if(index>=ready.length||index===0){if(!radarView.holdingWindow||radarView.readyFrames.length>=Math.min(4,radarView.loaded.length)){radarView.cycle=radarView.readyFrames.slice();if(radarView.holdingWindow)radarTrace('windowAdopted');radarView.holdingWindow=false;}ready=radarView.cycle;index=0;}
         var next=ready[index];if(!next){radarView.nextAt=0;radarLoopSync();radarWake();return;}

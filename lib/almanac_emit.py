@@ -47,7 +47,7 @@ import pytz
 
 from lib.radar_geometry import (world_point, world_inverse, parse_center,
                                 circle_intersects_bounds, distance_meters)
-from lib.radar_http import failure_class, RadarSession, is_transport_error, LocalTransportError
+from lib.radar_http import failure_class, local_backoff_failure, RadarSession, is_transport_error, LocalTransportError
 from lib.radar_fetch import HostHealth, CircuitOpen, Attempt, AttemptCancelled, tile_race
 from lib.radar_discovery import DiscoverySchedule
 import logging
@@ -1283,7 +1283,7 @@ class AlmanacEmitter:
             if probe is not None:
                 # Preserve recovery of a failed preferred source while on fallback.
                 delay = max(min_delay, 1, probe)
-            delay = max(delay, self._radar_headroom_delay(source, 1))
+            delay = max(delay, self._radar_headroom_delay(source, 1), self._radar_local_backoff())
             plan.due = now + delay
             self._radar_discovery_event = self._schedule(self._check_radar_discovery, delay)
 
@@ -1635,8 +1635,8 @@ class AlmanacEmitter:
                 self._radar_refresh = dict(self._radar_refresh, pending=dict(self._radar_pending))
 
     def _radar_local_backoff(self):
-        """Retry floor while consecutive passes fail locally (dead route, dead
-        resolver): 2, 4, 8 ... RADAR_LOCAL_RETRY_MAX_SEC. Local failures never
+        """Retry floor while consecutive passes fail locally (dead route or
+        exhausted client resources): 2, 4, 8 ... RADAR_LOCAL_RETRY_MAX_SEC. Local failures never
         open a host breaker, so nothing else slows the loop during an outage.
         It is a floor under every scheduled radar retry, not the failed pass's
         own delay: a partial-frame pass calls _radar_failed_pass and then
@@ -1987,6 +1987,11 @@ class AlmanacEmitter:
                     # All raster work is on radar-tile threads. One write, no
                     # read-back, PNG reopen or getsize. Publication uses the index.
                     with self._radar_lock:
+                        length = len(rendered)
+                        self._radar_prune(ctx.get('previous_result'), incoming_size=length, incoming_files=1)
+                        cache = self._radar_disk_inventory
+                        if len(cache)+1 > cache.MAX_FILES or cache.bytes+length > cache.MAX_BYTES:
+                            raise _RadarBudget('protected tile cache full')
                         parent = str(target.parent)
                         if parent not in self._radar_disk_inventory.directories:
                             chain = list(reversed(target.parent.parents)) + [target.parent]
@@ -1999,11 +2004,6 @@ class AlmanacEmitter:
                                     try: os.mkdir(name)
                                     except FileExistsError: pass
                                     self._radar_disk_inventory.directories.add(name)
-                        length = len(rendered)
-                        self._radar_prune(incoming_size=length,incoming_files=1)
-                        cache = self._radar_disk_inventory
-                        if len(cache)+1 > cache.MAX_FILES or cache.bytes+length > cache.MAX_BYTES:
-                            raise _RadarBudget('protected tile cache full')
                         tmp = str(target)+'.tmp'
                         try:
                             with open(tmp, 'wb') as output:
@@ -2057,7 +2057,7 @@ class AlmanacEmitter:
                         raise error
                     if error is not None:
                         if failure_class(error) != 'host':
-                            ctx[failure_class(error)+'_failure'] = True
+                            ctx[('local' if local_backoff_failure(error) else 'ambiguous')+'_failure'] = True
                         ctx['last_error'] = str(error)
                         ctx['missing_tiles'] = True
                     for _ in done:
@@ -2849,16 +2849,10 @@ class AlmanacEmitter:
             def bootstrap():
                 try:
                     self._radar_migrate_cache(str(root))
-                    self._radar_disk_inventory.scan(root/'t'/_radar_render_revision(), _radar_tile_metadata)
-                    smooth_root = root/'t'/_radar_render_revision(True)
-                    if self._radar_disk_inventory.writable and smooth_root.is_dir():
-                        first = self._radar_disk_inventory.startup
-                        self._radar_disk_inventory.scan(smooth_root, _radar_tile_metadata, suffix=(True,),
-                            entry_limit=self._radar_disk_inventory.MAX_ENTRIES-first['entries'])
-                        second = self._radar_disk_inventory.startup
-                        self._radar_disk_inventory.startup = {k:first[k]+second[k] for k in
-                            ('entries','files','invalid','wallSec','cpuSec')}
-                        self._radar_disk_inventory.startup['bounded'] = first['bounded'] or second['bounded']
+                    self._radar_disk_inventory.scan_roots((
+                        (root/'t'/_radar_render_revision(), ()),
+                        (root/'t'/_radar_render_revision(True), (True,)),
+                    ), _radar_tile_metadata)
                     self._radar_disk_files=len(self._radar_disk_inventory)
                     self._radar_disk_bytes=self._radar_disk_inventory.bytes
                 except OSError as error:
@@ -2872,6 +2866,9 @@ class AlmanacEmitter:
         import shutil
         from lib.radar_basemap import publish_revision,remove_empty_parents
         root=Path(radar_dir or RADAR_DIR);root.mkdir(parents=True,exist_ok=True)
+        # The installed tile tree is owned storage, never an external link.
+        if (root/'t').is_symlink():
+            (root/'t').unlink()
         site_revision=_radar_sites_revision();site_path=root/('sites-'+site_revision+'.json')
         marker=root/'.sites-revision'
         if not marker.exists() or marker.read_text()!=site_revision or not site_path.is_file():
@@ -2905,20 +2902,21 @@ class AlmanacEmitter:
         # The pass error is often a synthetic TimeoutError ("visible newest
         # incomplete"); the tile loop's per-class flags and the health counters
         # say what actually failed underneath it.
-        truly_local = (outcome == 'local' or ctx.get('local_failure')
-                       or health.local_failures > ctx.get('local_failure_start', health.local_failures))
-        ambiguous = (outcome == 'ambiguous' or ctx.get('ambiguous_failure')
+        uncertain = health.uncertain_local_failures - ctx.get('uncertain_local_start', health.uncertain_local_failures)
+        truly_local = (local_backoff_failure(error) or ctx.get('local_failure')
+                       or health.local_failures - ctx.get('local_failure_start', health.local_failures) > uncertain)
+        ambiguous = (outcome == 'ambiguous' or ctx.get('ambiguous_failure') or uncertain > 0
                      or health.ambiguous_failures > ctx.get('ambiguous_failure_start', health.ambiguous_failures))
-        local = truly_local or ambiguous  # neither may advance the fallback chain
+        local = outcome != 'host' or truly_local or ambiguous  # none may advance fallback
         if local:
             self._radar_transport_failures.pop(source, None)
         else:
             self._radar_transport_failures[source] = self._radar_transport_failures.get(source, 0)+1
-        # A dead route or resolver never opens a host breaker (HostHealth.record
+        # A dead route never opens a host breaker (HostHealth.record
         # returns before sampling), so without its own backoff a network outage
         # would rerun a doomed pass every two seconds for as long as it lasts.
         # The streak feeds _radar_local_backoff, the floor under EVERY scheduled
-        # radar retry. Ambiguous failures (a reused socket that got no bytes) may
+        # radar retry. DNS uncertainty and ambiguous reused-socket failures may
         # be the provider stalling, so they end the streak and keep 2 s.
         self._radar_local_failure_streak = self._radar_local_failure_streak+1 if truly_local else 0
         if not local and self._radar_transport_failures[source] >= 3:
@@ -2950,7 +2948,6 @@ class AlmanacEmitter:
     def _do_radar(self, intent_triggered=None, view_started=False, discovery=False):
         """Primary-first orchestration; radar failures never alter engine health."""
         self._radar_begin_log_pass()
-        pass_deadline = time.monotonic() + RADAR_BUILD_DEADLINE_SEC
         self._radar_probe_reuse.clear()
         stamp_names = self._radar_stamp_names()
         stamp = self._radar_preference_stamp(stamp_names)
@@ -2972,6 +2969,9 @@ class AlmanacEmitter:
         if not self._radar_cache_ready.wait(0 if 'radar' in self._inflight else 30):
             self._schedule_retry('radar', self._check_radar, .1, retry_reason='local')
             return
+        # Boot validation owns a separate deadline. A successful 26-second
+        # inventory wait must not hand acquisition an already expired budget.
+        pass_deadline = time.monotonic() + RADAR_BUILD_DEADLINE_SEC
         self._radar_consume_bad_tiles()
         if view_started and stamp == self._radar_result_stamp:
             previous = self._radar_result
@@ -3119,6 +3119,7 @@ class AlmanacEmitter:
                 for kind in ('local', 'ambiguous'):
                     ctx.pop(kind+'_failure', None)
                     ctx[kind+'_failure_start'] = getattr(self._radar_health, kind+'_failures')
+                ctx['uncertain_local_start'] = self._radar_health.uncertain_local_failures
                 ctx.pop('staging_source', None)
                 ctx['switch_reason'] = 'user source/zoom selection' if not same_mode else 'initial source selection'
                 if errors:

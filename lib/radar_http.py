@@ -25,6 +25,10 @@ class LocalTransportError(socket.timeout):
     """Client connection setup/resource deadline; not evidence of host health."""
 
 
+class ResolverTimeout(LocalTransportError):
+    """A DNS deadline cannot distinguish client resolver from provider DNS."""
+
+
 class AmbiguousTransportError(socket.timeout):
     """A reused connection failed before a service response; retry fresh first."""
 
@@ -32,12 +36,23 @@ class AmbiguousTransportError(socket.timeout):
 def failure_class(error):
     if isinstance(error, AmbiguousTransportError):
         return 'ambiguous'
+    # A permanent failure for one hostname is not evidence of a dead client
+    # route/resolver. Let repeated negative name answers try the other provider.
+    # Transient resolver failures still protect the host breaker as before.
+    if isinstance(error, socket.gaierror) and error.errno in {socket.EAI_NONAME, socket.EAI_FAIL}:
+        return 'host'
     if isinstance(error, (LocalTransportError, socket.gaierror)) or (
             isinstance(error, OSError) and error.errno in {
                 errno.ENETUNREACH, errno.EHOSTUNREACH, errno.ENETDOWN,
                 errno.EADDRNOTAVAIL, errno.EMFILE, errno.ENFILE, errno.ENOBUFS, errno.ENOMEM}):
         return 'local'
     return 'host'
+
+
+def local_backoff_failure(error):
+    """Health's local category also includes DNS uncertainty. Only definite
+    client transport/resource failures justify the expanding retry floor."""
+    return failure_class(error) == 'local' and not isinstance(error, (socket.gaierror, ResolverTimeout))
 
 
 # Only active lookups are shared. A resolver that never returns occupies one of
@@ -358,7 +373,7 @@ class RadarSession:
         if cached is not None:
             return cached  # stale-while-refresh: first tile never waits for DNS
         if not event.wait(max(0, end - time.monotonic())):
-            raise LocalTransportError('radar DNS exceeded request deadline')
+            raise ResolverTimeout('radar DNS exceeded request deadline')
         with self._condition:
             if self._closed:
                 raise OSError('radar session closed')

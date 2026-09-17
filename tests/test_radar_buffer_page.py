@@ -80,7 +80,7 @@ def test_pending_source_reconciliation_checks_full_identity_and_closes_omissions
 const r=manifest('b');renderRadar({radar:r,ts:100900});
 const f=decode(radarView.pendingSource.frames[0]),b=f.bitmap;
 const next=structuredClone(r);
-if(CHANGE==='camera')next.tiles.camera.lon+=.01;
+if(CHANGE==='camera'){next.tiles.camera.lon+=.01;radarCamera={...next.tiles.camera};}
 if(CHANGE==='siteScans')next.tiles.frames[0].siteScans=[{id:'KATX',ts:f.ts-60}];
 if(CHANGE==='truncate')next.tiles.frames=next.tiles.frames.slice(1);
 renderRadar({radar:next,ts:100902});
