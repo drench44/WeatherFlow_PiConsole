@@ -6,6 +6,13 @@ to shared upstream code that the classic console benefits from too.
 
 ## 2026-09-16
 
+### Tools
+- **A CDP probe for the live kiosk** lives at `design/almanac/kiosk/tools/cdp_probe.py`:
+  run on the Pi, it evaluates a JavaScript expression in the panel's Chromium over
+  the loopback debug port and prints the value. Every session used to rewrite it.
+- **The Radar tab's picker**: a tap on the mode already showing records the
+  preference and posts the intent, but never enters the switching state.
+
 ### Clock
 - **A clock string never breaks.** "7:13 PM" wrapped the masthead onto two
   lines and "Clear until 1 AM" orphaned its "AM". Every meridiem now follows a

@@ -238,6 +238,38 @@ Two ways to run it:
 For the architecture, the `wx.json` data contract, and upgrade notes, see
 [`design/almanac/ARCHITECTURE.md`](design/almanac/ARCHITECTURE.md).
 
+### Operating the radar
+
+The radar engine reports its own health at `/health` under `radar`:
+
+- `cache`: the tile cache's live file count and bytes, its caps, whether the
+  boot scan has finished, and that scan's summary (files indexed, directories
+  purged, tiles evicted, seconds taken). Caps are derived from free space at
+  boot: 2 % of the free bytes on the cache's disk, between 8,000 files / 64 MB
+  and 12,000 files / 256 MB. The file ceiling is the boot validation cost, not
+  disk: the Pi 4 validates about 200 tiles a second, and the first radar pass
+  waits for the scan.
+- `lastError`, `localFailures`, `ambiguousFailures`, `breaker`, `hosts`: the
+  fetch layer. Consecutive local failures (a dead route, an exhausted client)
+  back the retry off from 2 s to 60 s; provider failures advance the fallback
+  chain instead; a stalled reused socket does neither.
+- `discovery`, `pending`, `phases`, `requests`: the acquisition schedule and the
+  last 128 requests.
+
+The engine logs one summary line per radar pass (`radar pass outcome=...`); a
+pass that yields on an internal budget says `error=deferred: <reason>`. On the
+Pi 4 kiosk the engine log is `/tmp/almanac_data.log` and the tile cache lives
+under `~/almanac_web/radar`.
+
+To inspect the running page itself, the kiosk's Chromium listens on the loopback
+debug port; `design/almanac/kiosk/tools/cdp_probe.py` evaluates a JavaScript
+expression there and prints the result:
+
+```bash
+python3 design/almanac/kiosk/tools/cdp_probe.py 'radarReady().length'
+python3 design/almanac/kiosk/tools/cdp_probe.py '({mem: radarMemory(), cap: RAD_MEMORY_CAP})'
+```
+
 ### Tests
 
 The fork's data pipeline (the observation parser, the `wx.json` emitter, and a
@@ -262,6 +294,8 @@ cleanly.
 &nbsp;&nbsp;&nbsp;&nbsp;[Viewing the Almanac remotely](#viewing-the-almanac-remotely)<br>
 &nbsp;&nbsp;&nbsp;&nbsp;[Do I need a WeatherFlow Tempest?](#do-i-need-a-weatherflow-tempest)<br>
 &nbsp;&nbsp;&nbsp;&nbsp;[Air quality source](#air-quality-source)<br>
+&nbsp;&nbsp;&nbsp;&nbsp;[Operating the radar](#operating-the-radar)<br>
+&nbsp;&nbsp;&nbsp;&nbsp;[Tests](#tests)<br>
 **[Compatibility](#compatibility)**<br>
 **[Installation Instructions](#installation-instructions)**<br>
 **[Update Instructions](#update-instructions)**<br>
