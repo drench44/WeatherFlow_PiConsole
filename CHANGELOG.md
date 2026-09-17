@@ -26,6 +26,19 @@ to shared upstream code that the classic console benefits from too.
   `[Display] TimeFormat = 12 hr`, and the panel is set so.
 
 ### Radar
+- **Final adversarial review, 11 fixes.** Boot reconciles the tile directory
+  to the inventory (unindexed and temporary files go, a partially scanned
+  stamp does not keep unindexed leftovers), admits both render revisions
+  newest-first under one age order, and never follows a symlinked cache root.
+  A tile write prunes before creating its directory, since eviction could
+  delete the destination. The acquisition deadline starts after the boot
+  scan wait. Discovery wakeups honour the local-failure floor. A permanent
+  DNS answer counts toward provider fallback; a transient one keeps the 2 s
+  cadence and never grows the outage streak. The page no longer treats the
+  engine's coverage camera as plate identity, keeps the target manifest
+  through a pan during a switch, and finishes a blend before starting the
+  next under a slow animation clock.
+### Radar
 - **A full tile cache is trimmed at boot, never frozen.** The Pi 4 rebooted
   with a full cache: 8,000 tiles, exactly where the running prune keeps it.
   The boot scan stopped at the cap with directories still unvisited, counted
