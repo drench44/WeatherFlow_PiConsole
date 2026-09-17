@@ -190,13 +190,15 @@ and never leaves the radar screen on the user's behalf. A page that has seen
 `available: true` in its lifetime treats a later `available: false, reason: "no
 data yet"` as starting even from an engine that predates this field.
 
-An engine that has just restarted publishes for ~20 s with every observation null
-and `obsTs: null`. The page carries the last frame that had `obsTs` forward: null
-fields take the last known value, `obsTs` stays the OLD one and `obsAgeSec` is
-recomputed, so the existing freshness mark ("stale"/"silent") judges the carried
-values by their real age. The last good frame (minus radar, alerts and series) is
-kept in `localStorage` at most once a minute so a full reboot shows the last known
-weather, aged, until the first live observation. Carry-forward stops at six hours.
+An engine that has just restarted has no observation for ~20 s and no forecast,
+AQI or Sager text until their first fetches. It reads the previous run's `wx.json`
+at start and, for `CARRY_WINDOW_SEC` (600 s), fills any still-null top-level field
+from it; while no live observation has arrived it keeps the previous `obsTs`, so
+`obsAgeSec` is the real age and the page's freshness mark judges the carried
+numbers rather than showing dashes. `carried: true` marks such a payload. Radar
+(it has `starting`), alerts (they expire), the clock and version fields are never
+carried, and nothing older than `CARRY_MAX_SEC` (6 h) is. The kiosk wipes the
+browser profile on every start, so this lives in the engine, not the page.
 
 ## Radar v5.7 — ordered intent and bounded acquisition
 

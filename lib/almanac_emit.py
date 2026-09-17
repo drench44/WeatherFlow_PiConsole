@@ -73,6 +73,11 @@ FORECAST_CHECK_INTERVAL = 3600 # seconds (1 h) — the daily outlook barely move
 FORECAST_RETRY_SEC      = 120  # seconds — boot retry cadence until the FIRST forecast succeeds
 RADAR_FAILURE_LOG_SEC = 5 * DiscoverySchedule.BACKOFF  # ten-minute outage reminders
 RADAR_RETRY_SEC = 120
+CARRY_MAX_SEC = 6 * 3600   # a restarted engine republishes its last observations no older than this
+CARRY_WINDOW_SEC = 600     # ... and fills still-unfetched fields (forecast, AQI, Sager) from them this long after start
+CARRY_SKIP = frozenset(('radar', 'alerts', 'alertCount', 'alertsAgeSec', 'alertsAsOf', 'alertsStale',
+                        'ts', 'time', 'date', 'obsTs', 'obsAgeSec', 'carried',
+                        'updateAvailable', 'latestVersion', 'currentVersion'))
 RADAR_STARTING_MAX_SEC = 300  # after this, a radar that never produced a result is unavailable, not starting
 RADAR_LOCAL_RETRY_MAX_SEC = 60  # ceiling for the doubling retry after consecutive local failures
 RADAR_HISTORY_SEC = 3600
@@ -1080,6 +1085,7 @@ class AlmanacEmitter:
         # per-minute rate flickers 0 <-> trace and the gauge went dry mid-drizzle
         self._rain_win = _RainWindow(RAIN_WINDOW_SEC)
         self._started_at = time.time()   # obsAgeSec counts from here until the first observation
+        self._carried = self._load_previous_payload()  # the last run's wx.json, republished until live data lands
 
     # Provider results, each published as ONE snapshot by its worker thread.
     # Class-level so the "no data yet" state needs no instance setup.
@@ -1323,6 +1329,44 @@ class AlmanacEmitter:
                 # Refresh intent/prefetch knowledge even though no build runs.
                 self._radar_newest[(source, None)] = (time.monotonic(), validated)
             raise _RadarUnchanged()
+
+    def _load_previous_payload(self):
+        """ The previous run's wx.json, if it holds a timed observation. A restart
+        used to publish ~20 s of nulls before the first live observation (every
+        value on the panel blinked to a dash); the kiosk wipes the browser profile
+        on every start, so the page cannot bridge that. The engine can. """
+        try:
+            with open(self.output_path) as previous:
+                data = json.load(previous)
+        except (OSError, ValueError):
+            return None
+        return data if isinstance(data, dict) and isinstance(data.get('obsTs'), (int, float)) else None
+
+    def _carry_forward(self, payload, now):
+        """ Fill still-null top-level fields from the previous run for the first
+        CARRY_WINDOW_SEC after start, and while no live observation has arrived
+        keep the previous obsTs so obsAgeSec is the REAL age: the page's
+        freshness mark, not a dash, says how old the numbers are. Radar (its own
+        'starting' state), alerts (they expire) and the clock are never carried. """
+        carried = self._carried
+        payload['carried'] = False
+        if carried is None:
+            return payload
+        age = now - carried['obsTs']
+        if not (0 <= age <= CARRY_MAX_SEC) or now - self._started_at > CARRY_WINDOW_SEC:
+            self._carried = None
+            return payload
+        live = payload.get('obsTs') is not None
+        for key, value in carried.items():
+            if key in CARRY_SKIP or value is None or payload.get(key) is not None:
+                continue
+            payload[key] = value
+            payload['carried'] = True
+        if not live:
+            payload['obsTs'] = int(carried['obsTs'])
+            payload['obsAgeSec'] = int(age)
+            payload['carried'] = True
+        return payload
 
     def _radar_starting(self, snap):
         """ The engine has no radar result yet because it is still booting: the
@@ -4372,7 +4416,7 @@ class AlmanacEmitter:
             'sagerWind':     None,   # not sourced
             'sagerSky':      None,   # not sourced
         }
-        return _json_safe(payload)
+        return _json_safe(self._carry_forward(payload, now))
 
     # --------------------------------------------------------------------
     @staticmethod

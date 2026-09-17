@@ -258,8 +258,8 @@ The radar engine reports its own health at `/health` under `radar`:
 
 After a restart the Radar tab stays and reads "Starting · checking N saved
 tiles" until the first pass publishes, about a minute on the Pi 4; the other
-panels carry the last known observations, marked by their age, until the first
-live reading arrives.
+panels show the previous run's last observations, marked by their age, until the
+first live reading arrives.
 
 The engine logs one summary line per radar pass (`radar pass outcome=...`); a
 pass that yields on an internal budget says `error=deferred: <reason>`. On the

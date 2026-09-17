@@ -3413,42 +3413,7 @@
     }
   }
 
-  /* An engine that has just restarted publishes for ~20 s before its first
-     observation arrives: every value null, obsTs null. Carry the last known
-     values forward with their REAL age (obsTs stays the old one) so the panel
-     never blinks to dashes; the freshness mark decides how to flag them. The
-     last good frame is also kept in localStorage (one write a minute, radar and
-     series stripped) so a full reboot shows the last known weather, marked by
-     its age, until the first live observation lands. Bounded to six hours. */
-  var CARRY_MAX_SEC = 6 * 3600, CARRY_STORE_MS = 60000;
-  var carried = { data: null, storedAt: 0 };
-  function carryStrip(d) {
-    var out = {};
-    for (var k in d) if (k !== "radar" && k !== "alerts" && k !== "fcHourly" && k !== "slpSeries" && k !== "aqiForecast") out[k] = d[k];
-    return out;
-  }
-  function carryLoad() {
-    try { var raw = localStorage.getItem("wxLastGood"); return raw ? JSON.parse(raw) : null; } catch (e) { return null; }
-  }
-  function carryForward(data) {
-    if (!data) return data;
-    if (isNum(data.obsTs)) {
-      carried.data = data;
-      var now = Date.now();
-      if (now - carried.storedAt > CARRY_STORE_MS) { carried.storedAt = now; try { localStorage.setItem("wxLastGood", JSON.stringify(carryStrip(data))); } catch (e) {} }
-      return data;
-    }
-    var last = carried.data || (carried.data = carryLoad());
-    if (!last || !isNum(last.obsTs)) return data;
-    var age = (isNum(data.ts) ? data.ts : Date.now() / 1000) - last.obsTs;
-    if (age < 0 || age > CARRY_MAX_SEC) return data;
-    var out = Object.assign({}, data);
-    for (var k in last) if (out[k] == null && last[k] != null && k !== "radar" && k !== "alerts") out[k] = last[k];
-    out.obsTs = last.obsTs; out.obsAgeSec = Math.round(age); out.carried = true;
-    return out;
-  }
   function render(data) {
-    data = carryForward(data);
     lastData = data;
     renderText(data);
     renderDerived(data);

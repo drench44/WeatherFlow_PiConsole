@@ -14,9 +14,10 @@ to shared upstream code that the classic console benefits from too.
   reading. The engine now publishes `radar.starting` with its phase and tile
   count, the page keeps the tab and shows "Starting · checking N saved tiles",
   and it infers the same state when an older engine restarts underneath it. The
-  page carries the last known observations through the gap with their real age,
-  and keeps them in the browser so a full reboot shows the last known weather,
-  aged, instead of dashes.
+  engine reads its own last `wx.json` at start and republishes the last known
+  observations, forecast and air quality with their real age until live data
+  lands, so a restart never blinks the panel to dashes. (The kiosk wipes the
+  browser profile on every start, so this cannot live in the page.)
 
 ### Tools
 - **A CDP probe for the live kiosk** lives at `design/almanac/kiosk/tools/cdp_probe.py`:
