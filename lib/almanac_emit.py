@@ -2687,6 +2687,13 @@ class AlmanacEmitter:
                 ctx.pop('request_reserve', None)
                 self._radar_session.on_retry = retry
             if any(not f['complete'] for f in frames.values()):
+                if deferred and retry_reason == 'budget':
+                    # The gate refused before this frame's cost was priced, so
+                    # `needed` can still be 0: a retry asking for no headroom fires
+                    # 2 s later into the same full window, one probe per pass, for
+                    # as long as the window stays full (2026-09-16 zoom-out loop).
+                    # Ask for one frame's tiles so the retry waits for real room.
+                    needed = max(needed, len(ctx['tiles'])+2)
                 if deferred and view_delay is not None:
                     self._radar_budget_retry(source, needed, min_delay=view_delay, reason=retry_reason)
                 else:

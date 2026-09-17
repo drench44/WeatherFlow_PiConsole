@@ -6,6 +6,21 @@ to shared upstream code that the classic console benefits from too.
 
 ## 2026-09-16
 
+### Zoom
+- **A zoom-out no longer hangs the radar.** Zooming from 8 to 5 asks for tiles
+  at a level the engine has not rendered and for history frames it has not
+  reached. The page reported every 404 as a bad tile and re-fetched it 2 s
+  later (1,241 reports in one minute on the panel), and when the request gate
+  refused a history frame the engine yielded with a budget of zero, so its
+  retry fired 2 s later into the same full window, one probe per pass, with
+  the caption stuck on "Retrying view · work budget · next attempt now". A 404
+  is now "not yet": the page backs off per tile (2 s doubling to 30 s) and
+  reports only a tile that arrived and failed to decode; the engine asks for
+  one frame's headroom on that yield and names every yield in the pass log
+  (`error=deferred: <reason> needed=N at=<function:line>`). Below zoom 7 the
+  site mode still hands over to Region by design; the note says "KATX resumes
+  at zoom 7".
+
 ### Restart
 - **Nobody is stranded by a restart.** For about a minute after every engine
   restart the Radar tab vanished (the boot scan had no result yet, so the engine
