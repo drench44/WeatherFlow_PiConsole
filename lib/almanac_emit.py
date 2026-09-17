@@ -895,7 +895,7 @@ def _radar_tile_manifest(source, frames, ctx):
             tiles=[(x,y) for x,y,_,_ in _radar_grid(ctx,z)]
             _,expected,complete=inventory(frame,z,tiles)
             present[str(z)]=bool(expected) and complete==expected
-        result.append(dict(frame,levels=present))
+        result.append(dict(frame,levels=present,complete=present[str(ctx['zoom'])]))
     grid_tiles=[(x,y) for y in range(y0,y0+grid['h']) for x in range(x0,x0+grid['w'])]
     mask,expected,complete=inventory(result[-1],ctx['zoom'],grid_tiles) if result else (0,0,0)
     width=math.ceil(grid['w']*grid['h']/4)
@@ -928,6 +928,16 @@ _RadarResult = namedtuple('_RadarResult',
               7, None, 7, None, 'mosaic', None, (), False, (), 0, 'mosaic', None, None, 'mi', None, None, None))
 _RADAR_NONE = _RadarResult(False, 'no data yet', (), None, None, None, None, None,
                            None, None, None, None)
+
+def _radar_tile_snapshot(snapshot):
+    """One inventory observation owns both frame flags and the wire manifest.
+
+    A tile batch can publish its final tile before _radar_fill_frame returns.
+    Its original pending frame flag must not override measured completeness.
+    Preserve historical identities and metadata without mutating prior snapshots.
+    """
+    complete = {f['ts']: f['complete'] for f in snapshot.tiles['frames']}
+    return snapshot._replace(frames=tuple(dict(f, complete=complete[f['ts']]) for f in snapshot.frames))
 
 def _radar_scan_cadence(stamps):
     """Infer only from the primary listing, independent of fetched tile history."""
@@ -1295,7 +1305,7 @@ class AlmanacEmitter:
     def _radar_discovery_unchanged(self, source, newest, ctx, validated=None):
         snap = self._radar_result
         if source == 'iem-nexrad-n0b' and (snap.site_id != ctx.get('site_id') or
-                not snap.frames or [(p['id'], p['ts']) for p in snap.frames[-1]['siteScans']]
+                not snap.frames or tuple((p['id'], p['ts']) for p in snap.frames[-1]['siteScans'])
                 != _radar_site_pairs(ctx, newest)):
             return  # a secondary layer may advance between primary volumes
         if (ctx.get('discovery') and snap.source_id == source and snap.ts_frame == newest
@@ -1549,6 +1559,9 @@ class AlmanacEmitter:
 
     def _radar_publish_refresh(self, ctx, snapshot=None, **changes):
         self._radar_checkpoint(ctx)
+        if snapshot is not None:
+            snapshot = _radar_tile_snapshot(snapshot)
+            changes['frameIndex'] = sum(f['complete'] for f in snapshot.frames)
         refresh = dict(state='newest', frameIndex=0, frameTotal=1)
         refresh.update(ctx.get('refresh', {}))
         refresh.update({k:v for k,v in changes.items() if k in refresh})
@@ -2095,8 +2108,8 @@ class AlmanacEmitter:
         if (retained and not ctx.get('prefetch') and self._radar_result.ts_frame < ts):
             retained[ts] = dict(frame)
             window = tuple(retained[t] for t in sorted(retained))
-            self._radar_result = self._radar_result._replace(frames=window,
-                tiles=_radar_tile_manifest(source, window, ctx))
+            self._radar_result = _radar_tile_snapshot(self._radar_result._replace(frames=window,
+                tiles=_radar_tile_manifest(source, window, ctx)))
             self._radar_emit_now()
         drawn = []; present = set()
         for site,stamp,url in work:
@@ -2137,7 +2150,7 @@ class AlmanacEmitter:
                                 tiles=_radar_tile_manifest(source, window, ctx),
                                 ts_fetch=snap.ts_fetch if snap.ts_frame == ts else partial.ts_fetch)
                         self._radar_note_source(source, ctx)
-                        self._radar_result=partial
+                        self._radar_result=_radar_tile_snapshot(partial)
                         self._radar_health.last_success = time.time()
                         self._radar_emit_now()
                 if ctx.get('reuse_newest') and not any(_radar_present(ctx,source,site,stamp,ctx['zoom'],x,y)
@@ -2359,9 +2372,9 @@ class AlmanacEmitter:
             return
         ctx.update(_radar_scan_cadence(stamps))
         self._radar_discovery_unchanged(source, stamps[-1], ctx)
-        def build(ts, limit):
+        def build(ts, limit, pairs=None):
             layers = []
-            for site, scan in _radar_site_pairs(ctx, ts):
+            for site, scan in (_radar_site_pairs(ctx, ts) if pairs is None else pairs):
                 stamp = datetime.fromtimestamp(scan, timezone.utc).strftime('%Y%m%d%H%M')
                 def url(x, y, site=site, stamp=stamp):
                     return RADAR_SITE_TILE_TEMPLATE.format(site=site[1:], stamp=stamp,
@@ -2552,7 +2565,9 @@ class AlmanacEmitter:
                         self._radar_checkpoint(ctx)
                         if frames[t]['complete']:
                             continue
-                        pairs = _radar_site_pairs(ctx,t) if source == 'iem-nexrad-n0b' else [(None,t)]
+                        # Repair the published measurement, even if a late
+                        # neighbour listing would now choose a different scan.
+                        pairs = [(p['id'],p['ts']) for p in frames[t]['siteScans']] if source == 'iem-nexrad-n0b' else [(None,t)]
                         cost = sum(not _radar_present(ctx,source,site,scan,ctx['zoom'],x,y)
                             for site,scan in pairs for x,y,_,_ in _radar_site_tiles(ctx,site))
                         cost += source == 'iem-mrms-lcref'
@@ -2583,7 +2598,7 @@ class AlmanacEmitter:
                                         self._radar_tiles.move_to_end(key)
                         self._radar_publish_refresh(ctx, state='history', frameTotal=len(slots))
                         try:
-                            frame = build(t, ctx['deadline'])
+                            frame = build(t, ctx['deadline'], pairs=pairs) if source == 'iem-nexrad-n0b' else build(t, ctx['deadline'])
                         except (TimeoutError, _RadarBudget) as error:
                             retry_reason = 'deadline' if isinstance(error, TimeoutError) else 'budget'
                             deferred = True
