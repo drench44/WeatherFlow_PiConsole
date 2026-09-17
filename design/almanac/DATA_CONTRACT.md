@@ -266,12 +266,10 @@ timers.
 Consecutive local-failure passes back off 2, 4, 8, 16, 32, then at most 60 seconds.
 Both repair and discovery wakeups honor that floor. Explicit camera/source intent
 still gets an immediate attempt; its automatic continuations obey the floor.
-Success and ambiguous transport failures reset the streak. Permanent negative
-DNS results (`EAI_NONAME`/`EAI_FAIL`) count toward provider fallback. Transient DNS
-errors/timeouts cannot establish a client outage: they retain ordinary retry
-cadence and do not trip a host breaker. They remain in local health telemetry,
-but are excluded from the expanding outage streak, including synthetic incomplete
-frame errors wrapping underlying DNS failures.
+Success and ambiguous transport failures reset the streak. Every DNS failure,
+whatever its errno (a Pi with its network down reports `EAI_NONAME` as readily as
+`EAI_AGAIN`), and every resolver timeout is local: it feeds the streak, never trips
+a host breaker and never advances the fallback chain.
 
 Closest-site off-air rechecks currently use `nexrad.nextCheckTs`/`nextCheckAt`
 and the discovery schedule, not a repair retry; they keep the measured off-air

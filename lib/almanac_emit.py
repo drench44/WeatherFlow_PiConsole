@@ -47,7 +47,7 @@ import pytz
 
 from lib.radar_geometry import (world_point, world_inverse, parse_center,
                                 circle_intersects_bounds, distance_meters)
-from lib.radar_http import failure_class, local_backoff_failure, RadarSession, is_transport_error, LocalTransportError
+from lib.radar_http import failure_class, RadarSession, is_transport_error, LocalTransportError
 from lib.radar_fetch import HostHealth, CircuitOpen, Attempt, AttemptCancelled, tile_race
 from lib.radar_discovery import DiscoverySchedule
 import logging
@@ -2074,7 +2074,7 @@ class AlmanacEmitter:
                         raise error
                     if error is not None:
                         if failure_class(error) != 'host':
-                            ctx[('local' if local_backoff_failure(error) else 'ambiguous')+'_failure'] = True
+                            ctx[failure_class(error)+'_failure'] = True
                         ctx['last_error'] = str(error)
                         ctx['missing_tiles'] = True
                     for _ in done:
@@ -2919,21 +2919,20 @@ class AlmanacEmitter:
         # The pass error is often a synthetic TimeoutError ("visible newest
         # incomplete"); the tile loop's per-class flags and the health counters
         # say what actually failed underneath it.
-        uncertain = health.uncertain_local_failures - ctx.get('uncertain_local_start', health.uncertain_local_failures)
-        truly_local = (local_backoff_failure(error) or ctx.get('local_failure')
-                       or health.local_failures - ctx.get('local_failure_start', health.local_failures) > uncertain)
-        ambiguous = (outcome == 'ambiguous' or ctx.get('ambiguous_failure') or uncertain > 0
+        truly_local = (outcome == 'local' or ctx.get('local_failure')
+                       or health.local_failures > ctx.get('local_failure_start', health.local_failures))
+        ambiguous = (outcome == 'ambiguous' or ctx.get('ambiguous_failure')
                      or health.ambiguous_failures > ctx.get('ambiguous_failure_start', health.ambiguous_failures))
-        local = outcome != 'host' or truly_local or ambiguous  # none may advance fallback
+        local = truly_local or ambiguous  # neither may advance the fallback chain
         if local:
             self._radar_transport_failures.pop(source, None)
         else:
             self._radar_transport_failures[source] = self._radar_transport_failures.get(source, 0)+1
-        # A dead route never opens a host breaker (HostHealth.record
+        # A dead route or resolver never opens a host breaker (HostHealth.record
         # returns before sampling), so without its own backoff a network outage
         # would rerun a doomed pass every two seconds for as long as it lasts.
         # The streak feeds _radar_local_backoff, the floor under EVERY scheduled
-        # radar retry. DNS uncertainty and ambiguous reused-socket failures may
+        # radar retry. Ambiguous failures (a reused socket that got no bytes) may
         # be the provider stalling, so they end the streak and keep 2 s.
         self._radar_local_failure_streak = self._radar_local_failure_streak+1 if truly_local else 0
         if not local and self._radar_transport_failures[source] >= 3:
@@ -3136,7 +3135,6 @@ class AlmanacEmitter:
                 for kind in ('local', 'ambiguous'):
                     ctx.pop(kind+'_failure', None)
                     ctx[kind+'_failure_start'] = getattr(self._radar_health, kind+'_failures')
-                ctx['uncertain_local_start'] = self._radar_health.uncertain_local_failures
                 ctx.pop('staging_source', None)
                 ctx['switch_reason'] = 'user source/zoom selection' if not same_mode else 'initial source selection'
                 if errors:

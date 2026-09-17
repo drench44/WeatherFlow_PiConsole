@@ -5,7 +5,7 @@ import socket
 import threading
 import time
 from urllib.parse import urlsplit
-from lib.radar_http import LocalTransportError, failure_class, local_backoff_failure
+from lib.radar_http import LocalTransportError, failure_class
 
 
 class CircuitOpen(OSError):
@@ -76,7 +76,6 @@ class HostHealth:
         self.hedge_events = deque()
         self.hedge_until = 0
         self.local_failures = 0
-        self.uncertain_local_failures = 0
         self.ambiguous_failures = 0
         self.last_success = None
         self.last_error = None
@@ -145,8 +144,6 @@ class HostHealth:
             if error is not None and failure_class(error) != 'host':
                 if failure_class(error) == 'local':
                     self.local_failures += 1
-                    if not local_backoff_failure(error):
-                        self.uncertain_local_failures += 1
                 else:
                     self.ambiguous_failures += 1
                 if probe:

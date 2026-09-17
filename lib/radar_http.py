@@ -36,11 +36,6 @@ class AmbiguousTransportError(socket.timeout):
 def failure_class(error):
     if isinstance(error, AmbiguousTransportError):
         return 'ambiguous'
-    # A permanent failure for one hostname is not evidence of a dead client
-    # route/resolver. Let repeated negative name answers try the other provider.
-    # Transient resolver failures still protect the host breaker as before.
-    if isinstance(error, socket.gaierror) and error.errno in {socket.EAI_NONAME, socket.EAI_FAIL}:
-        return 'host'
     if isinstance(error, (LocalTransportError, socket.gaierror)) or (
             isinstance(error, OSError) and error.errno in {
                 errno.ENETUNREACH, errno.EHOSTUNREACH, errno.ENETDOWN,
@@ -50,9 +45,13 @@ def failure_class(error):
 
 
 def local_backoff_failure(error):
-    """Health's local category also includes DNS uncertainty. Only definite
-    client transport/resource failures justify the expanding retry floor."""
-    return failure_class(error) == 'local' and not isinstance(error, (socket.gaierror, ResolverTimeout))
+    """Every local-class failure feeds the expanding retry floor, DNS included.
+    A resolver that cannot answer (gaierror of ANY errno: a Pi with its network
+    down reports EAI_NONAME, -2, not only EAI_AGAIN) is a client-side condition
+    far more often than a provider losing its name; treating it as a provider
+    failure flapped the fallback chain and tripled the log on Linux
+    (tests/test_radar_v62.py::test_simulated_outage_hour[Site])."""
+    return failure_class(error) == 'local'
 
 
 # Only active lookups are shared. A resolver that never returns occupies one of

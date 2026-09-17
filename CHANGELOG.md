@@ -51,9 +51,10 @@ to shared upstream code that the classic console benefits from too.
   newest-first under one age order, and never follows a symlinked cache root.
   A tile write prunes before creating its directory, since eviction could
   delete the destination. The acquisition deadline starts after the boot
-  scan wait. Discovery wakeups honour the local-failure floor. A permanent
-  DNS answer counts toward provider fallback; a transient one keeps the 2 s
-  cadence and never grows the outage streak. The page no longer treats the
+  scan wait. Discovery wakeups honour the local-failure floor. (The review
+  also reclassified permanent DNS answers as provider failures; on Linux that
+  turned a plain offline hour into 3,250 log lines and flapped the fallback
+  chain, so every DNS failure stays local and backs off.) The page no longer treats the
   engine's coverage camera as plate identity, keeps the target manifest
   through a pan during a switch, and finishes a blend before starting the
   next under a slow animation clock.
