@@ -1684,14 +1684,23 @@ class AlmanacEmitter:
                 self._radar_refresh = {k: v for k, v in self._radar_refresh.items()
                                        if k not in ('nextRetry', 'retryReason')}
 
+    def _radar_note_yield(self, error):
+        """ The pass log's error= names the yield that ended a pass: which
+        _RadarBudget/TimeoutError, with its text. _radar_budget_retry adds the
+        call site and the headroom asked for. """
+        with self._radar_lock:
+            if not self._radar_pass.get('error'):
+                self._radar_pass['error'] = f'deferred: {type(error).__name__}: {error}'
+
     def _radar_budget_retry(self, source, needed, min_delay=0, reason='budget'):
         if self._radar_pass["outcome"] != "failed":
             self._radar_pass["outcome"] = "deferred"
-            if not self._radar_pass.get("error"):
-                # Name the yield: a deferred pass with error=None hid a read-only
-                # cache for an evening and a 2 s one-request loop for an hour.
-                caller = sys._getframe(1)
-                self._radar_pass["error"] = f'deferred: {reason} needed={needed} at={caller.f_code.co_name}:{caller.f_lineno}'
+            # Name the yield: a deferred pass with error=None hid a read-only
+            # cache for an evening and a 2 s one-request loop for an hour.
+            caller = sys._getframe(1)
+            where = f'{reason} needed={needed} at={caller.f_code.co_name}:{caller.f_lineno}'
+            error = self._radar_pass.get("error")
+            self._radar_pass["error"] = f'{error} ({where})' if error and error.startswith('deferred:') else error or f'deferred: {where}'
         delay = max(min_delay, self._radar_headroom_delay(source, needed), self._radar_local_backoff())
         # Build/deadline yields with free transport resume on the next watcher.
         delay = delay if delay > 0 else 2
@@ -2672,6 +2681,7 @@ class AlmanacEmitter:
                         except (TimeoutError, _RadarBudget) as error:
                             retry_reason = 'deadline' if isinstance(error, TimeoutError) else 'budget'
                             deferred = True
+                            self._radar_note_yield(error)
                             break
                         if frame['complete']:
                             frames[t] = frame
@@ -2681,6 +2691,7 @@ class AlmanacEmitter:
             except (TimeoutError, _RadarBudget) as error:
                 retry_reason = 'deadline' if isinstance(error, TimeoutError) else 'budget'
                 deferred = True
+                self._radar_note_yield(error)
                 view_delay = self._radar_deep_view_delay(ctx) if ctx.get('deep_history') else 0
             finally:
                 ctx.pop('deep_history', None)
