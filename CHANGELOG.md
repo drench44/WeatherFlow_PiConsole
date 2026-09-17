@@ -6,6 +6,18 @@ to shared upstream code that the classic console benefits from too.
 
 ## 2026-09-16
 
+### Restart
+- **Nobody is stranded by a restart.** For about a minute after every engine
+  restart the Radar tab vanished (the boot scan had no result yet, so the engine
+  said "unavailable"), a user on the radar screen was bounced to Observations,
+  and every observation blinked to a dash for six seconds before the first live
+  reading. The engine now publishes `radar.starting` with its phase and tile
+  count, the page keeps the tab and shows "Starting · checking N saved tiles",
+  and it infers the same state when an older engine restarts underneath it. The
+  page carries the last known observations through the gap with their real age,
+  and keeps them in the browser so a full reboot shows the last known weather,
+  aged, instead of dashes.
+
 ### Tools
 - **A CDP probe for the live kiosk** lives at `design/almanac/kiosk/tools/cdp_probe.py`:
   run on the Pi, it evaluates a JavaScript expression in the panel's Chromium over

@@ -590,6 +590,8 @@
   .rad-over { z-index: 2; }
   .rad-echo[hidden], #rad-nexrad-row[hidden], .tab[hidden] { display: none; }
   .rad-plate[data-state="stale"] .rad-echo { opacity: .66; }
+  .rad-plate[data-state="starting"] .rad-echo, .rad-plate[data-state="starting"] .rad-over { opacity: 0; }
+  #rad-status[data-state="starting"] { color: var(--ink-soft); }
   #rad-status[data-state="stale"] { color: var(--accent); }
   .rad-attrib { position: absolute; right: 12px; bottom: 9px; z-index: 2;
     font: 11.5px var(--sans); color: var(--ink-soft); }
@@ -3197,7 +3199,17 @@
     if(!Object.keys(radarBaseStyle).length)radarResolveStyle();radarCameraDirty=true;radarOverlayBuild();radarGeoRequest();radarPreload(radarView.data);radarZoomRender();radarPostIntent();radarWake();
     if(!radarSiteTable.length)fetch(radarView.data.geo.sites).then(r=>r.ok?r.json():[]).then(s=>{radarSiteTable=s.filter(p=>/^[A-Z0-9]{4}$/.test(p.id)&&isNum(p.lat)&&isNum(p.lon));if(radarGesture.state==='idle')radarOverlayBuild();radarSourceRender();}).catch(()=>{});
   }
-  function renderRadar(d){radarPumpBlocked=null;var r=d.radar,tab=document.querySelector('.tab[data-screen="s-radar"]');tab.hidden=!(r&&r.available);document.querySelector('.page').dataset.radarAlerts=d.alerts&&d.alerts.length?'on':'off';if(tab.hidden){radarRelease();radarView.data=null;if($('s-radar').classList.contains('active'))activate('s-obs');return;}
+  // A booting engine has no radar result yet; that is not "no radar here". The
+  // engine says so (radar.starting), and the page infers it for an engine that
+  // restarts underneath it: the tab stays, the screen says what is happening,
+  // and nobody is bounced off the radar they were looking at.
+  function radarStartingRender(r){var s=r.starting||{};var status=$('rad-status');status.dataset.state='starting';status.textContent='Starting';$('rad-plate').dataset.state='starting';
+    $('rad-src-cap').textContent=s.phase==='cache'?'Radar is starting \u00b7 checking '+(s.cacheFiles||0).toLocaleString()+' saved tiles \u00b7 about a minute after a restart':'Radar is starting \u00b7 fetching the first scan';
+    var note=$('rad-note');note.textContent='';note.dataset.shown='false';$('rad-loop').hidden=true;$('rad-zoom').hidden=true;}
+  function renderRadar(d){radarPumpBlocked=null;var r=d.radar,tab=document.querySelector('.tab[data-screen="s-radar"]');if(r&&r.available)radarView.everAvailable=true;
+    var starting=!!(r&&!r.available&&(r.starting||(radarView.everAvailable&&r.reason==='no data yet')));
+    tab.hidden=!(r&&(r.available||starting));document.querySelector('.page').dataset.radarAlerts=d.alerts&&d.alerts.length?'on':'off';if(tab.hidden){radarRelease();radarView.data=null;if($('s-radar').classList.contains('active'))activate('s-obs');return;}
+    if(starting){if(radarView.data||radarView.loaded.length)radarRelease();radarView.data=null;radarStartingRender(r);return;}
 
     radarView.payloadTs=d.ts;radarView.refresh=r.refresh||{state:'idle'};
     var darkRefusal=r.refresh?.reason==='not reporting'&&r.refresh?.intent?.session===radarIntent.session&&r.refresh?.intent?.generation===radarIntent.generation;
@@ -3401,7 +3413,42 @@
     }
   }
 
+  /* An engine that has just restarted publishes for ~20 s before its first
+     observation arrives: every value null, obsTs null. Carry the last known
+     values forward with their REAL age (obsTs stays the old one) so the panel
+     never blinks to dashes; the freshness mark decides how to flag them. The
+     last good frame is also kept in localStorage (one write a minute, radar and
+     series stripped) so a full reboot shows the last known weather, marked by
+     its age, until the first live observation lands. Bounded to six hours. */
+  var CARRY_MAX_SEC = 6 * 3600, CARRY_STORE_MS = 60000;
+  var carried = { data: null, storedAt: 0 };
+  function carryStrip(d) {
+    var out = {};
+    for (var k in d) if (k !== "radar" && k !== "alerts" && k !== "fcHourly" && k !== "slpSeries" && k !== "aqiForecast") out[k] = d[k];
+    return out;
+  }
+  function carryLoad() {
+    try { var raw = localStorage.getItem("wxLastGood"); return raw ? JSON.parse(raw) : null; } catch (e) { return null; }
+  }
+  function carryForward(data) {
+    if (!data) return data;
+    if (isNum(data.obsTs)) {
+      carried.data = data;
+      var now = Date.now();
+      if (now - carried.storedAt > CARRY_STORE_MS) { carried.storedAt = now; try { localStorage.setItem("wxLastGood", JSON.stringify(carryStrip(data))); } catch (e) {} }
+      return data;
+    }
+    var last = carried.data || (carried.data = carryLoad());
+    if (!last || !isNum(last.obsTs)) return data;
+    var age = (isNum(data.ts) ? data.ts : Date.now() / 1000) - last.obsTs;
+    if (age < 0 || age > CARRY_MAX_SEC) return data;
+    var out = Object.assign({}, data);
+    for (var k in last) if (out[k] == null && last[k] != null && k !== "radar" && k !== "alerts") out[k] = last[k];
+    out.obsTs = last.obsTs; out.obsAgeSec = Math.round(age); out.carried = true;
+    return out;
+  }
   function render(data) {
+    data = carryForward(data);
     lastData = data;
     renderText(data);
     renderDerived(data);

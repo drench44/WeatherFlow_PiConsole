@@ -256,6 +256,11 @@ The radar engine reports its own health at `/health` under `radar`:
 - `discovery`, `pending`, `phases`, `requests`: the acquisition schedule and the
   last 128 requests.
 
+After a restart the Radar tab stays and reads "Starting · checking N saved
+tiles" until the first pass publishes, about a minute on the Pi 4; the other
+panels carry the last known observations, marked by their age, until the first
+live reading arrives.
+
 The engine logs one summary line per radar pass (`radar pass outcome=...`); a
 pass that yields on an internal budget says `error=deferred: <reason>`. On the
 Pi 4 kiosk the engine log is `/tmp/almanac_data.log` and the tile cache lives

@@ -174,6 +174,30 @@ its next poll only after `render()` returned, and the server credits that mark o
 from a loopback client. The launcher's watchdog reads `renders`, because a request
 count never proved anything reached the screen.
 
+## Radar starting state and observation carry-forward (2026-09-16)
+
+`radar.starting` is `null` whenever the engine has a radar result or a conclusive
+failure. While the engine has produced neither, because it is booting, it is an
+object: `{phase: "cache" | "acquire", sinceSec, cacheFiles}`. `cache` means the
+tile inventory is still being validated (about 200 tiles a second on the Pi 4;
+`cacheFiles` grows as it goes); `acquire` means the first pass is under way. The
+state ends after `RADAR_STARTING_MAX_SEC` (300 s) whatever happened, after which
+`available: false` means what it always did.
+
+The page shows the Radar tab when `available` OR `starting`; in the starting
+state it shows an empty plate with "Starting" and a caption naming the phase,
+and never leaves the radar screen on the user's behalf. A page that has seen
+`available: true` in its lifetime treats a later `available: false, reason: "no
+data yet"` as starting even from an engine that predates this field.
+
+An engine that has just restarted publishes for ~20 s with every observation null
+and `obsTs: null`. The page carries the last frame that had `obsTs` forward: null
+fields take the last known value, `obsTs` stays the OLD one and `obsAgeSec` is
+recomputed, so the existing freshness mark ("stale"/"silent") judges the carried
+values by their real age. The last good frame (minus radar, alerts and series) is
+kept in `localStorage` at most once a minute so a full reboot shows the last known
+weather, aged, until the first live observation. Carry-forward stops at six hours.
+
 ## Radar v5.7 — ordered intent and bounded acquisition
 
 This section is normative for fetch scheduling, intent, publication and switch

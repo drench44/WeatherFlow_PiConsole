@@ -73,6 +73,7 @@ FORECAST_CHECK_INTERVAL = 3600 # seconds (1 h) — the daily outlook barely move
 FORECAST_RETRY_SEC      = 120  # seconds — boot retry cadence until the FIRST forecast succeeds
 RADAR_FAILURE_LOG_SEC = 5 * DiscoverySchedule.BACKOFF  # ten-minute outage reminders
 RADAR_RETRY_SEC = 120
+RADAR_STARTING_MAX_SEC = 300  # after this, a radar that never produced a result is unavailable, not starting
 RADAR_LOCAL_RETRY_MAX_SEC = 60  # ceiling for the doubling retry after consecutive local failures
 RADAR_HISTORY_SEC = 3600
 RADAR_IEM_FRAME_INTERVAL_SEC = 120
@@ -1048,6 +1049,7 @@ class AlmanacEmitter:
         from lib.radar_cache import TileInventory
         self._radar_disk_inventory = TileInventory(RADAR_DIR)  # caps sized to the disk it lives on
         self._radar_cache_ready = _Event()
+        self._radar_boot_mono = time.monotonic()  # the 'starting' state is bounded from here
         self._radar_cache_thread = None
         self._radar_manifest_cache = OrderedDict()
         self._radar_bad_stamp = None
@@ -1321,6 +1323,21 @@ class AlmanacEmitter:
                 # Refresh intent/prefetch knowledge even though no build runs.
                 self._radar_newest[(source, None)] = (time.monotonic(), validated)
             raise _RadarUnchanged()
+
+    def _radar_starting(self, snap):
+        """ The engine has no radar result yet because it is still booting: the
+        tile cache is being validated (about 200 tiles/s on the Pi 4) or the first
+        pass has not concluded. Distinct from "no radar here": the page keeps the
+        Radar tab and says so instead of hiding it. None once a result or a
+        conclusive failure exists, or after RADAR_STARTING_MAX_SEC. """
+        if snap.available or snap.reason != 'no data yet':
+            return None
+        since = time.monotonic() - self._radar_boot_mono
+        if since > RADAR_STARTING_MAX_SEC:
+            return None
+        scanning = not self._radar_cache_ready.is_set()
+        return dict(phase='cache' if scanning else 'acquire', sinceSec=int(since),
+                    cacheFiles=len(self._radar_disk_inventory))
 
     def _radar_health_payload(self):
         health = self._radar_health.snapshot()
@@ -4204,6 +4221,7 @@ class AlmanacEmitter:
 
         payload = {
             'radar': dict(self._radar_payload(radar_snap, now, tz, radar_refresh, style),
+                          starting=self._radar_starting(radar_snap),
                           health=self._radar_health_payload()),
             'ts':      int(now),                     # engine heartbeat ONLY - see obsAgeSec
             'obsTs':     int(obs_ts) if obs_ts is not None else None,
