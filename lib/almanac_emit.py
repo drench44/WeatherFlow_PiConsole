@@ -271,6 +271,26 @@ class _RainWindow:
         return round(max(float(rate_mm_hr), mean), 4)
 
 
+def _clock_style(config):
+    """ '12 hr' or '24 hr': the upstream Display/TimeFormat setting, which the
+    sunrise/moonrise, observation extremes, forecast and Sager modules already
+    follow. Everything the emitter formats itself must follow the same one. """
+    return '12 hr' if _cfg(config, 'Display', 'TimeFormat') == '12 hr' else '24 hr'
+
+
+def _clock(dt, style, sparse=False):
+    """ One station-local clock string. 12 hr: "5:13 PM", or "5 PM" on the hour
+    when sparse (labels such as "until Wed 5 PM"). 24 hr: "17:13" ("17:00" when
+    sparse). Portable: no %-I / %#I. """
+    if style != '12 hr':
+        return dt.strftime('%H:%M')
+    hour12 = dt.hour % 12 or 12
+    ampm = 'AM' if dt.hour < 12 else 'PM'
+    if sparse and dt.minute == 0:
+        return f'{hour12} {ampm}'
+    return f'{hour12}:{dt.minute:02d} {ampm}'
+
+
 def _cfg(config, section, option, default=None):
     """ Safely read a Kivy ConfigParser value. Kivy's ConfigParser needs BOTH
     section and option to .get() (subscripting a section internally calls the
@@ -3255,14 +3275,14 @@ class AlmanacEmitter:
                 self._radar_session = None
 
     @staticmethod
-    def _radar_payload(snap, now, tz, refresh=None):
+    def _radar_payload(snap, now, tz, refresh=None, style='24 hr'):
         refresh = dict(refresh or dict(state='idle', frameIndex=0, frameTotal=0))
         retry = refresh.get('nextRetry')
         if not isinstance(retry, (int, float)) or not math.isfinite(retry) or retry <= now:
             refresh.pop('nextRetry', None)
             refresh.pop('retryReason', None)
         def local(ts):
-            return datetime.fromtimestamp(ts,tz).strftime('%H:%M') if ts is not None else None
+            return _clock(datetime.fromtimestamp(ts,tz), style) if ts is not None else None
         complete = [f['ts'] for f in snap.frames if f['complete']]
         gaps = [b-a for a,b in zip(complete,complete[1:]) if b>a]
         age = int(now-snap.ts_frame) if snap.ts_frame is not None else None
@@ -3694,7 +3714,7 @@ class AlmanacEmitter:
                 aqi = int(round(aqi))
                 series, peak, peak_time, trend, trend_text, fc_cat = \
                     self._aqi_forecast_summary(data.get('hourly') or {}, time.time(),
-                                               self._station_tz(config), aqi)
+                                               self._station_tz(config), aqi, _clock_style(config))
                 self._aqi_result = _AqiResult(aqi, self._aqi_cat(aqi), _num(cur.get('pm2_5')),
                                               time.time(), series, peak, peak_time,
                                               fc_cat, trend, trend_text)
@@ -3702,14 +3722,12 @@ class AlmanacEmitter:
             Logger.warning(f'almanac_emit: air-quality fetch failed - {error}')
 
     @staticmethod
-    def _hour_label(dt):
-        """ "5 PM" / "5:30 PM" from a datetime. Portable (avoids the non-BSD %-I). """
-        hour12 = dt.hour % 12 or 12
-        ampm = 'AM' if dt.hour < 12 else 'PM'
-        return f'{hour12} {ampm}' if dt.minute == 0 else f'{hour12}:{dt.minute:02d} {ampm}'
+    def _hour_label(dt, style='12 hr'):
+        """ "5 PM" / "5:30 PM" (12 hr) or "17:00" / "17:30" (24 hr) from a datetime. """
+        return _clock(dt, style, sparse=True)
 
     @staticmethod
-    def _aqi_forecast_summary(hourly, now, tz, aqi_now):
+    def _aqi_forecast_summary(hourly, now, tz, aqi_now, style='12 hr'):
         """ From Open-Meteo hourly us_aqi (local-naive ISO times + the station tz),
         build the next-hours series, the 6 h peak, and a rising/falling/steady
         trend (5-AQI deadband, band-crossing required). Pure; never raises.
@@ -3739,7 +3757,7 @@ class AlmanacEmitter:
         window = [(e, d, v) for (e, d, v) in future if e is None or e <= now + 6 * 3600] or future
         _, peak_dt, peak = max(window, key=lambda x: x[2])
         peak_cat  = AlmanacEmitter._aqi_cat(peak)
-        peak_time = AlmanacEmitter._hour_label(peak_dt)
+        peak_time = AlmanacEmitter._hour_label(peak_dt, style)
         base = aqi_now if aqi_now is not None else future[0][2]
         low  = min(v for (_, _, v) in future)
         if peak - base >= 5 and peak_cat != AlmanacEmitter._aqi_cat(base):
@@ -3882,15 +3900,15 @@ class AlmanacEmitter:
         return dt.timestamp()
 
     @staticmethod
-    def _until_text(epoch, tz):
-        """ Glanceable station-local end time, e.g. "Wed 5 PM". None if unknown. """
+    def _until_text(epoch, tz, style='12 hr'):
+        """ Glanceable station-local end time, "Wed 5 PM" or "Wed 17:00". None if unknown. """
         if epoch is None or tz is None:
             return None
         try:
             dt = datetime.fromtimestamp(epoch, tz)
         except (ValueError, OSError, OverflowError):
             return None
-        return f"{dt.strftime('%a')} {AlmanacEmitter._hour_label(dt)}"
+        return f"{dt.strftime('%a')} {AlmanacEmitter._hour_label(dt, style)}"
 
     @staticmethod
     def _split_counties(area_desc):
@@ -3930,6 +3948,7 @@ class AlmanacEmitter:
         classify by product level, COLLAPSE identical events (union of counties,
         soonest end), sort by level then soonest end, cap the count. Pure given its
         inputs (no network); never raises. """
+        style = _clock_style(getattr(self.app, 'config', {}) or {})
         groups = {}
         for prop in feats:
             end = prop.get('ends') or prop.get('expires')
@@ -3944,7 +3963,7 @@ class AlmanacEmitter:
                 'level': level_name, 'tone': self._alert_tone(event, level), 'priority': level,
                 'short': self._extract_reason(prop.get('description')),
                 'onset': self._to_epoch(prop.get('onset')),
-                'until': expires, 'untilText': self._until_text(expires, tz),
+                'until': expires, 'untilText': self._until_text(expires, tz, style),
                 'headline': (prop.get('headline') or '')[:160],
                 '_areaset': self._split_counties(prop.get('areaDesc') or ''),
             }
@@ -4073,6 +4092,7 @@ class AlmanacEmitter:
         config = getattr(self.app, 'config', {})    or {}
 
         tz = self._station_tz(config)
+        style = _clock_style(config)
         now_local = datetime.now(pytz.utc).astimezone(tz) if tz else datetime.now()
 
         sunrise_txt = _text(_idx(Astro.get('Sunrise'), 1))
@@ -4156,7 +4176,7 @@ class AlmanacEmitter:
                   else self._process_alerts(alerts_snap.features, now, tz))
 
         payload = {
-            'radar': dict(self._radar_payload(radar_snap, now, tz, radar_refresh),
+            'radar': dict(self._radar_payload(radar_snap, now, tz, radar_refresh, style),
                           health=self._radar_health_payload()),
             'ts':      int(now),                     # engine heartbeat ONLY - see obsAgeSec
             'obsTs':     int(obs_ts) if obs_ts is not None else None,
@@ -4167,7 +4187,7 @@ class AlmanacEmitter:
             'latestVersion':   ver_snap.latest,
             'currentVersion':  ver_snap.current,
             'date':    now_local.strftime('%a, %d %b %Y'),
-            'time':    now_local.strftime('%H:%M'),
+            'time':    _clock(now_local, style),
             # station-local midnight as an epoch: the hero curve maps hourly epochs
             # onto the day's axis with this, exact to the second (HH:MM cannot be)
             'dayStartTs': int(now_local.replace(hour=0, minute=0, second=0, microsecond=0).timestamp()),
@@ -4274,7 +4294,7 @@ class AlmanacEmitter:
             'alertCount':  len(alerts),
             'alertsStale': (alerts_snap.ts is None) or (now - alerts_snap.ts) > ALERT_STALE_SEC,
             'alertsAgeSec': _age_sec(alerts_snap.ts, now),
-            'alertsAsOf':  (datetime.fromtimestamp(alerts_snap.ts, tz).strftime('%H:%M')
+            'alertsAsOf':  (_clock(datetime.fromtimestamp(alerts_snap.ts, tz), style)
                             if (alerts_snap.ts and tz) else None),
 
             # Moon

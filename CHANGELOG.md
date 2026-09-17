@@ -6,6 +6,17 @@ to shared upstream code that the classic console benefits from too.
 
 ## 2026-09-16
 
+### Clock
+- **One clock format everywhere, and it is 12-hour unless you say otherwise.**
+  The masthead clock, alert timestamps and radar check times were hardcoded
+  24-hour while the AQI peak hour and an alert's "until Wed 5 PM" were hardcoded
+  12-hour, so every console showed a mix whatever `Display/TimeFormat` said.
+  Everything the emitter formats now follows that setting, the same one the
+  sunrise, observation-extreme, forecast and Sager modules already follow, and
+  the page derives a missing frame label in the payload's own style. The fork's
+  default for a fresh install is `12 hr`; an existing `wfpiconsole.ini` keeps
+  whatever it says.
+
 ### Radar
 - **A full tile cache is trimmed at boot, never frozen.** The Pi 4 rebooted
   with a full cache: 8,000 tiles, exactly where the running prune keeps it.

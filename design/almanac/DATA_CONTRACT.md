@@ -138,7 +138,11 @@ the HTML shows an em-dash for null. Emitter converts from the app's
 }
 ```
 
-Rules: numbers are numbers (HTML formats). Times are `"HH:MM"` strings. Angles/fractions
+Rules: numbers are numbers (HTML formats). Clock strings follow the console's
+`Display/TimeFormat`: `"HH:MM"` on a 24 hr console, `"H:MM AM"` / `"H:MM PM"` on a
+12 hr one (labels such as `untilText` and `aqiPeakTime` drop `:00` on the hour:
+`"Wed 5 PM"`). Every clock string in the payload, whether the upstream modules or
+the emitter formatted it, uses the same setting; the page parses both forms. Angles/fractions
 are numeric so the HTML can drive SVG geometry. The HTML treats any `null`/missing key as
 an em-dash and leaves that gauge at a neutral position. The emitter must never write a
 partial/invalid file (write to a temp path + atomic rename).

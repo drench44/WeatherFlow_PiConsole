@@ -886,7 +886,7 @@ def default_config_file():
                                                          ('Distance',              {'type': 'request',   'source': 'observation',     'desc': 'station distance units',       'value': 'km'}),
                                                          ('Other',                 {'type': 'request',   'source': 'observation',     'desc': 'station other units',          'value': 'metric'})])
     config['Display'] =         collections.OrderedDict([('description',           '  Display settings'),
-                                                         ('TimeFormat',            {'type': 'default',   'value': '24 hr',            'desc': 'time format'}),
+                                                         ('TimeFormat',            {'type': 'default',   'value': '12 hr',            'desc': 'time format'}),
                                                          ('DateFormat',            {'type': 'default',   'value': 'Mon, 01 Jan 0000', 'desc': 'date format'}),
                                                          ('UpdateNotification',    {'type': 'default',   'value': '1',                'desc': 'update notification toggle'}),
                                                          ('LayoutStyle',           {'type': 'default',   'value': 'classic',          'desc': 'display layout style (classic|almanac)'}),
