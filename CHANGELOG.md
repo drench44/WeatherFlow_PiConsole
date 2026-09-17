@@ -7,6 +7,12 @@ to shared upstream code that the classic console benefits from too.
 ## 2026-09-16
 
 ### Clock
+- **A clock string never breaks.** "7:13 PM" wrapped the masthead onto two
+  lines and "Clear until 1 AM" orphaned its "AM". Every meridiem now follows a
+  no-break space, in the emitter's own strings and in the upstream ones it
+  republishes (sunrise, moon, extremes, forecast hour, conditions, Sager), the
+  masthead sets the meridiem small beside the hour, and the lightning flag no
+  longer reserves its width while hidden.
 - **One clock format everywhere, and it is 12-hour unless you say otherwise.**
   The masthead clock, alert timestamps and radar check times were hardcoded
   24-hour while the AQI peak hour and an alert's "until Wed 5 PM" were hardcoded

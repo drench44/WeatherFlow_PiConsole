@@ -214,7 +214,7 @@ def test_aqi_publishes_one_complete_snapshot(make_emitter, monkeypatch):
         {'current': {'us_aqi': 20, 'pm2_5': 3.1}, 'hourly': {}}))
 
     stale = ae._AqiResult(160, 'Unhealthy', 31.0, time.time(), (),
-                          160, '5 PM', 'Unhealthy', 'rising', 'Unhealthy by 5 PM')
+                          160, '5\u00a0PM', 'Unhealthy', 'rising', 'Unhealthy by 5\u00a0PM')
     emitter = make_emitter(scn.all_none(), _aqi_result=stale)
 
     mid_fetch = []

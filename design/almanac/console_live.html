@@ -136,6 +136,9 @@
   .mast-station { font-size: 26px; letter-spacing: 0.34em; text-transform: uppercase; text-align: center; padding-left: 0.34em; }
   .mast-station .sub { display: block; font-family: var(--sans); font-size: 13.5px; letter-spacing: 0.30em; color: var(--ink-soft); margin-top: 3px; padding-left: 0.05em; }
   .mast-clock { font-size: 30px; font-weight: 800; width: 250px; display: flex; justify-content: flex-end; align-items: center; gap: 14px; font-variant-numeric: tabular-nums; letter-spacing: 0.02em; }
+  .mast-clock [data-k="time"] { white-space: nowrap; flex: 0 0 auto; }
+  .mast-clock .ampm { font-size: 0.5em; font-weight: 700; letter-spacing: 0.10em; margin-left: 0.22em; vertical-align: 0.06em; color: var(--ink-soft); }
+  .mast-flag:not(.on) { width: 0; gap: 0; overflow: hidden; }
   .mast-flag { display: inline-flex; align-items: center; gap: 6px; font-family: var(--sans);
     font-size: 12.5px; letter-spacing: 0.16em; text-transform: uppercase; color: var(--brass);
     opacity: 0; transition: opacity 0.7s ease; }
@@ -1678,6 +1681,10 @@
         node.innerHTML = '<span class="ai">' + ip + '</span><span class="af">' + fp + '</span>';
         return;
       }
+      if (k === "time" && node.closest(".mast-clock")) {   // masthead: "7:13" with a small "PM"
+        var md = /^(.+?)\u00a0([AP]M)$/.exec(out);
+        if (md) { node.textContent = md[1]; var am = document.createElement("small"); am.className = "ampm"; am.textContent = md[2]; node.append(am); return; }
+      }
       node.textContent = out;
     });
   }
@@ -2285,7 +2292,7 @@
       if (!/[ap]m/i.test(data.time || ""))
         return (hh < 10 ? "0" : "") + hh + ":" + (mm < 10 ? "0" : "") + mm;
       var h12 = hh % 12 || 12;
-      return h12 + (mm ? ":" + (mm < 10 ? "0" : "") + mm : "") + (hh < 12 ? " AM" : " PM");
+      return h12 + (mm ? ":" + (mm < 10 ? "0" : "") + mm : "") + (hh < 12 ? "\u00a0AM" : "\u00a0PM");
     }
     function fcLabel(o, above) {
       var ox = X(o.h), x = ox, a = "middle";
@@ -3064,7 +3071,7 @@
     // Older payloads without per-frame labels: derive from observedAt in observedAt's own clock style (12 or 24 hr).
     var m=(Math.round(h*60)-Math.round((r.observedTs-fr.ts)/60)+1440)%1440,hh=Math.floor(m/60),mm=String(m%60).padStart(2,'0');
     if(!/[ap]m/i.test(r.observedAt))return String(hh).padStart(2,'0')+':'+mm;
-    return (hh%12||12)+':'+mm+(hh<12?' AM':' PM');}
+    return (hh%12||12)+':'+mm+(hh<12?'\u00a0AM':'\u00a0PM');}
   function radarCouldLoop(){var ready=radarPlayback(),total=Math.min(8,Math.max(radarView.loaded.length,radarView.data.frameCount||0,radarView.data.refresh?.frameTotal||0))||8;return radarView.active&&!document.hidden&&ready.length>=(radarView.cycle.length?2:Math.min(4,total))&&ready.length>=2&&ready.every(f=>f.bitmap)&&ready.some(f=>f.hasEcho)&&!radarView.data.stale;}
   function radarLoopSync(){if(radarView.paused||radarReduced()&&!radarView.singleSweep){radarView.cycle=[];radarPruneFrames();}var r=radarView.data,ready=radarPlayback(),play=$('rad-play'),loop=$('rad-loop');if(!r||!radarView.active){loop.hidden=true;return;}
     loop.hidden=false;var intent=!radarView.paused&&(!radarReduced()||radarView.singleSweep);play.hidden=false;play.disabled=false;play.textContent=intent?'❙❙':'▶';play.setAttribute('aria-label',intent?'Pause radar loop':'Play radar loop');$('rad-track').dataset.frames=ready.length?'1':'0';

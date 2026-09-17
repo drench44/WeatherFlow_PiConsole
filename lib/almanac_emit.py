@@ -286,17 +286,20 @@ def _clock(dt, style, sparse=False):
         return dt.strftime('%H:%M')
     hour12 = dt.hour % 12 or 12
     ampm = 'AM' if dt.hour < 12 else 'PM'
+    # A no-break space: "1 AM" must never orphan its meridiem on the next line.
     if sparse and dt.minute == 0:
-        return f'{hour12} {ampm}'
-    return f'{hour12}:{dt.minute:02d} {ampm}'
+        return f'{hour12}\u00a0{ampm}'
+    return f'{hour12}:{dt.minute:02d}\u00a0{ampm}'
 
 
 def _clock_case(text):
-    """ Upstream's Sager module writes "6:53 pm" (%P); every other clock string
-    says "PM". One case for the page. None and non-clock text pass through. """
+    """ Upstream clock strings: Sager writes "6:53 pm" (%P) where every other
+    string says "PM", and all of them put a breaking space before the meridiem
+    ("Clear until 1 / AM on Saturday"). One case and a no-break space for the
+    page. None and non-clock text pass through. """
     if not isinstance(text, str):
         return text
-    return re.sub(r'\b([ap]m)\b', lambda m: m.group(1).upper(), text)
+    return re.sub(r'(\d) ([AaPp][Mm])\b', lambda m: m.group(1)+'\u00a0'+m.group(2).upper(), text)
 
 
 def _cfg(config, section, option, default=None):
@@ -4118,8 +4121,8 @@ class AlmanacEmitter:
         style = _clock_style(config)
         now_local = datetime.now(pytz.utc).astimezone(tz) if tz else datetime.now()
 
-        sunrise_txt = _text(_idx(Astro.get('Sunrise'), 1))
-        sunset_txt  = _text(_idx(Astro.get('Sunset'), 1))
+        sunrise_txt = _clock_case(_text(_idx(Astro.get('Sunrise'), 1)))
+        sunset_txt  = _clock_case(_text(_idx(Astro.get('Sunset'), 1)))
         sun_frac, daylight_txt, till_sunset_txt = self._sun_fraction(sunrise_txt, sunset_txt, now_local, tz)
 
         rapid_dir = Obs.get('rapidDir')
@@ -4223,18 +4226,18 @@ class AlmanacEmitter:
             'tempTrendPerHr':  _num(_idx(Obs.get('outTempTrend'), 0)),
             'temp24hDelta':    _num(_idx(Obs.get('outTempDiff'), 0)),
             'obsLow':          _num(_idx(Obs.get('outTempMin'), 0)),
-            'obsLowTime':      _text(_idx(Obs.get('outTempMin'), 2)),
+            'obsLowTime':      _clock_case(_text(_idx(Obs.get('outTempMin'), 2))),
             'obsHigh':         _num(_idx(Obs.get('outTempMax'), 0)),
-            'obsHighTime':     _text(_idx(Obs.get('outTempMax'), 2)),
+            'obsHighTime':     _clock_case(_text(_idx(Obs.get('outTempMax'), 2))),
             'fcLow':           fc_low,
             'fcHigh':          fc_high,
             'humidity':        _num(_idx(Obs.get('Humidity'), 0)),
             'dewPoint':        _num(_idx(Obs.get('DewPoint'), 0)),
 
             # Conditions / short-term forecast
-            'conditions':      _text(Met.get('Conditions')),
+            'conditions':      _clock_case(_text(Met.get('Conditions'))),
             'conditionsNote':  self._tomorrow_hint(fc_rows),   # "Rain tomorrow" etc; None on quiet days
-            'fcHour':          _text(Met.get('Valid')),
+            'fcHour':          _clock_case(_text(Met.get('Valid'))),
             'fcWind':          fc_wind,
             'fcPrecipPct':     _num(_idx(Met.get('PrecipPercnt'), 0)),
             'fcDailyPct':      _num(_idx(Met.get('PrecipDay'), 0)),
@@ -4263,9 +4266,9 @@ class AlmanacEmitter:
             'slpTrendPerHr':  _num(_idx(Obs.get('SLPTrend'), 0)),
             'slpTrendDesc':   _text(_idx(Obs.get('SLPTrend'), 2)),
             'slp24High':      _num(_idx(Obs.get('SLPMax'), 0)),
-            'slp24HighTime':  _text(_idx(Obs.get('SLPMax'), 2)),
+            'slp24HighTime':  _clock_case(_text(_idx(Obs.get('SLPMax'), 2))),
             'slp24Low':       _num(_idx(Obs.get('SLPMin'), 0)),
-            'slp24LowTime':   _text(_idx(Obs.get('SLPMin'), 2)),
+            'slp24LowTime':   _clock_case(_text(_idx(Obs.get('SLPMin'), 2))),
             'slpOutlook':      self._OUTLOOK_COMPACT.get(
                                    _text(_idx(Obs.get('SLPTrend'), 3)) or '',
                                    _text(_idx(Obs.get('SLPTrend'), 3))),
@@ -4323,8 +4326,8 @@ class AlmanacEmitter:
             # Moon
             'moonPhase':  _text(_idx(Astro.get('Phase'), 1)),
             'moonIllum':  _num(_idx(Astro.get('Phase'), 2)),
-            'moonrise':   _text(_idx(Astro.get('Moonrise'), 1)),
-            'moonset':    _text(_idx(Astro.get('Moonset'), 1)),
+            'moonrise':   _clock_case(_text(_idx(Astro.get('Moonrise'), 1))),
+            'moonset':    _clock_case(_text(_idx(Astro.get('Moonset'), 1))),
             'nextFull':   _text(_idx(Astro.get('FullMoon'), 0)),
             'nextNew':    _text(_idx(Astro.get('NewMoon'), 0)),
 
