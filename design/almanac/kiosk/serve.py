@@ -254,19 +254,23 @@ def _camera_transaction(activity, params):
     if not re.fullmatch(r'[A-Za-z0-9-]{16,64}', session) or not re.fullmatch(r'[0-9]{1,9}', generation):
         return False
     generation = int(generation)
-    old = _read_radar_intent()
-    if _radar_owner is None:
-        _radar_owner = dict(session=old.get('session', ''), generation=old.get('generation', 0))
-    if generation == 0:
-        if params.get('radarClaim') == [_radar_owner['session']]:
-            _radar_owner = dict(session=session, generation=0)
-        return session == _radar_owner['session'] and _radar_owner['generation'] == 0
-    if session != _radar_owner['session'] or generation < _radar_owner['generation']:
-        return False
     heartbeat = params.get('radarHeartbeat', ['0'])[0]
     if not re.fullmatch(r'[0-9]{1,12}', heartbeat):
         return False
     heartbeat = int(heartbeat)
+    old = _read_radar_intent()
+    if _radar_owner is None:
+        _radar_owner = dict(session=old.get('session', ''), generation=old.get('generation', 0))
+    if generation == 0:
+        if session != _radar_owner['session'] and params.get('radarClaim') == [_radar_owner['session']]:
+            _radar_owner = dict(session=session, generation=0)
+        if session != _radar_owner['session'] or _radar_owner['generation'] != 0:
+            return False
+    elif session != _radar_owner['session'] or generation < _radar_owner['generation']:
+        return False
+    # Reload ownership is read-only for camera intent, but its activity still
+    # needs the same ordinal fence as committed generations. A delayed moving
+    # heartbeat must not overwrite a newer settled view during reconciliation.
     if heartbeat and heartbeat <= _radar_owner.get('heartbeat', 0):
         return False
     if params.get('radarCommit') == ['1']:

@@ -2796,7 +2796,7 @@
   function radarWrap(x,z){return ((x%2**z)+2**z)%2**z;}
   function radarGeoKey(z,x,y,version=radarView.data?.geo?.version,theme=radarBaseStyle.theme){return version+'/'+theme+'/'+z+'/'+radarWrap(x,z)+'/'+y;}
   function radarGeoRequest(idle=false) {
-    if(!radarView.active||!radarCamera||!radarView.data?.geo)return;
+    if(!radarView.active||document.hidden||!radarCamera||!radarView.data?.geo)return;
     var z=radarBasemapLevel(),seen=new Set(),wanted=[];radarGeoQueue=[];
     function want(t){var key=radarGeoKey(t.z,t.x,t.y);if(!seen.has(key)&&wanted.length<36){seen.add(key);wanted.push({...t,key,version:radarView.data.geo.version,theme:radarBaseStyle.theme});}}
     var visible=radarTileSet(radarCamera,z);visible.forEach(want);
@@ -2887,18 +2887,40 @@
     else{if(!radarAdmit(bytes)){tile.bitmap.close();return;}
       try{radarTiles.set(key,tile);}finally{radarUnreserve(bytes);}}
   }
+  function radarDropPendingSource(){
+    var pending=radarView.pendingSource;if(!pending)return;
+    radarCancelJobs();radarEchoEpoch++;radarCompositeJob=null;
+    for(var f of pending.frames)if(f.bitmap){f.bitmap.close();delete f.bitmap;}
+    radarView.pendingSource=null;radarView.transition=(radarView.transition||0)+1;
+  }
+  function radarStageSource(r,payloadTs){
+    // A source's newest stamp can advance during decode. Reconcile the whole
+    // window by immutable frame identity; geometry changes invalidate plates.
+    var pending=radarView.pendingSource;
+    if(pending&&radarWindowKey(pending.data)!==radarWindowKey(r)){radarDropPendingSource();pending=null;}
+    if(!pending){radarCancelJobs();radarCompositeJob=null;radarView.transition=(radarView.transition||0)+1;pending={frames:[]};}
+    var held=new Map(pending.frames.map(f=>[radarFrameKey(f),f]));
+    pending.frames=(r.tiles.frames||[]).slice(-8).map(f=>{
+      var identity={...f,sourceId:r.sourceId,revision:r.tiles.revision,smooth:!!r.tiles.smooth,remapRevision:r.tiles.remapRevision};
+      var key=radarFrameKey(identity),old=held.get(key);held.delete(key);return Object.assign(old||{},identity);
+    });
+    for(var f of held.values())if(f.bitmap){f.bitmap.close();delete f.bitmap;}
+    if(radarCompositeJob&&!pending.frames.includes(radarCompositeJob.f))radarCompositeJob=null;
+    pending.data=r;pending.payloadTs=payloadTs;pending.frame=pending.frames.at(-1);
+    radarView.pendingSource=pending;radarView.refresh=r.refresh||{state:'idle'};radarNoteRender();radarQueueTiles();
+  }
   function radarAcceptSource(){
     var pending=radarView.pendingSource;if(!pending)return;
-    var ready=pending.frames.filter(f=>f.bitmap);if(ready.length<Math.min(4,pending.frames.length))return;
+    var ready=pending.frames.filter(f=>f.bitmap);if(!ready.length||ready.length<Math.min(4,pending.frames.length))return;
     var next=pending.data;radarView.pendingSource=null;radarView.windowKey=null;radarView.blend=null;
     radarView.loaded.concat(radarView.retired).forEach(f=>{if(f.bitmap)f.bitmap.close();});
     radarView.loaded=pending.frames;radarView.readyFrames=ready;radarView.cycle=[];radarView.retired=[];radarView.started=false;radarView.nextAt=0;
-    radarView.good=radarView.current=pending.frames.at(-1);radarCompositeJob=null;
+    radarView.good=pending.frames.at(-1);radarView.current=ready.at(-1);radarCompositeJob=null;
     radarView.acceptingSource=true;renderRadar({radar:next,ts:pending.payloadTs});radarView.acceptingSource=false;
     radarCameraDirty=true;radarBaseDirty=true;radarEchoDirty=true;radarTrace('fourDecoded');radarWake();
   }
   function radarQueueTiles() {
-    radarTileQueue=[];if(!radarView.active||!radarCamera||!radarView.good)return;
+    radarTileQueue=[];if(!radarView.active||document.hidden||!radarCamera||!radarView.good)return;
     var pending=radarView.pendingSource,f=pending?pending.frame:radarGesture.state==='idle'?radarView.good:radarView.current||radarView.good,z=pending?clamp(Math.round(radarCamera.zoom),pending.data.zoomMin,pending.data.zoomMax):radarLevel(),seen=new Set();
     function add(fr,t,history=false) {if(!radarExpected(fr,t))return;var manifest=pending?pending.data.tiles:radarView.data.tiles,grid=manifest&&manifest.grid;
       if(grid&&manifest.newest&&fr.stamp===manifest.newest.stamp&&t.z===manifest.z&&t.x>=grid.x0&&t.x<grid.x0+grid.w&&t.y>=grid.y0&&t.y<grid.y0+grid.h){var bit=(t.y-grid.y0)*grid.w+t.x-grid.x0;if(!(BigInt('0x'+(manifest.newest.mask||'0'))&(1n<<BigInt(bit))))return;}
@@ -2912,6 +2934,7 @@
     radarPumpTiles();
   }
   function radarPumpTiles(){
+    if(!radarView.active||document.hidden)return;
     // Refusal is stable until owned memory changes or a publication/poll arrives.
     // RAF and queue rebuilds must not repeatedly walk/evict the same inventory.
     if(radarPumpBlocked!==null&&radarPumpBlocked===radarMemory())return;
@@ -3023,19 +3046,20 @@
     radarPruneFrames();
   }
   function radarRetarget(){
+    radarDropPendingSource();
     radarCompositeJob=null;radarView.holdingWindow=true;
     radarView.retired.push(...radarView.loaded);
     radarView.loaded=radarView.loaded.map(f=>({...f,bitmap:null,ready:false,compositeRetry:0}));
     radarView.good=radarView.loaded.at(-1);radarPruneFrames();
   }
   function radarUpdateReady(){radarView.readyFrames=radarView.loaded.filter(f=>f.bitmap).sort((a,b)=>a.ts-b.ts).slice(-8);
-    if(radarView.holdingWindow&&!radarView.nextAt&&radarView.readyFrames.length>=Math.min(4,radarView.loaded.length)){radarView.holdingWindow=false;radarView.current=radarView.good;radarEchoDirty=true;radarPruneFrames();}
+    if(radarView.holdingWindow&&!radarView.nextAt&&radarView.readyFrames.length&&radarView.readyFrames.length>=Math.min(4,radarView.loaded.length)){radarView.holdingWindow=false;radarView.current=radarView.readyFrames.at(-1);radarEchoDirty=true;radarPruneFrames();}
     if(!radarView.holdingWindow&&!radarView.started&&!radarView.paused&&radarView.good?.bitmap&&radarView.current!==radarView.good){radarView.current=radarView.good;radarEchoDirty=true;}
     if(radarView.paused||radarReduced()&&!radarView.singleSweep){radarView.cycle=[];radarPruneFrames();}
   }
   function radarPlayback(){return radarView.cycle.length?radarView.cycle:radarReady();}
   function radarReady(){return radarView.holdingWindow&&radarView.readyFrames.length<4?radarView.cycle.filter(f=>f.bitmap).length?radarView.cycle.filter(f=>f.bitmap):radarView.retired.filter(f=>f.bitmap).slice(-8):radarView.readyFrames;}
-  function radarRelease(){radarView.holdingWindow=false;radarCancelJobs();radarView.windowKey=null;radarView.blend=null;radarView.pendingSource=null;radarEchoEpoch++;radarTileQueue=[];radarTiles.forEach(t=>t.bitmap.close());radarTiles.clear();radarView.loaded.concat(radarView.retired).forEach(f=>{if(f.bitmap)f.bitmap.close();});radarView.loaded=[];radarView.readyFrames=[];radarView.cycle=[];radarView.retired=[];radarView.started=false;radarView.nextAt=0;radarView.good=radarView.current=null;radarCompositeJob=null;radarMemory();$('rad-loop').hidden=true;}
+  function radarRelease(){radarDropPendingSource();radarView.holdingWindow=false;radarCancelJobs();radarView.windowKey=null;radarView.blend=null;radarEchoEpoch++;radarTileQueue=[];radarTiles.forEach(t=>t.bitmap.close());radarTiles.clear();radarView.loaded.concat(radarView.retired).forEach(f=>{if(f.bitmap)f.bitmap.close();});radarView.loaded=[];radarView.readyFrames=[];radarView.cycle=[];radarView.retired=[];radarView.started=false;radarView.nextAt=0;radarView.good=radarView.current=null;radarCompositeJob=null;radarMemory();$('rad-loop').hidden=true;}
   function radarFrameLabel(fr){if(fr.at)return fr.at;var r=radarView.data;if(!r||!r.observedAt||!isNum(fr.ts))return '—';var a=r.observedAt.split(':'),m=(+a[0]*60+(+a[1])-Math.round((r.observedTs-fr.ts)/60)+1440)%1440;return String(Math.floor(m/60)).padStart(2,'0')+':'+String(m%60).padStart(2,'0');}
   function radarCouldLoop(){var ready=radarPlayback(),total=Math.min(8,Math.max(radarView.loaded.length,radarView.data.frameCount||0,radarView.data.refresh?.frameTotal||0))||8;return radarView.active&&!document.hidden&&ready.length>=(radarView.cycle.length?2:Math.min(4,total))&&ready.length>=2&&ready.every(f=>f.bitmap)&&ready.some(f=>f.hasEcho)&&!radarView.data.stale;}
   function radarLoopSync(){if(radarView.paused||radarReduced()&&!radarView.singleSweep){radarView.cycle=[];radarPruneFrames();}var r=radarView.data,ready=radarPlayback(),play=$('rad-play'),loop=$('rad-loop');if(!r||!radarView.active){loop.hidden=true;return;}
@@ -3054,8 +3078,9 @@
     radarWake();
   }
   $('rad-play').addEventListener('click',function(){radarView.blend=null;radarEchoDirty=true;if(radarReduced()){radarView.singleSweep=!radarView.singleSweep;radarView.paused=!radarView.singleSweep;radarView.current=radarView.good;radarEchoDirty=true;}else radarView.paused=!radarView.paused;radarUpdateReady();radarPruneFrames();radarLoopSync();if(!radarReduced())$('rad-play').animate([{opacity:.5},{opacity:1}],{duration:120});});
-  function radarWindowKey(r){return JSON.stringify([r.sourceId,r.siteId,r.center,r.tiles?.z,r.tiles?.grid,r.tiles?.revision,r.legend]);}
-  function radarPreload(r){if(!radarView.active)return;
+  function radarWindowKey(r){return JSON.stringify([r.sourceId,r.siteId,r.center,r.tiles?.z,r.tiles?.grid,r.tiles?.camera,r.tiles?.revision,r.tiles?.smooth,r.legend]);}
+  function radarStartCount(r=radarView.data){return Math.min(4,Math.max(r?.tiles?.frames?.length||0,r?.frameCount||0,r?.refresh?.frameTotal||0))||4;}
+  function radarPreload(r){if(!radarView.active||document.hidden)return;
     var windowKey=radarWindowKey(r);
     if(radarView.good?.revision&&radarView.good.revision!==r.tiles.revision){radarCancelJobs();radarEchoEpoch++;}
     if(radarView.windowKey&&radarView.windowKey!==windowKey&&(!radarView.holdingWindow||radarView.good?.revision!==r.tiles.revision)){radarRetarget();}radarView.windowKey=windowKey;
@@ -3150,7 +3175,7 @@
   }
   function radarNoteRender(){var r=radarView.data,f=radarView.refresh,note=$('rad-note'),copy='';clearTimeout(radarIntent.noteTimer);if(!r)return;var elapsed=Date.now()-radarIntent.postedAt;if(elapsed<600&&!(radarSource.refused==='site'&&r.nexrad?.reason==='not reporting'&&r.nexrad?.newestTs===null)){note.dataset.shown='false';radarIntent.noteTimer=setTimeout(radarSourceRender,601-elapsed);return;}if(radarSource.refused==='site'&&r.nexrad?.reason==='not reporting'&&r.nexrad?.newestTs===null)copy=r.nexrad.id+' is off air · showing Region'+(r.nexrad.nextCheckAt?' · Checking again at '+r.nexrad.nextCheckAt:'');else if(radarPendingRetry()){var retry=radarPendingRetry();copy='Retrying · '+retry.reason+' · next attempt '+retry.when+' · showing '+radarFrameLabel(radarView.current||{});}else if(radarSource.refused)copy="Couldn't switch · showing "+radarSourceSubject(r).subject;else if(radarView.holdingWindow&&f.state!=='failed')copy=(radarView.nextAt?'Playing previous view':'Previous view')+' · sharpening '+radarView.loaded.filter(f=>f.bitmap).length+' of '+Math.min(8,Math.max(radarView.loaded.length,r.frameCount||0));else if((radarView.current?.bitmap&&radarView.loaded.some(f=>!f.bitmap))&&f.state!=='failed')copy='Refreshing · frame '+radarView.loaded.filter(f=>f.bitmap).length+' of '+Math.min(8,Math.max(radarView.loaded.length,r.frameCount||0));else if(f.state==='newest')copy='Refreshing · newest frame';else if(f.state==='history')copy='Refreshing · frame '+f.frameIndex+' of '+f.frameTotal;else if(f.state==='failed')copy="Couldn't refresh · showing "+radarFrameLabel(radarView.current||{});if(!copy)copy=radarView.zoomNote||'';if(!copy&&r.sourceFallback==='site-zoom-floor'&&radarSource.desired!=='mosaic'){var site=(r.sources||[]).find(s=>s.mode==='site');if(site&&site.siteId)copy=site.siteId+' resumes at zoom '+r.siteResumeZoom;}note.textContent=copy;note.dataset.shown=String(!!copy);}
   function radarState(){var r=radarView.data;if(!r)return;var elapsed=(performance.now()-(radarView.receivedAt||performance.now()))/1000;r.stale=(radarView.receivedAge||0)+elapsed>=r.staleSec;var f=radarView.current,state=r.stale||r.refresh&&r.refresh.state==='failed'?'stale':radarView.clear?'clear':'current';$('rad-status').dataset.state=state;$('rad-plate').dataset.state=state;var status=$('rad-status');status.replaceChildren(document.createTextNode('As of '));var at=document.createElement('span');at.id='rad-asof';at.textContent=f?radarFrameLabel(f):'—';status.append(at);var age=f?Math.max(0,(radarView.receivedAge||0)+(performance.now()-(radarView.receivedAt||performance.now()))/1000+(r.observedTs-f.ts)):r.ageSec||0;if(age>=.8*r.staleSec)status.append(document.createTextNode(' · '+Math.floor(age/60)+' min old'));}
-  function radarActivate(){if(!radarView.data)return;radarMetrics.activationAt=performance.now();radarMetrics.firstPaintMs=null;if(!radarCamera){var r=radarView.data,saved=null;try{saved=JSON.parse(sessionStorage.getItem('radarCamera'));}catch(e){}var accepted=radarIntent.accepted;if(accepted?.center&&accepted.center!=='station')saved={...accepted.center,zoom:accepted.zoom==='auto'?r.zoomAutoLevel:accepted.zoom,auto:accepted.zoomPolicy==='auto'||accepted.zoom==='auto'};else if(accepted?.zoom!==undefined)saved={...r.center,zoom:accepted.zoom==='auto'?r.zoomAutoLevel:accepted.zoom,auto:accepted.zoomPolicy==='auto'||accepted.zoom==='auto'};radarCamera=saved&&isNum(saved.lat)&&isNum(saved.lon)&&isNum(saved.zoom)?{lat:clamp(saved.lat,-RAD_MAX_LAT,RAD_MAX_LAT),lon:clamp(saved.lon,-180,180),zoom:clamp(saved.zoom,r.zoomMin,10)}:{...r.center,zoom:clamp(r.zoomAuto?r.zoomAutoLevel:r.zoomDesired,r.zoomMin,10)};radarZoom.auto=saved&&typeof saved.auto==='boolean'?saved.auto:r.zoomAuto;radarCamera=radarClampCamera(radarCamera);radarIntent.cameraKey=JSON.stringify(radarCamera);radarIntent.policy=radarZoom.auto?'auto':'manual';}
+  function radarActivate(){if(!radarView.data||document.hidden)return;radarMetrics.activationAt=performance.now();radarMetrics.firstPaintMs=null;if(!radarCamera){var r=radarView.data,saved=null;try{saved=JSON.parse(sessionStorage.getItem('radarCamera'));}catch(e){}var accepted=radarIntent.accepted;if(accepted?.center&&accepted.center!=='station')saved={...accepted.center,zoom:accepted.zoom==='auto'?r.zoomAutoLevel:accepted.zoom,auto:accepted.zoomPolicy==='auto'||accepted.zoom==='auto'};else if(accepted?.zoom!==undefined)saved={...r.center,zoom:accepted.zoom==='auto'?r.zoomAutoLevel:accepted.zoom,auto:accepted.zoomPolicy==='auto'||accepted.zoom==='auto'};radarCamera=saved&&isNum(saved.lat)&&isNum(saved.lon)&&isNum(saved.zoom)?{lat:clamp(saved.lat,-RAD_MAX_LAT,RAD_MAX_LAT),lon:clamp(saved.lon,-180,180),zoom:clamp(saved.zoom,r.zoomMin,10)}:{...r.center,zoom:clamp(r.zoomAuto?r.zoomAutoLevel:r.zoomDesired,r.zoomMin,10)};radarZoom.auto=saved&&typeof saved.auto==='boolean'?saved.auto:r.zoomAuto;radarCamera=radarClampCamera(radarCamera);radarIntent.cameraKey=JSON.stringify(radarCamera);radarIntent.policy=radarZoom.auto?'auto':'manual';}
     if(!Object.keys(radarBaseStyle).length)radarResolveStyle();radarCameraDirty=true;radarOverlayBuild();radarGeoRequest();radarPreload(radarView.data);radarZoomRender();radarPostIntent();radarWake();
     if(!radarSiteTable.length)fetch(radarView.data.geo.sites).then(r=>r.ok?r.json():[]).then(s=>{radarSiteTable=s.filter(p=>/^[A-Z0-9]{4}$/.test(p.id)&&isNum(p.lat)&&isNum(p.lon));if(radarGesture.state==='idle')radarOverlayBuild();radarSourceRender();}).catch(()=>{});
   }
@@ -3167,17 +3192,17 @@
     var old=radarView.data,changed=old&&(old.sourceId!==r.sourceId||old.siteId!==r.siteId||JSON.stringify(old.center)!==JSON.stringify(r.center));
     if(old&&!changed&&r.observedTs&&old.observedTs>r.observedTs){old.ageSec=Math.max(old.ageSec||0,d.ts-old.observedTs);old.stale=old.ageSec>=old.staleSec;radarState();return;}
     if(changed&&radarSource.desired&&(r.sourcePref||r.sourceMode)!==radarSource.desired){radarView.refresh=r.refresh||{state:'idle'};radarNoteRender();return;}
-    if(radarView.pendingSource&&radarFrameKey(radarView.pendingSource.frame)===radarFrameKey({...r.tiles?.frames?.at(-1),sourceId:r.sourceId,revision:r.tiles?.revision})){radarView.pendingSource.data=r;radarView.pendingSource.payloadTs=d.ts;var heldFrames=new Map(radarView.pendingSource.frames.map(f=>[f.stamp,f]));radarView.pendingSource.frames=r.tiles.frames.slice(-8).map(f=>Object.assign(heldFrames.get(f.stamp)||{},f,{sourceId:r.sourceId,revision:r.tiles.revision,smooth:!!r.tiles.smooth,remapRevision:r.tiles.remapRevision}));radarView.refresh=r.refresh||{state:'idle'};radarNoteRender();radarQueueTiles();return;}
-    if(radarView.pendingSource){radarView.pendingSource=null;radarView.transition=(radarView.transition||0)+1;}
+    if(radarView.pendingSource&&changed&&JSON.stringify(old.center)===JSON.stringify(r.center)&&r.tiles?.frames?.length){radarStageSource(r,d.ts);return;}
+    radarDropPendingSource();
     if(changed&&old&&JSON.stringify(old.center)===JSON.stringify(r.center)&&!radarView.acceptingSource){
-      var newest=r.tiles&&r.tiles.frames&&r.tiles.frames.at(-1);if(newest&&radarView.good){radarView.transition=(radarView.transition||0)+1;radarCancelJobs();radarCompositeJob=null;radarView.pendingSource={data:r,payloadTs:d.ts,frame:{...newest,sourceId:r.sourceId,revision:r.tiles.revision,smooth:!!r.tiles.smooth,remapRevision:r.tiles.remapRevision},frames:r.tiles.frames.slice(-8).map(f=>({...f,sourceId:r.sourceId,revision:r.tiles.revision,smooth:!!r.tiles.smooth,remapRevision:r.tiles.remapRevision}))};radarView.refresh=r.refresh||{state:'idle'};radarNoteRender();radarQueueTiles();return;}
+      var newest=r.tiles&&r.tiles.frames&&r.tiles.frames.at(-1);if(newest&&radarView.good){radarStageSource(r,d.ts);return;}
     }
     if(changed&&!radarView.acceptingSource){radarRelease();if(JSON.stringify(old.center)!==JSON.stringify(r.center)){radarCamera=null;try{sessionStorage.removeItem('radarCamera');}catch(e){}}}
     if(old&&old.geo&&r.geo&&old.geo.version!==r.geo.version){radarGeoClear();radarBaseDirty=true;}
     if(r.tiles?.publishedAt!==radarView.data?.tiles?.publishedAt)radarTrace('publication',{intent:r.intent,publishedAt:r.tiles?.publishedAt});radarView.data=r;radarView.receivedAt=performance.now();radarView.receivedAge=r.ageSec||0;radarView.refresh=r.refresh||{state:'idle'};
     if(radarSource.desired&&own&&(r.sourcePref||r.sourceMode)===radarSource.desired){
       var showing=r.sourceMode===radarSource.desired,busy=['newest','history'].includes(radarView.refresh.state);
-      if(showing&&radarReady().length>=4){radarSource.refused=false;radarSource.desired=null;}
+      if(showing&&radarReady().length>=radarStartCount(r)){radarSource.refused=false;radarSource.desired=null;}
     }else if(switchFailed){
       radarSource.refused=radarSource.desired;
     }
@@ -3197,7 +3222,7 @@
     // and no "Switching to Region · showing Region" caption.
     if(showing){radarIntent.edited=true;radarSource.refused=false;radarIntent.preferredMode=mode;radarPostIntent(true);radarSourceRender();radarNoteRender();return;}
     radarIntent.edited=true;radarGestureCancel();radarSource.refused=false;radarSource.lastRefresh=radarView.refresh.state;radarSource.desired=mode;radarIntent.preferredMode=mode;radarCancelJobs();radarSwitchStart();radarSource.fastUntil=Date.now()+20000;
-    if(radarView.pendingSource){radarView.pendingSource=null;radarView.transition=(radarView.transition||0)+1;}
+    radarDropPendingSource();
     if(mode==='site'&&radarCamera.zoom<7){radarZoom.auto=false;radarCameraSet({...radarCamera,zoom:7});radarSettle();}
     radarPostIntent(true);
     var n=radarView.data.nexrad;
@@ -3236,7 +3261,9 @@
         else {radarView.current=next;radarEchoPaint(next);radarState();radarSourceRender();}
         radarEchoDirty=false;radarTileDamage=[];
         var newest=index===ready.length-1;if(newest&&radarView.singleSweep){radarView.singleSweep=false;radarView.paused=true;}
-        radarView.nextAt=Math.max(radarView.nextAt+(newest?RAD_HOLD_MS:radarInterval(ready.length)),now+1);radarLoopSync();radarRetirePassed();radarPruneFrames();radarTrace('loopPaint',{stamp:next.stamp,hold:newest,holding:!!radarView.holdingWindow});painted=true;
+        // Deadlines follow actual presentation. After a suspended/late RAF,
+        // catching up in 1ms can restart the blend before its subject changes.
+        radarView.nextAt=now+(newest?RAD_HOLD_MS:radarInterval(ready.length));radarLoopSync();radarRetirePassed();radarPruneFrames();radarTrace('loopPaint',{stamp:next.stamp,hold:newest,holding:!!radarView.holdingWindow});painted=true;
       }
       if(radarView.blend){radarBlendPaint(now);painted=true;}
       if(g.state==='idle'&&now>=radarIdlePrefetchAt){for(var cache of [radarTileAbsent,radarGeoAbsent]){for(var [key,until] of cache)if(until<now||cache.size>512)cache.delete(key);}radarIdlePrefetchAt=now+500;radarGeoRequest(true);}
@@ -3453,7 +3480,7 @@
   render({});
   poll();
 
-  setInterval(()=>{if(radarView.active){radarState();if(!radarSwitch&&radarReady().length<4){radarSwitchStart(false);radarSwitch.committed=true;}if(radarSwitch){var s=radarSwitch;if(s.committed&&radarGesture.state==='idle'&&(!s.requiresIntent||radarView.data.intent?.session===radarIntent.session&&radarView.data.intent?.generation===s.generation)&&radarReady().length>=4&&radarReady().every(f=>JSON.stringify(f.camera)===JSON.stringify(radarCamera))&&!radarView.pendingSource&&!radarSource.desired){if(!s.fourAt){s.fourAt=performance.now();s.stamp=radarView.current?.stamp;radarTrace('fourDecoded');}if(radarView.paused||radarReduced()||radarReady().every(f=>!f.hasEcho)){s.static=radarView.paused?'paused':radarReduced()?'reduced-motion':'clear';radarTrace('static',{state:s.static});clearTimeout(s.timer);radarSwitch=null;radarSourceRender();}else if(radarView.current?.stamp!==s.stamp){s.advanced=true;radarTrace('advancingPaint',{elapsed:performance.now()-s.start});clearTimeout(s.timer);radarSwitch=null;radarSourceRender();}}if(radarSwitch&&performance.now()-s.start>=RAD_SWITCH_MS&&!s.overdue){s.overdue=true;radarTrace('switchDeadline');radarSourceRender();radarLoopSync();radarNoteRender();}}}},100);
+  setInterval(()=>{if(radarView.active){radarState();if(!radarSwitch&&radarReady().length<radarStartCount()){radarSwitchStart(false);radarSwitch.committed=true;}if(radarSwitch){var s=radarSwitch;if(s.committed&&radarGesture.state==='idle'&&(!s.requiresIntent||radarView.data.intent?.session===radarIntent.session&&radarView.data.intent?.generation===s.generation)&&radarReady().length>=radarStartCount()&&radarReady().every(f=>JSON.stringify(f.camera)===JSON.stringify(radarCamera))&&!radarView.pendingSource&&!radarSource.desired){if(!s.fourAt){s.fourAt=performance.now();s.stamp=radarView.current?.stamp;radarTrace('fourDecoded');}if(radarView.paused||radarReduced()||radarReady().length===1||radarReady().every(f=>!f.hasEcho)){s.static=radarView.paused?'paused':radarReduced()?'reduced-motion':'clear';radarTrace('static',{state:s.static});clearTimeout(s.timer);radarSwitch=null;radarSourceRender();}else if(radarView.current?.stamp!==s.stamp){s.advanced=true;radarTrace('advancingPaint',{elapsed:performance.now()-s.start});clearTimeout(s.timer);radarSwitch=null;radarSourceRender();}}if(radarSwitch&&performance.now()-s.start>=RAD_SWITCH_MS&&!s.overdue){s.overdue=true;radarTrace('switchDeadline');radarSourceRender();radarLoopSync();radarNoteRender();}}}},100);
   setInterval(updateFreshness, 1000);   /* independent of any fetch ever settling */
 </script>
 </body>
