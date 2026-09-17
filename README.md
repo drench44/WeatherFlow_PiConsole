@@ -230,6 +230,9 @@ revert to Open-Meteo. A free token takes under a minute to obtain at
 Two ways to run it:
 
 - **HTML kiosk (recommended).** The console runs headless as a data engine and `chromium --kiosk` renders the interface, pixel-identical and low-power (~½ core total on a Pi). A systemd-supervised watchdog keeps the whole chain alive: it relaunches any component that dies, restarts the engine if the feed goes stale (a hung websocket the classic UI would sit in), and re-checks for a wedged render. It self-heals: I confirmed that by killing the watchdog and watching systemd bring the display back on its own. Setup, management, and revert steps are in [`design/almanac/kiosk/README.md`](design/almanac/kiosk/README.md).
+- **12-hour clock.** Set `[Display] TimeFormat = 12 hr` in `wfpiconsole.ini`. The
+  upstream default is `24 hr`; every clock string in the payload follows this one
+  setting, so the panel never mixes styles.
 - **Native Kivy layout.** Set `[Display] LayoutStyle = almanac` in the config.
 
 For the architecture, the `wx.json` data contract, and upgrade notes, see

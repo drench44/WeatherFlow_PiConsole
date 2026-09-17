@@ -64,3 +64,15 @@ def test_radar_check_times_follow_the_setting(style, expect):
     snap = ae._RADAR_NONE._replace(nexrad=nexrad)
     r = ae.AlmanacEmitter._radar_payload(snap, ts, TZ, None, style)
     assert expect.match(r['nexrad']['checkedAt']) and expect.match(r['nexrad']['nextCheckAt'])
+
+
+def test_upstream_sager_case_is_normalised():
+    assert ae._clock_case('6:53 pm') == '6:53 PM'
+    assert ae._clock_case('06:53') == '06:53'
+    assert ae._clock_case('-') == '-' and ae._clock_case(None) is None
+
+
+def test_alerts_clock_style_survives_a_bare_emitter():
+    # tests build the alert processor on an object without an app handle
+    A = ae.AlmanacEmitter
+    assert A._process_alerts.__get__(A.__new__(A))([], 0, TZ) == []

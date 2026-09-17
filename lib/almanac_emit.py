@@ -291,6 +291,14 @@ def _clock(dt, style, sparse=False):
     return f'{hour12}:{dt.minute:02d} {ampm}'
 
 
+def _clock_case(text):
+    """ Upstream's Sager module writes "6:53 pm" (%P); every other clock string
+    says "PM". One case for the page. None and non-clock text pass through. """
+    if not isinstance(text, str):
+        return text
+    return re.sub(r'\b([ap]m)\b', lambda m: m.group(1).upper(), text)
+
+
 def _cfg(config, section, option, default=None):
     """ Safely read a Kivy ConfigParser value. Kivy's ConfigParser needs BOTH
     section and option to .get() (subscripting a section internally calls the
@@ -3948,7 +3956,7 @@ class AlmanacEmitter:
         classify by product level, COLLAPSE identical events (union of counties,
         soonest end), sort by level then soonest end, cap the count. Pure given its
         inputs (no network); never raises. """
-        style = _clock_style(getattr(self.app, 'config', {}) or {})
+        style = _clock_style(getattr(getattr(self, 'app', None), 'config', {}) or {})
         groups = {}
         for prop in feats:
             end = prop.get('ends') or prop.get('expires')
@@ -4324,7 +4332,7 @@ class AlmanacEmitter:
             # module exposes only these two, so the card's other slots stay null)
             'sagerCode':     None,   # not sourced - no single composite dial code is exposed
             'sagerText':     _text(Sager.get('Forecast')),
-            'sagerIssued':   _text(Sager.get('Issued')),
+            'sagerIssued':   _clock_case(_text(Sager.get('Issued'))),
             'sagerPressure': None,   # not sourced - no composed "<value> <trend>" string exists
             'sagerWind':     None,   # not sourced
             'sagerSky':      None,   # not sourced

@@ -219,7 +219,7 @@ def test_aqi_publishes_one_complete_snapshot(make_emitter, monkeypatch):
 
     mid_fetch = []
 
-    def summarize(hourly, now, tz, aqi_now):
+    def summarize(hourly, now, tz, aqi_now, style='12 hr'):
         mid_fetch.append(emitter._build_payload())
         return [], 20, None, 'steady', None, 'Good'
 

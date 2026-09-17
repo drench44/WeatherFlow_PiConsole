@@ -13,9 +13,11 @@ to shared upstream code that the classic console benefits from too.
   12-hour, so every console showed a mix whatever `Display/TimeFormat` said.
   Everything the emitter formats now follows that setting, the same one the
   sunrise, observation-extreme, forecast and Sager modules already follow, and
-  the page derives a missing frame label in the payload's own style. The fork's
-  default for a fresh install is `12 hr`; an existing `wfpiconsole.ini` keeps
-  whatever it says.
+  the page derives a missing frame label in the payload's own style, and the
+  Sager issue time says "PM" like everything else instead of upstream's "pm".
+  The setting itself stays upstream's (`lib/config.py` is guarded for
+  mergeability, default `24 hr`); the almanac install notes say to set
+  `[Display] TimeFormat = 12 hr`, and the panel is set so.
 
 ### Radar
 - **A full tile cache is trimmed at boot, never frozen.** The Pi 4 rebooted
