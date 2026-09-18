@@ -83,6 +83,7 @@ CARRY_SKIP = frozenset(('radar', 'alerts', 'alertCount', 'alertsAgeSec', 'alerts
 RADAR_ATTENTION_MODE = os.environ.get('WFP_RADAR_ATTENTION', 'active')  # 'active' applies the tiers; 'shadow' only publishes them
 RADAR_SENTINEL_ZOOM = 5
 RADAR_SENTINEL_ECHO_PIXELS = 20
+RADAR_FRAME_ECHO_PIXELS = 200  # opaque pixels across a frame's footprint before it counts as echo (clutter is less)
 RADAR_ATTENTION_FORCE_TTL = 7200
 RADAR_STARTING_MAX_SEC = 300  # after this, a radar that never produced a result is unavailable, not starting
 RADAR_LOCAL_RETRY_MAX_SEC = 60  # ceiling for the doubling retry after consecutive local failures
@@ -1068,6 +1069,8 @@ class AlmanacEmitter:
         self._radar_viewing_prev = False
         self._radar_waking_since = None
         self._radar_local_hour = None
+        self._radar_attention_prompt = False
+        self._radar_discovery_floor_until = None
         self._radar_cache_thread = None
         self._radar_manifest_cache = OrderedDict()
         self._radar_bad_stamp = None
@@ -1304,9 +1307,17 @@ class AlmanacEmitter:
             if probe is not None:
                 # Preserve recovery of a failed preferred source while on fallback.
                 delay = max(min_delay, 1, probe)
-            delay = max(delay, self._radar_headroom_delay(source, 1), self._radar_local_backoff(), self._radar_attention_floor())
+            delay = max(delay, self._radar_headroom_delay(source, 1), self._radar_local_backoff())
             plan.due = now + delay
-            self._radar_discovery_event = self._schedule(self._check_radar_discovery, delay)
+            # The attention floor holds the WAKEUP back, never the schedule's own
+            # due: a tier rise re-arms at the natural due. On entering a quiet tier
+            # the first quiet pass (listing, sentinel) runs promptly, then the floor.
+            wake = max(delay, self._radar_attention_floor())
+            if self._radar_attention_prompt:
+                self._radar_attention_prompt = False
+                wake = min(wake, 5)
+            self._radar_discovery_floor_until = now + wake
+            self._radar_discovery_event = self._schedule(self._check_radar_discovery, wake)
 
     def _check_radar_discovery(self, _dt=None):
         with self._life_lock:
@@ -1404,7 +1415,7 @@ class AlmanacEmitter:
         try:
             with open(self._radar_marker('radar_viewing')) as f:
                 record = json.load(f)
-            return 0 <= now - float(record['last']) < RADAR_VIEW_POLL_GAP_SEC * 3
+            return 0 <= now - float(record['last']) < RADAR_VIEW_POLL_GAP_SEC * 2
         except (OSError, ValueError, TypeError, KeyError):
             return False
 
@@ -1459,7 +1470,8 @@ class AlmanacEmitter:
                 if rose and (snap.ts_frame is None or now - snap.ts_frame > (snap.stale_sec or RADAR_IEM_STALE_SEC)):
                     self._radar_waking_since = now
                 if RADAR_ATTENTION_MODE == 'active':
-                    self._radar_arm_discovery()          # re-arm with the new tier's floor
+                    self._radar_attention_prompt = tier in ('rest', 'dormant')
+                    self._radar_arm_discovery()          # re-arm: natural due on a rise, prompt quiet pass on a fall
                     if rose:
                         self._schedule(lambda dt: self._check_radar(), .1)
             if self._radar_waking_since is not None:
@@ -1491,16 +1503,15 @@ class AlmanacEmitter:
         missing (unknown is never 'clear'). """
         try:
             inventory = self._radar_disk_inventory
-            seen = False
+            seen, pixels = False, 0
             for site, scan in (pairs or [(None, ts)]):
                 for x, y, _, _ in _radar_site_tiles(ctx, site):
                     record = inventory.records.get(_radar_disk_key(source, site, scan, ctx['zoom'], x, y, ctx.get('smooth', False)))
                     if record is None:
                         return None
                     seen = True
-                    if (record[2] or {}).get('opaquePixels', 0) > 0:
-                        return True
-            return False if seen else None
+                    pixels += int((record[2] or {}).get('opaquePixels', 0) or 0)
+            return (pixels >= RADAR_FRAME_ECHO_PIXELS) if seen else None
         except (KeyError, TypeError, ValueError):
             return None
 
@@ -1589,6 +1600,7 @@ class AlmanacEmitter:
         local = datetime.fromtimestamp(now, self._station_tz(getattr(self.app, 'config', {}) or {}) or timezone.utc)
         health['attention'] = dict(self._radar_attention.telemetry(now), mode=RADAR_ATTENTION_MODE,
             knobs=self._radar_attention_knobs(), bytesByTier=dict(self._radar_bytes_by_tier),
+            wakeupTs=self._radar_discovery_floor_until,
             sentinel=self._radar_sentinel, waking=self._radar_waking_since is not None,
             glances=self._radar_glances.telemetry(now, local))
         cache = self._radar_disk_inventory

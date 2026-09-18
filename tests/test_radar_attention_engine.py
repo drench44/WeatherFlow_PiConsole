@@ -37,7 +37,7 @@ def test_rest_pass_is_listings_only_and_discovery_waits_the_floor(make_emitter, 
     assert e._radar_pass['outcome'] == 'quiet'
     assert not tile_requests(hybrid.calls), hybrid.calls
     assert listing_requests(hybrid.calls)
-    assert e._radar_discovery.due - ae.time.time() >= 900 - 1
+    assert e._radar_discovery_floor_until - ae.time.time() >= 900 - 1   # the wakeup, not the schedule's own due
     assert not e._radar_result.available            # nothing was acquired, honestly
 
 
@@ -46,7 +46,7 @@ def test_dormant_pass_waits_an_hour_and_never_runs_the_sentinel(make_emitter, hy
     tier(e, 'dormant', hour=2.0)
     e._do_radar()
     assert e._radar_pass['outcome'] == 'quiet' and e._radar_sentinel is None
-    assert e._radar_discovery.due - ae.time.time() >= 3600 - 1
+    assert e._radar_discovery_floor_until - ae.time.time() >= 3600 - 1
 
 
 def test_rest_sentinel_fetches_four_zoom5_tiles_and_records_echo(make_emitter, hybrid, active):
@@ -135,3 +135,30 @@ def test_shadow_mode_publishes_but_never_applies(make_emitter, hybrid, monkeypat
     e._do_radar()
     assert e._radar_result.available                           # tiles fetched as before
     assert e._build_payload()['radar']['attention']['mode'] == 'shadow'
+
+
+def test_entering_rest_runs_a_prompt_quiet_pass_then_the_floor_and_a_rise_rearms_at_once(make_emitter, hybrid, active, tmp_path):
+    e = make_emitter(); e._running = True
+    (tmp_path / 'radar_attention_force').write_text('dormant')
+    e._build_payload()                                            # watch -> dormant: prompt wake, then the hour floor
+    assert e._radar_attention.tier == 'dormant'
+    assert e._radar_discovery_floor_until - ae.time.time() <= 5
+    e._radar_arm_discovery()                                      # the next arm honours the floor
+    assert e._radar_discovery_floor_until - ae.time.time() >= 3600 - 1
+    (tmp_path / 'radar_attention_force').write_text('live')
+    e._build_payload()                                            # dormant -> live: the wakeup is no longer an hour away
+    assert e._radar_attention.tier == 'live'
+    assert e._radar_discovery_floor_until - ae.time.time() < 300
+
+
+def test_frame_echo_needs_more_than_clutter(make_emitter, hybrid, active, monkeypatch):
+    e = make_emitter(); e._running = True
+    tier(e, 'live'); hybrid.view(); e._do_radar()
+    assert e._radar_result.frames[-1]['echo'] is True             # solid fixture tiles: 65,536 opaque px each
+    monkeypatch.setattr(ae, 'RADAR_FRAME_ECHO_PIXELS', 10 ** 9)
+    ctx = dict(zoom=e._radar_result.zoom, smooth=False, bounds=e._radar_result.bounds, station=(47.6, -122.3),
+               tiles=e._radar_result.tiles and [(t[0], t[1], 0, 0) for t in []] or None, sites=[], site_scans={})
+    src = e._radar_result.source_id
+    frame = e._radar_result.frames[-1]
+    pairs = [(p['id'], p['ts']) for p in frame.get('siteScans') or []] or None
+    assert e._radar_frame_echo(dict(ctx, tiles=ae._radar_grid(dict(center=e._radar_result.center, zoom=ctx['zoom'], bounds=e._radar_result.bounds))), src, pairs, frame['ts']) in (False, None)
