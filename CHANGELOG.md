@@ -23,6 +23,17 @@ to shared upstream code that the classic console benefits from too.
   `WFP_RADAR_ATTENTION=shadow` publishes without applying; a `radar_attention_force`
   marker overrides for testing. Modelled: about 1 MB on a dry day, 15 to 20 MB on
   a rainy day with use, 6 to 7 MB a day over a Pacific Northwest month.
+- **Attention tiers, reviewed and hardened.** Astra's adversarial review (10
+  findings, 76 tests) is merged: presence promotes the tier before a pass can
+  start, so a changed preference file cannot bypass a quiet tier; quiet floors
+  are measured from the last quiet check; a demand change supersedes a running
+  pass; "waking" ends only on a fresh complete frame; echo counts pixels at or
+  above 10 dBZ, never opacity, and a frame needs 200 of them; the sentinel
+  validates its tiles, reports coverage and looks at zoom 7 (about 425 km
+  across) instead of zoom 5 (1,700 km); "Chance of rain 10%" is judged by its
+  number. Three panel-found fixes share one lesson: the discovery schedule owns
+  its due time, so tier floors and prompt wakes live on the wakeup, never in the
+  schedule. All verified on the panel over CDP with a forced tier marker.
 
 ## 2026-09-16
 
