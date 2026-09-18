@@ -102,17 +102,22 @@ def _note_presence():
     global _presence_at
     now = time.time()
     with _presence_lock:
-        if now - _presence_at < 10:
+        if 0 <= now - _presence_at < 10:
             return
-        _presence_at = now
-    marker = os.path.join(os.path.dirname(DATA), 'presence')
-    tmp = f'{marker}.tmp.{os.getpid()}'
-    try:
-        with open(tmp, 'w') as f:
-            f.write(str(now))
-        os.replace(tmp, marker)
-    except OSError:
-        pass
+        marker = os.path.join(os.path.dirname(DATA), 'presence')
+        tmp = f'{marker}.tmp.{os.getpid()}'
+        try:
+            with open(tmp, 'w') as f:
+                f.write(str(now))
+            os.replace(tmp, marker)
+            _presence_at = now
+        except OSError:
+            pass
+        finally:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
 
 
 def _write_radar_viewing(viewed):
@@ -437,7 +442,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                         _write_radar_zoom(params.get('radarZoom', []))
                         _write_radar_center(params.get('radarCenter', []))
                         _write_radar_source(params.get('radarSource', []))
-                if self.client_address[0] in LOOPBACK and 'touch' in parse_qs(query, keep_blank_values=True):
+                if self.client_address[0] in LOOPBACK and params.get('touch') == ['1']:
                     _note_presence()
                 if viewed_radar and accepted:
                     # Share only a timestamp with the emitter. Serialize writers

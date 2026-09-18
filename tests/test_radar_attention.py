@@ -120,3 +120,11 @@ def test_glance_history_is_inert_until_it_has_data(tmp_path):
     assert not g.expected(tz.localize(datetime(2026, 10, 2, 13, 0)))
     reloaded = GlanceHistory(str(tmp_path / 'g.json'))
     assert reloaded.total == g.total and reloaded.expected(late)
+
+
+def test_spoken_probability_beats_its_noun():
+    a = Attention(T0, 'rest')
+    a.decide(sig(T0, conditions='Chance of rain 10%', precip_pct=10)); assert not a.forecast_on
+    a.decide(sig(T0 + 1, conditions='Chance of showers 70%', precip_pct=10)); assert a.forecast_on
+    b = Attention(T0, 'rest')
+    b.decide(sig(T0, conditions='Rain until 4 PM', precip_pct=10)); assert b.forecast_on   # a definite call still counts

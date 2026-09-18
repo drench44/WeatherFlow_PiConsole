@@ -140,11 +140,13 @@ def test_shadow_mode_publishes_but_never_applies(make_emitter, hybrid, monkeypat
 def test_entering_rest_runs_a_prompt_quiet_pass_then_the_floor_and_a_rise_rearms_at_once(make_emitter, hybrid, active, tmp_path):
     e = make_emitter(); e._running = True
     (tmp_path / 'radar_attention_force').write_text('dormant')
-    e._build_payload()                                            # watch -> dormant: prompt wake, then the hour floor
+    e._build_payload()                                            # watch -> dormant: first quiet check now, then the hour floor
     assert e._radar_attention.tier == 'dormant'
     assert e._radar_discovery_floor_until - ae.time.time() <= 5
-    e._radar_arm_discovery()                                      # the next arm honours the floor
-    assert e._radar_discovery_floor_until - ae.time.time() >= 3600 - 1
+    e._do_radar()                                                 # the quiet check runs and stamps the floor
+    assert e._radar_pass['outcome'] == 'quiet'
+    e._radar_arm_discovery()
+    assert e._radar_discovery_floor_until - ae.time.time() >= 3600 - 10
     (tmp_path / 'radar_attention_force').write_text('live')
     e._build_payload()                                            # dormant -> live: the wakeup is no longer an hour away
     assert e._radar_attention.tier == 'live'
@@ -164,11 +166,14 @@ def test_frame_echo_needs_more_than_clutter(make_emitter, hybrid, active, monkey
     assert e._radar_frame_echo(dict(ctx, tiles=ae._radar_grid(dict(center=e._radar_result.center, zoom=ctx['zoom'], bounds=e._radar_result.bounds))), src, pairs, frame['ts']) in (False, None)
 
 
-def test_a_quiet_tier_ignores_the_stale_viewed_marker(make_emitter, hybrid, active):
-    # a forced (or freshly decided) rest with radar_viewed still inside its 15-min TTL: still quiet
+def test_a_forced_quiet_tier_ignores_the_viewed_marker(make_emitter, hybrid, active, tmp_path):
+    # a fresh radar_viewed marker is real attention and promotes an ordinary rest to warm;
+    # the force override is authoritative and keeps the pass quiet
     e = make_emitter(); e._running = True
     hybrid.view()
-    tier(e, 'rest')
-    e._radar_sentinel = dict(at=ae.time.time(), echo=False, pixels=0, stamp=0)
+    (tmp_path / 'radar_attention_force').write_text('rest')
+    e._build_payload()
+    tier(e, 'rest'); e._radar_attention.forced = 'rest'
+    e._radar_sentinel = dict(at=ae.time.time(), echo=False, pixels=0, stamp=ae.time.time())
     e._do_radar()
     assert e._radar_pass['outcome'] == 'quiet' and not tile_requests(hybrid.calls)
