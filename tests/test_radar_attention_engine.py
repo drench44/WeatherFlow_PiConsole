@@ -162,3 +162,13 @@ def test_frame_echo_needs_more_than_clutter(make_emitter, hybrid, active, monkey
     frame = e._radar_result.frames[-1]
     pairs = [(p['id'], p['ts']) for p in frame.get('siteScans') or []] or None
     assert e._radar_frame_echo(dict(ctx, tiles=ae._radar_grid(dict(center=e._radar_result.center, zoom=ctx['zoom'], bounds=e._radar_result.bounds))), src, pairs, frame['ts']) in (False, None)
+
+
+def test_a_quiet_tier_ignores_the_stale_viewed_marker(make_emitter, hybrid, active):
+    # a forced (or freshly decided) rest with radar_viewed still inside its 15-min TTL: still quiet
+    e = make_emitter(); e._running = True
+    hybrid.view()
+    tier(e, 'rest')
+    e._radar_sentinel = dict(at=ae.time.time(), echo=False, pixels=0, stamp=0)
+    e._do_radar()
+    assert e._radar_pass['outcome'] == 'quiet' and not tile_requests(hybrid.calls)

@@ -3385,7 +3385,8 @@ class AlmanacEmitter:
             ctx['attention'] = knobs['tier']
             if self._radar_attention_active():
                 ctx['frames_target'] = knobs['frames'] or None
-                if not knobs['tiles'] and not intent_triggered and not view_started and not viewed:
+                # the tier already weighs recent views (warm holds 45 min); only an explicit user action fetches in a quiet tier
+                if not knobs['tiles'] and not intent_triggered and not view_started:
                     self._radar_pass.update(source='iem-nexrad-n0b' if site_ok else 'iem-mrms-lcref', site=site['id'] if site_ok else None)
                     self._radar_quiet_pass(ctx, knobs, site, site_ok)
                     return
