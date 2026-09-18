@@ -4,6 +4,26 @@ Changes in Weather Almanac, newest first. The upstream WeatherFlow
 PiConsole keeps its own release notes; entries under **Core** below are fixes
 to shared upstream code that the classic console benefits from too.
 
+## 2026-09-17
+
+### Radar
+- **Attention tiers.** The engine used to keep the newest radar frame warm forever
+  (22 to 35 MB a day with the tab closed). It now spends where a person is likely
+  to look and weather is worth looking at: `live` (tab open), `warm` (a touch on
+  any screen or a view within 45 min: newest plus four frames, so a tap opens on a
+  moving loop), `watch` (rain, lightning, echo or a wet forecast: the loop stays
+  warm by day), `rest` (listings only plus a four-tile sentinel at home each hour
+  to see rain approaching), `dormant` (quiet nights and absences: one listing an
+  hour). Promotion is immediate, demotion waits; unknown observations are never
+  "dry"; a LAN browser polling is weak evidence. The Radar tab shows a small
+  mark when weather is nearby, the page tells the engine about touches, and a
+  wake says "Waking radar · showing HH:MM while the newest scan loads". Bytes
+  per tier, holds, transitions and the sentinel are in `/health.radar.attention`.
+  Glance-hour priors are collected and stay inert until two weeks of data exist.
+  `WFP_RADAR_ATTENTION=shadow` publishes without applying; a `radar_attention_force`
+  marker overrides for testing. Modelled: about 1 MB on a dry day, 15 to 20 MB on
+  a rainy day with use, 6 to 7 MB a day over a Pacific Northwest month.
+
 ## 2026-09-16
 
 ### Zoom

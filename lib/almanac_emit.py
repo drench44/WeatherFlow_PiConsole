@@ -51,6 +51,7 @@ from lib.radar_geometry import (world_point, world_inverse, parse_center,
 from lib.radar_http import failure_class, RadarSession, is_transport_error, LocalTransportError
 from lib.radar_fetch import HostHealth, CircuitOpen, Attempt, AttemptCancelled, tile_race
 from lib.radar_discovery import DiscoverySchedule
+from lib.radar_attention import Attention, Signals, GlanceHistory
 import logging
 # Pillow's PNG reader logs every chunk at DEBUG ("STREAM b'IDAT' ..."), and Kivy's
 # root logger passes DEBUG through to its file handler: on the Pi that was ~800 SD-card
@@ -79,6 +80,10 @@ CARRY_WINDOW_SEC = 600     # ... and fills still-unfetched fields (forecast, AQI
 CARRY_SKIP = frozenset(('radar', 'alerts', 'alertCount', 'alertsAgeSec', 'alertsAsOf', 'alertsStale',
                         'ts', 'time', 'date', 'obsTs', 'obsAgeSec', 'carried',
                         'updateAvailable', 'latestVersion', 'currentVersion'))
+RADAR_ATTENTION_MODE = os.environ.get('WFP_RADAR_ATTENTION', 'active')  # 'active' applies the tiers; 'shadow' only publishes them
+RADAR_SENTINEL_ZOOM = 5
+RADAR_SENTINEL_ECHO_PIXELS = 20
+RADAR_ATTENTION_FORCE_TTL = 7200
 RADAR_STARTING_MAX_SEC = 300  # after this, a radar that never produced a result is unavailable, not starting
 RADAR_LOCAL_RETRY_MAX_SEC = 60  # ceiling for the doubling retry after consecutive local failures
 RADAR_HISTORY_SEC = 3600
@@ -1056,6 +1061,13 @@ class AlmanacEmitter:
         self._radar_disk_inventory = TileInventory(RADAR_DIR)  # caps sized to the disk it lives on
         self._radar_cache_ready = _Event()
         self._radar_boot_mono = time.monotonic()  # the 'starting' state is bounded from here
+        self._radar_attention = Attention()
+        self._radar_glances = GlanceHistory(os.path.join(os.path.dirname(output_path) or '.', 'radar_glances.json'))
+        self._radar_bytes_by_tier = Counter()
+        self._radar_sentinel = None
+        self._radar_viewing_prev = False
+        self._radar_waking_since = None
+        self._radar_local_hour = None
         self._radar_cache_thread = None
         self._radar_manifest_cache = OrderedDict()
         self._radar_bad_stamp = None
@@ -1292,7 +1304,7 @@ class AlmanacEmitter:
             if probe is not None:
                 # Preserve recovery of a failed preferred source while on fallback.
                 delay = max(min_delay, 1, probe)
-            delay = max(delay, self._radar_headroom_delay(source, 1), self._radar_local_backoff())
+            delay = max(delay, self._radar_headroom_delay(source, 1), self._radar_local_backoff(), self._radar_attention_floor())
             plan.due = now + delay
             self._radar_discovery_event = self._schedule(self._check_radar_discovery, delay)
 
@@ -1369,6 +1381,189 @@ class AlmanacEmitter:
             payload['carried'] = True
         return payload
 
+    # ---- attention tiers -------------------------------------------------
+    def _radar_marker(self, name):
+        return Path(self.output_path).with_name(name)
+
+    def _radar_marker_age(self, name, now, content=True):
+        """ Seconds since a marker was written: from its numeric content when the
+        writer stores an epoch, else from its mtime. None when absent/invalid. """
+        try:
+            path = self._radar_marker(name)
+            if content:
+                with open(path) as f:
+                    stamp = float(f.read(128).strip().split()[0])
+            else:
+                stamp = path.stat().st_mtime
+            age = now - stamp
+            return age if age >= 0 else 0.0
+        except (OSError, ValueError, IndexError):
+            return None
+
+    def _radar_viewing_now(self, now):
+        try:
+            with open(self._radar_marker('radar_viewing')) as f:
+                record = json.load(f)
+            return 0 <= now - float(record['last']) < RADAR_VIEW_POLL_GAP_SEC * 3
+        except (OSError, ValueError, TypeError, KeyError):
+            return False
+
+    def _radar_attention_signals(self, payload, now, tz):
+        snap = self._radar_result
+        newest = snap.frames[-1] if snap.frames else None
+        local = datetime.fromtimestamp(now, tz) if tz else datetime.fromtimestamp(now)
+        self._radar_local_hour = local.hour + local.minute / 60
+        lightning_since = payload.get('lightningSinceSec')
+        sentinel = self._radar_sentinel or {}
+        return Signals(now,
+            local_hour=self._radar_local_hour,
+            viewing=self._radar_viewing_now(now),
+            viewed_age=self._radar_marker_age('radar_viewed', now),
+            touch_age=self._radar_marker_age('presence', now),
+            lan_viewer_age=self._radar_marker_age('last_viewer', now, content=False),
+            obs_age=payload.get('obsAgeSec') if payload.get('obsTs') is not None else None,
+            rain_rate_mm=payload.get('rainRateMm'),
+            rain_wet=bool(payload.get('rainStatus')) and str(payload.get('rainStatus')).lower() not in ('dry', 'currently dry', 'none', ''),
+            lightning_age=lightning_since if isinstance(lightning_since, (int, float)) else None,
+            precip_pct=payload.get('fcPrecipPct'),
+            conditions=payload.get('conditions'),
+            echo=newest.get('echo') if newest else None,
+            echo_age=(now - snap.ts_frame) if newest and snap.ts_frame else None,
+            sentinel_echo=sentinel.get('echo'),
+            sentinel_age=(now - sentinel['at']) if sentinel else None,
+            expected_glance=self._radar_glances.expected(local))
+
+    def _radar_attention_tick(self, payload, now, tz):
+        """ Runs with every emit (2 s). Decides the tier, records glances, wakes
+        acquisition on a rise, and publishes radar.attention. Never raises. """
+        try:
+            attention = self._radar_attention
+            force = None
+            age = self._radar_marker_age('radar_attention_force', now, content=False)
+            if age is not None and age < RADAR_ATTENTION_FORCE_TTL:
+                try:
+                    force = self._radar_marker('radar_attention_force').read_text().strip()
+                except OSError:
+                    force = None
+            attention.forced = force if force in ('dormant', 'rest', 'watch', 'warm', 'live') else None
+            signals = self._radar_attention_signals(payload, now, tz)
+            if signals.viewing and not self._radar_viewing_prev:
+                self._radar_glances.record(datetime.fromtimestamp(now, tz) if tz else datetime.fromtimestamp(now))
+            self._radar_viewing_prev = signals.viewing
+            before = attention.tier
+            tier = attention.decide(signals)
+            if tier != before:
+                Logger.info(f'almanac_emit: radar attention {before} -> {tier}; {attention.reason}')
+                rose = tier in ('warm', 'live') and before not in ('warm', 'live')
+                snap = self._radar_result
+                if rose and (snap.ts_frame is None or now - snap.ts_frame > (snap.stale_sec or RADAR_IEM_STALE_SEC)):
+                    self._radar_waking_since = now
+                if RADAR_ATTENTION_MODE == 'active':
+                    self._radar_arm_discovery()          # re-arm with the new tier's floor
+                    if rose:
+                        self._schedule(lambda dt: self._check_radar(), .1)
+            if self._radar_waking_since is not None:
+                fresh = self._radar_health.last_success and self._radar_health.last_success > self._radar_waking_since
+                if fresh or now - self._radar_waking_since > 90 or attention.tier not in ('warm', 'live'):
+                    self._radar_waking_since = None
+            knobs = attention.knobs(self._radar_local_hour)
+            payload['radar']['attention'] = dict(tier=attention.tier, reason=attention.reason, since=attention.since,
+                weather=attention.weather(now), mode=RADAR_ATTENTION_MODE, waking=self._radar_waking_since is not None,
+                frames=knobs['frames'], tiles=knobs['tiles'])
+        except Exception as error:                                       # noqa: BLE001
+            Logger.warning(f'almanac_emit: radar attention tick failed - {error}')
+
+    def _radar_attention_knobs(self):
+        return self._radar_attention.knobs(self._radar_local_hour)
+
+    def _radar_attention_active(self):
+        return RADAR_ATTENTION_MODE == 'active'
+
+    def _radar_attention_floor(self):
+        """ Discovery may not fire sooner than the tier's listing interval. """
+        if not self._radar_attention_active():
+            return 0
+        return self._radar_attention_knobs()['listing']
+
+    def _radar_frame_echo(self, ctx, source, pairs, ts):
+        """ Does the frame's footprint show any echo? From the inventory's tile
+        metadata (opaquePixels) for every present tile; None when a tile is
+        missing (unknown is never 'clear'). """
+        try:
+            inventory = self._radar_disk_inventory
+            seen = False
+            for site, scan in (pairs or [(None, ts)]):
+                for x, y, _, _ in _radar_site_tiles(ctx, site):
+                    record = inventory.records.get(_radar_disk_key(source, site, scan, ctx['zoom'], x, y, ctx.get('smooth', False)))
+                    if record is None:
+                        return None
+                    seen = True
+                    if (record[2] or {}).get('opaquePixels', 0) > 0:
+                        return True
+            return False if seen else None
+        except (KeyError, TypeError, ValueError):
+            return None
+
+    def _radar_quiet_pass(self, ctx, knobs, site, site_ok):
+        """ A resting or dormant tier: refresh the closest site's listing (so
+        the picker's evidence stays honest), run the sentinel when due, fetch
+        no frame tiles. The pass ends 'quiet'; discovery re-arms at the floor. """
+        now = time.time()
+        try:
+            if self._radar_session is None or self._radar_provider != 'iem':
+                if self._radar_session is not None:
+                    self._radar_session.close()
+                self._radar_session = RadarSession()
+                self._radar_provider = 'iem'
+            self._radar_session.begin_pass(ctx['deadline'])
+            self._radar_session.on_retry = lambda end, first_byte=False: self._radar_transport_retry('iem-nexrad-n0b', end, first_byte=first_byte)
+            if site_ok:
+                check = dict(ctx)
+                try:
+                    self._radar_site_listing(check, dict(site))
+                except _RadarBudget:
+                    pass
+            sentinel_every = knobs['sentinel']
+            due = sentinel_every and (self._radar_sentinel is None or now - self._radar_sentinel['at'] >= sentinel_every)
+            if due and _radar_iem_eligible(ctx['station'][0], ctx['station'][1]):
+                self._radar_sentinel_pass(ctx)
+        except (_RadarBudget, _RadarSuperseded, TimeoutError, OSError, ValueError) as error:
+            self._radar_note_yield(error)
+        finally:
+            with self._radar_lock:
+                if self._radar_pass['outcome'] not in ('failed',):
+                    self._radar_pass['outcome'] = 'quiet'
+            self._radar_retained_refresh('idle')
+
+    def _radar_sentinel_pass(self, ctx):
+        """ Four MRMS tiles at zoom 5 around home (~600 km across, ~8 KB): does
+        anything echo out there while the local gauge is dry? Feeds the 'echo'
+        hold so rain approaching is noticed within an hour while resting. """
+        from PIL import Image
+        source = 'iem-mrms-lcref'
+        deadline = min(ctx['deadline'], time.monotonic() + RADAR_SOURCE_DEADLINE_SEC)
+        meta = json.loads(self._radar_request(source, RADAR_IEM_METADATA_URL, deadline, metadata=True))['meta']
+        valid = datetime.fromisoformat(meta['end_valid'].replace('Z', '+00:00'))
+        stamp = int(valid.timestamp())
+        px, py = world_point(ctx['station'][0], ctx['station'][1], RADAR_SENTINEL_ZOOM)
+        tx, ty = int(px // 256), int(py // 256)
+        xs = (tx - 1, tx) if px % 256 < 128 else (tx, tx + 1)
+        ys = (ty - 1, ty) if py % 256 < 128 else (ty, ty + 1)
+        pixels = 0
+        for x in xs:
+            for y in ys:
+                if x < 0 or y < 0 or y >= 2 ** RADAR_SENTINEL_ZOOM:
+                    continue
+                url = RADAR_IEM_TILE_TEMPLATE.format(stamp=_radar_stamp_text(stamp), z=RADAR_SENTINEL_ZOOM, x=x % 2 ** RADAR_SENTINEL_ZOOM, y=y)
+                try:
+                    raw = self._radar_request(source, url, deadline)
+                except (OSError, ValueError, TimeoutError):
+                    continue
+                with Image.open(io.BytesIO(raw)) as image, image.convert('RGBA') as rgba:
+                    pixels += sum(n for n, color in rgba.getcolors(rgba.width * rgba.height) or () if color[3])
+        self._radar_sentinel = dict(at=time.time(), stamp=stamp, pixels=pixels, echo=pixels >= RADAR_SENTINEL_ECHO_PIXELS)
+        Logger.info(f'almanac_emit: radar sentinel stamp={_radar_stamp_text(stamp)} echoPixels={pixels}')
+
     def _radar_starting(self, snap):
         """ The engine has no radar result yet because it is still booting: the
         tile cache is being validated (about 200 tiles/s on the Pi 4) or the first
@@ -1390,6 +1585,12 @@ class AlmanacEmitter:
         health['requests'] = list(self._radar_request_metrics)
         health['pending'] = dict(self._radar_pending)
         health['discovery'] = self._radar_discovery.telemetry(time.time(), self._radar_result.ts_frame)
+        now = time.time()
+        local = datetime.fromtimestamp(now, self._station_tz(getattr(self.app, 'config', {}) or {}) or timezone.utc)
+        health['attention'] = dict(self._radar_attention.telemetry(now), mode=RADAR_ATTENTION_MODE,
+            knobs=self._radar_attention_knobs(), bytesByTier=dict(self._radar_bytes_by_tier),
+            sentinel=self._radar_sentinel, waking=self._radar_waking_since is not None,
+            glances=self._radar_glances.telemetry(now, local))
         cache = self._radar_disk_inventory
         health['cache'] = dict(files=len(cache), bytes=cache.bytes, maxFiles=cache.MAX_FILES,
             maxBytes=cache.MAX_BYTES, ready=self._radar_cache_ready.is_set(), startup=dict(cache.startup))
@@ -1968,6 +2169,7 @@ class AlmanacEmitter:
                     self._radar_count_request(count_outcome)
                     if count_outcome == 'ok':
                         self._radar_pass['validated'].add(source)
+                self._radar_bytes_by_tier[self._radar_attention.tier] += int(byte_count or 0)
                 self._radar_request_metrics.append(dict(at=request_started,elapsedSec=time.monotonic()-request_started,
                     cpuSec=time.thread_time()-request_cpu,source=source,method=method,bytes=byte_count,
                     failureClass=outcome,queueWaitSec=getattr(req,'radar_queue_wait',0)))
@@ -2257,6 +2459,7 @@ class AlmanacEmitter:
         frame['publishable'] = bool(present)
         frame['complete'] = bool(present) and all(all(_radar_present(ctx,source,site,stamp,ctx['zoom'],x,y)
             for x,y,_,_ in _radar_site_tiles(ctx,site)) for site,stamp in (pairs or [(None,ts)]))
+        frame['echo'] = self._radar_frame_echo(ctx, source, pairs, ts) if frame['complete'] else None
         return frame
 
     def _radar_known(self, source, ctx, site=None):
@@ -2581,7 +2784,8 @@ class AlmanacEmitter:
             pairs = [(p['id'],p['ts']) for p in f['siteScans']] or [(None,t)]
             f['complete'] = all(all(_radar_present(ctx,source,site,scan,ctx['zoom'],x,y)
                 for x,y,_,_ in _radar_site_tiles(ctx,site)) for site,scan in pairs)
-        target = min(RADAR_LOOP_FRAMES if ctx['viewed'] else 4 if ctx.get('staging_source') else 1, len(slots))
+        limit = ctx.get('frames_target')  # the attention tier's loop size when active
+        target = min(limit if limit else (RADAR_LOOP_FRAMES if ctx['viewed'] else 4 if ctx.get('staging_source') else 1), len(slots))
         def pending_work():
             count = sum(frames[t]['complete'] for t in slots[-target:])
             self._radar_pending = dict(newest=not frames[newest]['complete'],
@@ -2740,6 +2944,8 @@ class AlmanacEmitter:
 
     def _radar_prefetch(self, source, ctx):
         """Idle source/zoom rounds before history; newest native and disk tiles."""
+        if self._radar_attention_active() and not self._radar_attention_knobs()['prefetch']:
+            return
         if (not ctx['viewed'] or not self._radar_is_viewed() or
                 ctx.get('refresh', {}).get('state') != 'idle'):
             return
@@ -3163,6 +3369,14 @@ class AlmanacEmitter:
                                  source=ctx['source_pref'],
                                  center='station' if centered else dict(center))
             self._radar_checkpoint(ctx)
+            knobs = self._radar_attention_knobs()
+            ctx['attention'] = knobs['tier']
+            if self._radar_attention_active():
+                ctx['frames_target'] = knobs['frames'] or None
+                if not knobs['tiles'] and not intent_triggered and not view_started and not viewed:
+                    self._radar_pass.update(source='iem-nexrad-n0b' if site_ok else 'iem-mrms-lcref', site=site['id'] if site_ok else None)
+                    self._radar_quiet_pass(ctx, knobs, site, site_ok)
+                    return
             # Refresh closest-site evidence on Region's existing discovery wakeup,
             # including unchanged MRMS stamps and unviewed/zoom-below-seven maps.
             if discovery and previous.source_mode == 'mosaic' and site_ok:
@@ -4440,7 +4654,9 @@ class AlmanacEmitter:
             'sagerWind':     None,   # not sourced
             'sagerSky':      None,   # not sourced
         }
-        return _json_safe(self._carry_forward(payload, now))
+        payload = self._carry_forward(payload, now)
+        self._radar_attention_tick(payload, now, tz)
+        return _json_safe(payload)
 
     # --------------------------------------------------------------------
     @staticmethod

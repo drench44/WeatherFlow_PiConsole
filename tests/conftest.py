@@ -1,3 +1,9 @@
+import os
+# The attention tiers change off-tab acquisition by tier and hour of day. The
+# existing suite pins the pre-tier behaviour, so it runs the policy in shadow
+# (decided and published, never applied); tests of the tiers opt in by
+# monkeypatching ae.RADAR_ATTENTION_MODE = 'active'.
+os.environ.setdefault('WFP_RADAR_ATTENTION', 'shadow')
 """ Test bootstrap for the almanac data pipeline.
 
 The console is a Kivy app, but the two seams we test — the wx.json emitter

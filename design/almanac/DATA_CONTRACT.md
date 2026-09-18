@@ -174,6 +174,37 @@ its next poll only after `render()` returned, and the server credits that mark o
 from a loopback client. The launcher's watchdog reads `renders`, because a request
 count never proved anything reached the screen.
 
+## Radar attention tiers (2026-09-17)
+
+The engine spends radar bandwidth where a person is likely to look and weather is
+worth looking at. `radar.attention` is published with every payload:
+`{tier, reason, since, weather, mode, waking, frames, tiles}`.
+
+| tier | when | acquisition |
+|---|---|---|
+| `live` | the Radar tab is open now (`radar_viewing` marker live) | newest at scan cadence, 8-frame loop, zoom/mode prefetch |
+| `warm` | a human touched the device (`presence` marker) or looked at radar within 45 min | newest at cadence plus four history frames |
+| `watch` | weather present (rain hold 60 min, lightning hold 30 min, echo hold 60 min, forecast ≥ 50 % or precipitation words until < 30 %), or observations unknown (older than 5 min), or a usual glance hour, or a LAN browser polling within 15 min | newest at cadence; 8 frames by day (06:00–23:00 local), newest only by night |
+| `rest` | quiet weather, nobody around | site listings every 15 min, no frame tiles, a 4-tile zoom-5 sentinel at home every 60 min by day / 120 by night |
+| `dormant` | rest for 2 h at night, or no attention for 3 days | one listing an hour, no tiles, no sentinel |
+
+Promotion is immediate. Live drops to warm the moment the tab closes; every other
+demotion waits ten minutes in the tier and for every stronger hold to expire. The
+page adds `touch=1` to the poll after any pointer event on any screen; the server
+writes the `presence` marker (loopback only, at most every 10 s). `weather` (holds
+only, never "unknown") drives a small mark on the Radar tab. `waking` is true from a
+rise into warm/live until the first fresh frame publishes, or 90 s; the radar note
+reads "Waking radar · showing HH:MM while the newest scan loads".
+
+`WFP_RADAR_ATTENTION=shadow` publishes tiers without applying them (the test suite
+runs so). A file `radar_attention_force` in the data directory naming a tier
+overrides the decision for two hours (ops/testing). `/health.radar.attention`
+adds holds, the last 32 transitions, knobs, `bytesByTier`, the sentinel result and
+glance-history telemetry. Each frame in the manifest carries `echo` (any opaque
+pixel in its footprint; `null` when a tile is missing). Glance history
+(`radar_glances.json`) is inert until 14 days and 30 view starts, then an hour with
+three glances and three times the mean rate is an expected glance hour.
+
 ## Radar starting state and observation carry-forward (2026-09-16)
 
 `radar.starting` is `null` whenever the engine has a radar result or a conclusive

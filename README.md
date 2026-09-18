@@ -261,6 +261,12 @@ tiles" until the first pass publishes, about a minute on the Pi 4; the other
 panels show the previous run's last observations, marked by their age, until the
 first live reading arrives.
 
+- `attention`: which of the five acquisition tiers the engine is in (`live`,
+  `warm`, `watch`, `rest`, `dormant`), why, since when, the weather holds, the
+  last transitions, and bytes fetched per tier. With the tab closed the engine
+  rests on listings only until rain, lightning, a wet forecast, a touch on the
+  device or an approaching echo (a four-tile sentinel each hour) warms it.
+
 The engine logs one summary line per radar pass (`radar pass outcome=...`); a
 pass that yields on an internal budget says `error=deferred: <reason>`. On the
 Pi 4 kiosk the engine log is `/tmp/almanac_data.log` and the tile cache lives

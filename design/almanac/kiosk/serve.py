@@ -91,6 +91,30 @@ _count_lock = threading.Lock()
 RADAR_VIEW_POLL_GAP_SEC = 5
 
 
+# A human touched the kiosk screen (any tab): the page adds `touch` to its next
+# poll. The engine's attention tiers read this marker's age. At most one write
+# every ten seconds; a browser left open never writes it.
+_presence_lock = threading.Lock()
+_presence_at = 0.0
+
+
+def _note_presence():
+    global _presence_at
+    now = time.time()
+    with _presence_lock:
+        if now - _presence_at < 10:
+            return
+        _presence_at = now
+    marker = os.path.join(os.path.dirname(DATA), 'presence')
+    tmp = f'{marker}.tmp.{os.getpid()}'
+    try:
+        with open(tmp, 'w') as f:
+            f.write(str(now))
+        os.replace(tmp, marker)
+    except OSError:
+        pass
+
+
 def _write_radar_viewing(viewed):
     marker = os.path.join(os.path.dirname(DATA), 'radar_viewing')
     tmp = f'{marker}.tmp.{os.getpid()}'
@@ -413,6 +437,8 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                         _write_radar_zoom(params.get('radarZoom', []))
                         _write_radar_center(params.get('radarCenter', []))
                         _write_radar_source(params.get('radarSource', []))
+                if self.client_address[0] in LOOPBACK and 'touch' in parse_qs(query, keep_blank_values=True):
+                    _note_presence()
                 if viewed_radar and accepted:
                     # Share only a timestamp with the emitter. Serialize writers
                     # and replace atomically so it never reads a partial epoch.
