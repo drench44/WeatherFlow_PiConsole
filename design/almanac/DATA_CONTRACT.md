@@ -178,7 +178,7 @@ count never proved anything reached the screen.
 
 The engine spends radar bandwidth where a person is likely to look and weather is
 worth looking at. `radar.attention` is published with every payload:
-`{tier, reason, since, weather, mode, waking, frames, tiles}`.
+`{tier, reason, since, weather, mode, waking, waiting, frames, tiles}`.
 
 | tier | when | acquisition |
 |---|---|---|
@@ -193,15 +193,36 @@ demotion waits ten minutes in the tier and for every stronger hold to expire. Th
 page adds `touch=1` to the poll after any pointer event on any screen; the server
 writes the `presence` marker (loopback only, at most every 10 s). `weather` (holds
 only, never "unknown") drives a small mark on the Radar tab. `waking` is true from a
-rise into warm/live until the first fresh frame publishes, or 90 s; the radar note
-reads "Waking radar · showing HH:MM while the newest scan loads".
+rise into warm/live until a fresh, complete frame for the accepted preferences
+publishes, or 90 s. Partial tile successes do not end waking. The radar note
+reads "Waking radar · showing HH:MM while the newest scan loads", or "Waking
+radar · fetching the first scan" when there is no image. A scheduled retry or
+source refusal takes precedence. `waiting` keeps a quiet engine's Radar tab
+accessible even if it has never acquired a frame and startup has timed out.
+
+Real view/touch markers promote demand before an intent pass can start; changed
+preference files and boot stamps alone cannot bypass a quiet tier. Quiet passes
+retire deferred frame work, and their listing deadlines are measured from the
+last quiet check, not from each re-arm. More frame demand (including weather
+wakes and daytime Watch) starts acquisition promptly, surviving an in-flight
+pass. History acquisition and pending/retry accounting share the same target.
+Rest's two-hour dwell starts on actual entry; absent attention markers age from
+process startup for the three-day away rule.
 
 `WFP_RADAR_ATTENTION=shadow` publishes tiers without applying them (the test suite
 runs so). A file `radar_attention_force` in the data directory naming a tier
 overrides the decision for two hours (ops/testing). `/health.radar.attention`
 adds holds, the last 32 transitions, knobs, `bytesByTier`, the sentinel result and
-glance-history telemetry. Each frame in the manifest carries `echo` (any opaque
-pixel in its footprint; `null` when a tile is missing). Glance history
+glance-history telemetry. Bytes are response bodies read, charged to the tier at
+request start, including completed chunks and reported partial bytes on failures;
+headers, unreported partial reads, HTTP error bodies that are not read, and
+transport overhead are excluded. This is not a wire-byte budget.
+Each frame in the manifest carries `echo` (any validated pixel at least 10 dBZ
+in its footprint; `null` when coverage is unknown). Site clear air at 5–10 dBZ
+does not count. The sentinel uses the same native-palette decoding and intensity
+floor, validates MRMS timestamps and PNGs, and reports `complete`. Positive
+sentinel evidence needs 20 pixels; negative evidence needs all four tiles.
+Holds age from the scan timestamp, not download time. Glance history
 (`radar_glances.json`) is inert until 14 days and 30 view starts, then an hour with
 three glances and three times the mean rate is an expected glance hour.
 

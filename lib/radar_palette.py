@@ -43,6 +43,18 @@ _RADAR_SITE_PALETTE = ((5.0, (0x7F, 0x82, 0x95, 180)),) + _RADAR_LUT
 def source_palette(source):
     return _RADAR_SITE_PALETTE if source == 'iem-nexrad-n0b' else _RADAR_LUT
 
+
+def weather_pixels(image):
+    """Count remapped precipitation pixels (>=10 dBZ), excluding clear air.
+
+    This consumes the same validated field as the display. Native opacity is
+    coverage, not reflectivity; opaque negative-dBZ samples are commonplace.
+    """
+    colors = {rgba[:3] for _, rgba in _RADAR_LUT}
+    with image.convert('RGBA') as rgba:
+        return sum(n for n, color in rgba.getcolors(rgba.width * rgba.height) or ()
+                   if color[3] and color[:3] in colors)
+
 # Reserved N0B codes still have a documented numeric formula, but no echo.
 INDEX_DBZ = {'iem-mrms-lcref': tuple(i/2-32 for i in range(256)),
              'iem-nexrad-n0b': tuple(None if i < 2 else i/2-33 for i in range(256))}

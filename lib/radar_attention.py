@@ -82,12 +82,13 @@ class Attention:
         now = time.time() if now is None else now
         self.tier = tier
         self.since = now
+        self.started = now
         self.reason = 'startup: conditions unknown'
         self.wet_until = 0.0
         self.lightning_until = 0.0
         self.echo_until = 0.0
         self.forecast_on = False
-        self.rest_since = None
+        self.rest_since = now if tier in ('rest', 'dormant') else None
         self.transitions = []          # (ts, from, to, reason), bounded
         self.forced = None
 
@@ -96,7 +97,7 @@ class Attention:
         fresh = s.obs_age is not None and 0 <= s.obs_age <= OBS_FRESH_SEC
         unknown = not fresh
         if fresh and ((s.rain_rate_mm or 0) > 0 or s.rain_wet):
-            self.wet_until = s.now + WET_HOLD_SEC
+            self.wet_until = max(self.wet_until, s.now - s.obs_age + WET_HOLD_SEC)
         if s.lightning_age is not None and 0 <= s.lightning_age <= LIGHTNING_HOLD_SEC:
             self.lightning_until = max(self.lightning_until, s.now + LIGHTNING_HOLD_SEC - s.lightning_age)
         for echo, age in ((s.echo, s.echo_age), (s.sentinel_echo, s.sentinel_age)):
@@ -134,11 +135,12 @@ class Attention:
             want, why = 'watch', 'LAN viewer'
         else:
             want, why = 'rest', 'quiet weather, nobody around'
-            away = attention_age is not None and attention_age >= AWAY_SEC
+            # An installation with no markers still accumulates absence. Start
+            # conservatively at process startup, never at the Unix epoch.
+            away = (attention_age if attention_age is not None else s.now - self.started) >= AWAY_SEC
             resting = self.rest_since is not None and s.now - self.rest_since >= REST_TO_DORMANT_SEC
             if away or (resting and is_night(s.local_hour)):
                 want, why = 'dormant', 'away' if away else 'quiet night'
-        self.rest_since = (self.rest_since or s.now) if want in ('rest', 'dormant') else None
 
         if self.forced in TIERS:                                  # a test/ops override: no dwell
             if self.forced != self.tier:
@@ -158,6 +160,10 @@ class Attention:
         return self.tier
 
     def _move(self, now, tier, why):
+        if tier not in ('rest', 'dormant'):
+            self.rest_since = None
+        elif self.tier not in ('rest', 'dormant'):
+            self.rest_since = now
         self.transitions.append((now, self.tier, tier, why))
         del self.transitions[:-64]
         self.tier, self.since, self.reason = tier, now, why
