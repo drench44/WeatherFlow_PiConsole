@@ -177,3 +177,17 @@ def test_a_forced_quiet_tier_ignores_the_viewed_marker(make_emitter, hybrid, act
     e._radar_sentinel = dict(at=ae.time.time(), echo=False, pixels=0, stamp=ae.time.time())
     e._do_radar()
     assert e._radar_pass['outcome'] == 'quiet' and not tile_requests(hybrid.calls)
+
+
+def test_a_fall_into_rest_checks_promptly_even_with_a_scan_schedule(make_emitter, hybrid, active, tmp_path):
+    # with frames on hand DiscoverySchedule re-derives its due from the newest scan;
+    # the first quiet check must still come at once, not at the next scan time
+    e = make_emitter(); e._running = True
+    tier(e, 'live'); hybrid.view(); e._do_radar()
+    assert e._radar_result.frames
+    e._radar_arm_discovery()
+    assert e._radar_discovery_floor_until - ae.time.time() > 30       # the natural scan wait
+    (tmp_path / 'radar_attention_force').write_text('rest')
+    e._build_payload()
+    assert e._radar_attention.tier == 'rest'
+    assert e._radar_discovery_floor_until - ae.time.time() <= 5       # prompt first quiet check

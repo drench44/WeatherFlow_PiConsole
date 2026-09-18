@@ -1287,7 +1287,7 @@ class AlmanacEmitter:
                 return
             self._spawn('radar', lambda: self._do_radar(intent_triggered=False))
 
-    def _radar_arm_discovery(self, min_delay=0):
+    def _radar_arm_discovery(self, min_delay=0, prompt=False):
         """One readiness wakeup, separate from repair/warming retries and emit."""
         with self._life_lock:
             old = self._radar_discovery_event
@@ -1313,7 +1313,10 @@ class AlmanacEmitter:
             # The attention floor holds the WAKEUP back, never the schedule's own
             # due: a tier rise re-arms at the natural due. On entering a quiet tier
             # the first quiet pass (listing, sentinel) runs promptly, then the floor.
-            wake = max(delay, self._radar_attention_floor())
+            # DiscoverySchedule owns `due` and re-derives it from the newest frame,
+            # so a caller cannot move it: a prompt wake is asked for here instead
+            # (a tier rise, or the first quiet check on a fall into rest/dormant).
+            wake = 1 if prompt else max(delay, self._radar_attention_floor())
             self._radar_discovery_floor_until = now + wake
             self._radar_discovery_event = self._schedule(self._check_radar_discovery, wake)
 
@@ -1511,12 +1514,11 @@ class AlmanacEmitter:
         if not self._radar_attention_active():
             return
         more = after['frames'] > before['frames'] or after['tiles'] and not before['tiles']
-        if after['listing'] < before['listing'] or (not after['tiles'] and before['tiles']):
-            self._radar_discovery.due = now       # a rise wakes now; a fall runs its first quiet check now
+        prompt = after['listing'] < before['listing'] or (not after['tiles'] and before['tiles'])
         if not after['tiles']:
             self._radar_pending = {}
             self._radar_clear_retry()
-        self._radar_arm_discovery()
+        self._radar_arm_discovery(prompt=prompt)  # a rise wakes now; a fall runs its first quiet check now
         if more and schedule:
             self._schedule(lambda dt: self._check_radar(), .1)
 

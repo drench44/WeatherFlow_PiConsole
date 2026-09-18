@@ -62,7 +62,7 @@ def test_weather_promotion_wakes_dormant_even_with_pass_inflight(make_emitter, h
     assert wakes, callbacks
     wakes[0](0)
     assert e._radar_acquisition_pending
-    assert e._radar_discovery.due < ae.time.time()+3600
+    assert e._radar_discovery_floor_until <= ae.time.time()+5   # the wakeup is prompt; the schedule's own due is its own
 
 
 def test_view_start_promotes_before_intent_pass(make_emitter, hybrid, active, tmp_path):
