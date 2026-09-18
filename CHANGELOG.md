@@ -34,6 +34,13 @@ to shared upstream code that the classic console benefits from too.
   number. Three panel-found fixes share one lesson: the discovery schedule owns
   its due time, so tier floors and prompt wakes live on the wakeup, never in the
   schedule. All verified on the panel over CDP with a forced tier marker.
+- **"Weather nearby" means rain, not insects.** The Radar tab's mark stayed on
+  through a dry night: the KATX frame carried 315,000 pixels at 10 dBZ and
+  6,900 at 20, none at 30, the nocturnal biology and clutter signature, while
+  the previous evening's real showers in the mosaic had 10,000 at 30. Echo now
+  counts pixels at 25 dBZ or more and needs 0.1 % of the footprint (frames and
+  the sentinel alike); the dry night measured 0.04 %, the showers 2 %. The
+  newest frame's count is in `/health.radar.attention.frameEcho` for tuning.
 
 ## 2026-09-16
 

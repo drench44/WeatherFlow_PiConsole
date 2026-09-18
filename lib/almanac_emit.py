@@ -82,8 +82,8 @@ CARRY_SKIP = frozenset(('radar', 'alerts', 'alertCount', 'alertsAgeSec', 'alerts
                         'updateAvailable', 'latestVersion', 'currentVersion'))
 RADAR_ATTENTION_MODE = os.environ.get('WFP_RADAR_ATTENTION', 'active')  # 'active' applies the tiers; 'shadow' only publishes them
 RADAR_SENTINEL_ZOOM = 7  # four tiles ≈ 425 km across at 47.6 N (zoom 5 spanned ~1,700 km: weather that never arrives)
-RADAR_SENTINEL_ECHO_PIXELS = 20
-RADAR_FRAME_ECHO_PIXELS = 200  # opaque pixels across a frame's footprint before it counts as echo (clutter is less)
+RADAR_ECHO_MIN_SHARE = 0.001  # weather pixels (>= 25 dBZ) as a share of the footprint before it counts as echo;
+                              # a dry night's KATX frame measured 0.04 % at 25 dBZ, real showers 2 %
 RADAR_ATTENTION_FORCE_TTL = 7200
 RADAR_STARTING_MAX_SEC = 300  # after this, a radar that never produced a result is unavailable, not starting
 RADAR_LOCAL_RETRY_MAX_SEC = 60  # ceiling for the doubling retry after consecutive local failures
@@ -1068,6 +1068,7 @@ class AlmanacEmitter:
         self._radar_bytes_by_tier = Counter()
         self._radar_sentinel = None
         self._radar_quiet_at = None
+        self._radar_echo_pixels = None
         self._radar_viewing_prev = False
         self._radar_waking_since = None
         self._radar_local_hour = None
@@ -1553,7 +1554,7 @@ class AlmanacEmitter:
             inventory = self._radar_disk_inventory
             seen = False
             unknown = False
-            pixels = 0
+            pixels = tiles = 0
             for site, scan in (pairs or [(None, ts)]):
                 for x, y, _, _ in _radar_site_tiles(ctx, site):
                     record = inventory.records.get(_radar_disk_key(source, site, scan, ctx['zoom'], x, y, ctx.get('smooth', False)))
@@ -1561,9 +1562,11 @@ class AlmanacEmitter:
                         unknown = True
                         continue
                     seen = True
+                    tiles += 1
                     pixels += int(record[2]['weatherPixels'] or 0)
-                    if pixels >= RADAR_FRAME_ECHO_PIXELS:
-                        return True
+            self._radar_echo_pixels = dict(pixels=pixels, tiles=tiles, unknown=unknown)
+            if pixels >= RADAR_ECHO_MIN_SHARE * max(1, tiles) * 65536:
+                return True
             return False if seen and not unknown else None
         except (KeyError, TypeError, ValueError):
             return None
@@ -1649,7 +1652,7 @@ class AlmanacEmitter:
         finally:
             self._radar_session.on_retry = retry
             self._radar_sentinel = dict(at=time.time(), stamp=stamp, pixels=pixels, complete=complete == 4,
-                echo=True if pixels >= RADAR_SENTINEL_ECHO_PIXELS else False if complete == 4 else None)
+                echo=True if pixels >= RADAR_ECHO_MIN_SHARE * 4 * 65536 else False if complete == 4 else None)
         Logger.info(f'almanac_emit: radar sentinel stamp={_radar_stamp_text(stamp)} echoPixels={pixels}')
 
     def _radar_starting(self, snap):
@@ -1687,7 +1690,7 @@ class AlmanacEmitter:
         return dict(self._radar_attention.telemetry(now), mode=RADAR_ATTENTION_MODE,
             knobs=self._radar_attention_knobs(), bytesByTier=byte_counts, wakeupTs=self._radar_discovery_floor_until,
             byteAccounting='response bodies read; excludes headers and transport overhead',
-            sentinel=self._radar_sentinel, waking=self._radar_waking_since is not None,
+            sentinel=self._radar_sentinel, frameEcho=self._radar_echo_pixels, waking=self._radar_waking_since is not None,
             glances=self._radar_glances.telemetry(now, local))
 
     def _radar_probe_delay(self):

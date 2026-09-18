@@ -21,7 +21,7 @@ def native_png(source, dbz):
     return out.getvalue()
 
 
-@pytest.mark.parametrize('dbz,echo', [(-10, False), (5, False), (9.5, False), (15, True)])
+@pytest.mark.parametrize('dbz,echo', [(-10, False), (5, False), (15, False), (24.5, False), (30, True)])
 def test_sentinel_uses_reflectivity_not_native_alpha(make_emitter, hybrid, active, dbz, echo):
     e = make_emitter(); tier(e, 'rest')
     hybrid.tile = native_png('iem-mrms-lcref', dbz)
@@ -53,7 +53,7 @@ def test_stale_sentinel_metadata_cannot_refresh_weather_hold(make_emitter, hybri
     assert not any('mrms::' in c[2] for c in hybrid.calls)
 
 
-@pytest.mark.parametrize('dbz,echo', [(5, False), (15, True)])
+@pytest.mark.parametrize('dbz,echo', [(5, False), (20, False), (30, True)])
 def test_frame_echo_and_reloaded_inventory_exclude_low_dbz(make_emitter, hybrid, active, dbz, echo):
     e = make_emitter(); tier(e, 'watch', hour=2)
     hybrid.tile = native_png('iem-mrms-lcref', dbz)

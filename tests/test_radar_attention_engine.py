@@ -157,7 +157,7 @@ def test_frame_echo_needs_more_than_clutter(make_emitter, hybrid, active, monkey
     e = make_emitter(); e._running = True
     tier(e, 'live'); hybrid.view(); e._do_radar()
     assert e._radar_result.frames[-1]['echo'] is True             # solid fixture tiles: 65,536 opaque px each
-    monkeypatch.setattr(ae, 'RADAR_FRAME_ECHO_PIXELS', 10 ** 9)
+    monkeypatch.setattr(ae, 'RADAR_ECHO_MIN_SHARE', 10.0)
     ctx = dict(zoom=e._radar_result.zoom, smooth=False, bounds=e._radar_result.bounds, station=(47.6, -122.3),
                tiles=e._radar_result.tiles and [(t[0], t[1], 0, 0) for t in []] or None, sites=[], site_scans={})
     src = e._radar_result.source_id
@@ -191,3 +191,12 @@ def test_a_fall_into_rest_checks_promptly_even_with_a_scan_schedule(make_emitter
     e._build_payload()
     assert e._radar_attention.tier == 'rest'
     assert e._radar_discovery_floor_until - ae.time.time() <= 5       # prompt first quiet check
+
+
+def test_echo_floor_is_rain_not_insects():
+    # the panel's measured dry-night KATX frame: 315k px at 10 dBZ, 6.9k at 20, 364 at 25, 0 at 30
+    from lib import radar_palette as rp
+    assert rp.WEATHER_FLOOR_DBZ == 25
+    footprint = 15 * 65536
+    assert 364 < ae.RADAR_ECHO_MIN_SHARE * footprint            # the dry night stays quiet
+    assert 19_475 >= ae.RADAR_ECHO_MIN_SHARE * 35 * 65536       # the evening's real showers count

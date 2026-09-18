@@ -44,13 +44,19 @@ def source_palette(source):
     return _RADAR_SITE_PALETTE if source == 'iem-nexrad-n0b' else _RADAR_LUT
 
 
-def weather_pixels(image):
-    """Count remapped precipitation pixels (>=10 dBZ), excluding clear air.
+WEATHER_FLOOR_DBZ = 25  # rain, not insects: the Puget Sound night sky is thick with 10-20 dBZ that never falls
 
-    This consumes the same validated field as the display. Native opacity is
-    coverage, not reflectivity; opaque negative-dBZ samples are commonplace.
+
+def weather_pixels(image, floor_dbz=WEATHER_FLOOR_DBZ):
+    """Count remapped pixels at or above the floor, excluding clear air.
+
+    Measured on the panel (2026-09-18, dry night): the KATX frame held 315,000
+    pixels at 10 dBZ, 6,900 at 20 and none at 30, while real showers in the
+    mosaic the evening before showed 10,000 at 30. Reflectivity below 25 dBZ
+    at night is biology and clutter far more often than rain. Native opacity
+    is coverage, not reflectivity.
     """
-    colors = {rgba[:3] for _, rgba in _RADAR_LUT}
+    colors = {rgba[:3] for dbz, rgba in _RADAR_LUT if dbz >= floor_dbz}
     with image.convert('RGBA') as rgba:
         return sum(n for n, color in rgba.getcolors(rgba.width * rgba.height) or ()
                    if color[3] and color[:3] in colors)
