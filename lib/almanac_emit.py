@@ -80,6 +80,7 @@ CARRY_WINDOW_SEC = 600     # ... and fills still-unfetched fields (forecast, AQI
 CARRY_SKIP = frozenset(('radar', 'alerts', 'alertCount', 'alertsAgeSec', 'alertsAsOf', 'alertsStale',
                         'ts', 'time', 'date', 'obsTs', 'obsAgeSec', 'carried',
                         'updateAvailable', 'latestVersion', 'currentVersion'))
+RADAR_ENABLED = os.environ.get('WFP_RADAR', '1') != '0'  # a kiosk with no way to show radar (tabs off) runs none of it
 RADAR_ATTENTION_MODE = os.environ.get('WFP_RADAR_ATTENTION', 'active')  # 'active' applies the tiers; 'shadow' only publishes them
 RADAR_SENTINEL_ZOOM = 7  # four tiles ≈ 425 km across at 47.6 N (zoom 5 spanned ~1,700 km: weather that never arrives)
 RADAR_ECHO_MIN_SHARE = 0.001  # weather pixels (>= 25 dBZ) as a share of the footprint before it counts as echo;
@@ -1170,11 +1171,14 @@ class AlmanacEmitter:
             # 7-day outlook: staggered after alerts, then hourly
             self._schedule(self._check_forecast, 50)
             self._schedule(self._check_forecast, FORECAST_CHECK_INTERVAL, interval=True)
-            self._radar_start_inventory()
-            self._schedule(self._check_radar, 60)
-            self._radar_zoom_stamp = self._radar_preference_stamp()
-            self._schedule(self._check_radar_zoom, RADAR_INTENT_CHECK_SEC, interval=True)
-            self._schedule(self._check_radar_geo, RADAR_GEO_QUANTUM_SEC, interval=True)
+            if RADAR_ENABLED:
+                self._radar_start_inventory()
+                self._schedule(self._check_radar, 60)
+                self._radar_zoom_stamp = self._radar_preference_stamp()
+                self._schedule(self._check_radar_zoom, RADAR_INTENT_CHECK_SEC, interval=True)
+                self._schedule(self._check_radar_geo, RADAR_GEO_QUANTUM_SEC, interval=True)
+            else:
+                Logger.info('almanac_emit: radar disabled (WFP_RADAR=0): no acquisition, cache scan, geography or listings')
             return self._event
 
     def stop(self):
@@ -1672,6 +1676,7 @@ class AlmanacEmitter:
 
     def _radar_health_payload(self):
         health = self._radar_health.snapshot()
+        health['enabled'] = RADAR_ENABLED
         health['phases'] = list(self._radar_phase_metrics)
         health['requests'] = list(self._radar_request_metrics)
         health['pending'] = dict(self._radar_pending)
@@ -4781,7 +4786,10 @@ class AlmanacEmitter:
             'sagerSky':      None,   # not sourced
         }
         payload = self._carry_forward(payload, now)
-        self._radar_attention_tick(payload, now, tz)
+        if RADAR_ENABLED:
+            self._radar_attention_tick(payload, now, tz)
+        else:
+            payload['radar'] = dict(available=False, reason='radar off', enabled=False, starting=None, attention=None)
         return _json_safe(payload)
 
     # --------------------------------------------------------------------

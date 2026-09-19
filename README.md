@@ -256,6 +256,9 @@ The radar engine reports its own health at `/health` under `radar`:
 - `discovery`, `pending`, `phases`, `requests`: the acquisition schedule and the
   last 128 requests.
 
+A panel with the tab bar off (`WFP_TABS=0`, for a screen without touch) runs no
+radar at all; set `WFP_RADAR=1` on the service to override.
+
 After a restart the Radar tab stays and reads "Starting · checking N saved
 tiles" until the first pass publishes, about a minute on the Pi 4; the other
 panels show the previous run's last observations, marked by their age, until the

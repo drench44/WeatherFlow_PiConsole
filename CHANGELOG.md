@@ -34,6 +34,11 @@ to shared upstream code that the classic console benefits from too.
   number. Three panel-found fixes share one lesson: the discovery schedule owns
   its due time, so tier floors and prompt wakes live on the wakeup, never in the
   schedule. All verified on the panel over CDP with a forced tier marker.
+- **No tabs, no radar.** A panel without the tab bar has no way to reach the
+  Radar tab, yet the engine still scanned the tile cache at boot, acquired a
+  loop, pre-warmed geography and ran listings. The launcher now derives
+  `WFP_RADAR` from `WFP_TABS`, and with it off the engine runs none of that and
+  publishes `radar.reason: "radar off"`.
 - **"Weather nearby" means rain, not insects.** The Radar tab's mark stayed on
   through a dry night: the KATX frame carried 315,000 pixels at 10 dBZ and
   6,900 at 20, none at 30, the nocturnal biology and clutter signature, while

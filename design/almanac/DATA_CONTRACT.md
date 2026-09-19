@@ -174,6 +174,14 @@ its next poll only after `render()` returned, and the server credits that mark o
 from a loopback client. The launcher's watchdog reads `renders`, because a request
 count never proved anything reached the screen.
 
+## Radar off (2026-09-18)
+
+A kiosk that cannot show radar runs none of it. The launcher passes
+`WFP_RADAR="${WFP_RADAR:-${WFP_TABS:-1}}"` to the engine: with the tab bar off the
+engine schedules no acquisition, cache scan, geography pre-warm or listings, and
+publishes `radar: {available: false, reason: "radar off", enabled: false, starting:
+null, attention: null}`. `/health.radar.enabled` says so. `WFP_RADAR=1` forces it on.
+
 ## Radar attention tiers (2026-09-17)
 
 The engine spends radar bandwidth where a person is likely to look and weather is

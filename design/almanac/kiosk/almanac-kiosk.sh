@@ -186,7 +186,10 @@ launch_xvfb(){
   XVFB_PID=$!
 }
 launch_engine(){
-  ( cd "$APP" && DISPLAY="$VDISP" WFP_HEADLESS=1 KCFG_GRAPHICS_MAXFPS=10 "$PY" main.py ) >/tmp/almanac_data.log 2>&1 &
+  # A panel with no tab bar (WFP_TABS=0) has no way to show radar, so the engine
+  # runs none of it: no tile cache scan, no acquisition, no geography, no
+  # listings. WFP_RADAR overrides explicitly if ever needed.
+  ( cd "$APP" && DISPLAY="$VDISP" WFP_HEADLESS=1 WFP_RADAR="${WFP_RADAR:-${WFP_TABS:-1}}" KCFG_GRAPHICS_MAXFPS=10 "$PY" main.py ) >/tmp/almanac_data.log 2>&1 &
   ENGINE_PID=$!
   ENGINE_GRACE=6                                   # ~90s warmup before the freshness check judges it
 }
