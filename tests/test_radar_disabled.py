@@ -11,7 +11,8 @@ def test_disabled_radar_schedules_nothing_and_says_so(make_emitter, monkeypatch)
     assert not any(name.startswith('_check_radar') for name in scheduled), scheduled
     assert e._radar_cache_thread is None                     # no inventory scan thread
     p = e._build_payload()
-    assert p['radar'] == dict(available=False, reason='radar off', enabled=False, starting=None, attention=None)
+    assert {k: v for k, v in p['radar'].items() if k != 'health'} == dict(available=False, reason='radar off', enabled=False, starting=None, attention=None)
+    assert p['radar']['health']['enabled'] is False               # /health reads this block
     assert e._radar_health_payload()['enabled'] is False
     e.stop()
 

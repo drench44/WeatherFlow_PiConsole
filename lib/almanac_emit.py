@@ -4789,7 +4789,8 @@ class AlmanacEmitter:
         if RADAR_ENABLED:
             self._radar_attention_tick(payload, now, tz)
         else:
-            payload['radar'] = dict(available=False, reason='radar off', enabled=False, starting=None, attention=None)
+            payload['radar'] = dict(available=False, reason='radar off', enabled=False, starting=None, attention=None,
+                                    health=dict(enabled=False, lastSuccessTs=None, breaker='closed', cache=None, attention=None))
         return _json_safe(payload)
 
     # --------------------------------------------------------------------
