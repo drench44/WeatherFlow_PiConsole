@@ -3202,6 +3202,9 @@
   function radarPendingRetry(){
     var f=radarView.refresh||{},at=f.nextRetry,now=radarView.payloadTs;
     if(!isNum(at)||!isNum(now)||at<=now)return null;
+    // A budget retry is the engine pacing itself; with the whole loop on screen and
+    // current there is nothing for the viewer to wait for, so it stays silent.
+    if(f.retryReason==='budget'&&radarView.data&&!radarView.data.stale&&radarReady().length>=radarStartCount(radarView.data)&&radarReady().length>=Math.min(8,radarView.loaded.length))return null;
     var reasons={budget:'work budget',deadline:'acquisition deadline',provider:'provider issue',local:'local issue','not reporting':'site not reporting'};
     return {reason:reasons[f.retryReason]||reasons[f.reason]||'scheduled retry',when:at-now<1?'now':Math.ceil(at-now)+'s'};
   }
@@ -3224,7 +3227,7 @@
     else if(radarView.holdingWindow&&f.state!=='failed')copy=(radarView.nextAt?'Playing previous view':'Previous view')+' · sharpening '+radarView.loaded.filter(f=>f.bitmap).length+' of '+Math.min(8,Math.max(radarView.loaded.length,r.frameCount||0));
     else if((radarView.current?.bitmap&&radarView.loaded.some(f=>!f.bitmap))&&f.state!=='failed')copy='Refreshing · frame '+radarView.loaded.filter(f=>f.bitmap).length+' of '+Math.min(8,Math.max(radarView.loaded.length,r.frameCount||0));
     else if(f.state==='newest')copy='Refreshing · newest frame';
-    else if(f.state==='history')copy='Refreshing · frame '+f.frameIndex+' of '+f.frameTotal;
+    else if(f.state==='history'&&radarView.loaded.length&&radarView.loaded.some(x=>!x.bitmap))copy='Refreshing · frame '+radarView.loaded.filter(x=>x.bitmap).length+' of '+Math.min(8,radarView.loaded.length);
     else if(f.state==='failed')copy="Couldn't refresh · showing "+radarFrameLabel(radarView.current||{});
     if(!copy)copy=radarView.zoomNote||'';
     if(!copy&&r.sourceFallback==='site-zoom-floor'&&radarSource.desired!=='mosaic'){

@@ -139,7 +139,7 @@ class udp_client():
         try:
             if self.message:
                 if 'type' in self.message:
-                    if self.message['type'] in ['hub_status', 'device_status', 'evt_precip']:
+                    if self.message['type'] in ['hub_status', 'device_status']:
                         pass
                     else:
                         if 'serial_number' in self.message:
@@ -184,6 +184,9 @@ class udp_client():
                             elif self.message['type'] == 'evt_strike':
                                 if self.message['serial_number'] in [self.config['Station']['TempestSN'], self.config['Station']['OutAirSN']]:
                                     self.app.obsParser.parse_evt_strike(self.message, self.config)
+                            elif self.message['type'] == 'evt_precip':
+                                if self.message['serial_number'] in [self.config['Station']['TempestSN'], self.config['Station']['SkySN']]:
+                                    self.app.obsParser.parse_evt_precip(self.message, self.config)
                             else:
                                 Logger.warning(f'Websocket: {self.system.log_time()} - Unknown message type: {json.dumps(self.message)}')
                         else:

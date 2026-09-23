@@ -512,6 +512,25 @@ class obs_parser():
         # Calculate derived observations
         self.calc_derived_variables(device_id, config, 'evt_strike')
 
+    def parse_evt_precip(self, message, config):
+
+        """ Parse the rain-start event from a TEMPEST or SKY module. The device
+        sends it the moment its sensor registers rain, up to a minute before
+        the next obs_st carries any; the almanac shows "Rain Starting" until
+        that observation confirms or contradicts it.
+
+        INPUTS:
+            message             evt_precip message: evt = [epoch]
+            config              Console configuration object
+        """
+        evt = message.get('evt') if isinstance(message, dict) else None
+        if not evt or not isinstance(evt[0], (int, float)):
+            return
+        if self.display_obs.get('precipStartTs') == evt[0]:
+            return                                              # the websocket repeats messages
+        self.display_obs['precipStartTs'] = evt[0]
+        self.update_display('evt_precip')
+
     def calc_derived_variables(self, device, config, device_type):
 
         """ Calculate derived variables from available device observations

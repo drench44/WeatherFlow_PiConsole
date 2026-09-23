@@ -174,6 +174,20 @@ its next poll only after `render()` returned, and the server credits that mark o
 from a loopback client. The launcher's watchdog reads `renders`, because a request
 count never proved anything reached the screen.
 
+## Viewing, unattended radar and rain start (2026-09-23)
+
+`radar_viewing` is written by every loopback `wx.json` poll with `view=radar` and
+removed by every loopback poll without it, independent of camera ownership. The
+engine treats the tab as open while the marker exists and its `last` is under
+`RADAR_VIEWING_LAPSE_SEC` (60 s) old. `radar.attention.unattended` is true while the
+tab is open and no touch (`presence` marker) has arrived for 30 minutes; the tier
+stays `live` with 8 frames but `prefetch` is off.
+
+`rainStatus` may read `"Rain Starting"`: the station's `evt_precip` event arrived
+after the latest observation (`precipStartTs` > `obsTs`), the observed status is
+dry, and the event is under `RAIN_START_HOLD_SEC` (300 s) old. The next observation
+governs. It counts as wet for the attention tiers.
+
 ## Radar off (2026-09-18)
 
 A kiosk that cannot show radar runs none of it. The launcher passes

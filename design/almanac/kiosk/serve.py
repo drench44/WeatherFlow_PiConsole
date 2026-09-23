@@ -425,9 +425,14 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                     camera_report = viewed_radar and params.get('radarTheme',[''])[0] in ('paper','night')
                     ordered = 'radarSession' in params
                     accepted = _camera_transaction(_radar_activity(params), params) if ordered and camera_report else not ordered and _radar_owner is None
+                    # Whether the Radar tab is on screen is a presence fact, not a
+                    # camera one: every kiosk poll writes it (view=radar) or clears it.
+                    # It used to follow camera acceptance, so once a radar session
+                    # owned the camera a plain poll never cleared it, and the engine
+                    # had to infer "tab closed" from a 10 s silence (live<->warm flaps).
+                    _write_radar_viewing(viewed_radar)
                     if accepted:
                         _write_radar_preference('radar_smooth', params.get('radarSmooth', []))
-                        _write_radar_viewing(viewed_radar)
                     if camera_report and accepted:
                         marker=os.path.join(os.path.dirname(DATA),'radar_activity');tmp=marker+'.tmp'
                         try:

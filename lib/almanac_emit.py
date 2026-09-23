@@ -86,6 +86,8 @@ RADAR_SENTINEL_ZOOM = 7  # four tiles ≈ 425 km across at 47.6 N (zoom 5 spanne
 RADAR_ECHO_MIN_SHARE = 0.001  # weather pixels (>= 25 dBZ) as a share of the footprint before it counts as echo;
                               # a dry night's KATX frame measured 0.04 % at 25 dBZ, real showers 2 %
 RADAR_ATTENTION_FORCE_TTL = 7200
+RAIN_START_HOLD_SEC = 300  # evt_precip shows 'Rain Starting' until the next obs_st, never longer than this
+RADAR_VIEWING_LAPSE_SEC = 60  # the page clears radar_viewing when it leaves the tab; silence alone must last this long
 RADAR_STARTING_MAX_SEC = 300  # after this, a radar that never produced a result is unavailable, not starting
 RADAR_LOCAL_RETRY_MAX_SEC = 60  # ceiling for the doubling retry after consecutive local failures
 RADAR_HISTORY_SEC = 3600
@@ -1424,7 +1426,7 @@ class AlmanacEmitter:
         try:
             with open(self._radar_marker('radar_viewing')) as f:
                 record = json.load(f)
-            return 0 <= now - float(record['last']) < RADAR_VIEW_POLL_GAP_SEC * 2
+            return 0 <= now - float(record['last']) < RADAR_VIEWING_LAPSE_SEC
         except (OSError, ValueError, TypeError, KeyError):
             return False
 
@@ -1443,7 +1445,7 @@ class AlmanacEmitter:
             lan_viewer_age=self._radar_marker_age('last_viewer', now, content=False),
             obs_age=payload.get('obsAgeSec') if payload.get('obsTs') is not None else None,
             rain_rate_mm=payload.get('rainRateMm'),
-            rain_wet=payload.get('rainStatus') in ('Very Light Rain', 'Light Rain', 'Moderate Rain',
+            rain_wet=payload.get('rainStatus') in ('Rain Starting', 'Very Light Rain', 'Light Rain', 'Moderate Rain',
                 'Heavy Rain', 'Very Heavy Rain', 'Extreme Rain', 'Snow Likely'),
             lightning_age=lightning_since if isinstance(lightning_since, (int, float)) else None,
             precip_pct=payload.get('fcPrecipPct'),
@@ -1484,6 +1486,7 @@ class AlmanacEmitter:
             knobs = attention.knobs(self._radar_local_hour)
             payload['radar']['attention'] = dict(tier=attention.tier, reason=attention.reason, since=attention.since,
                 weather=attention.weather(now), mode=RADAR_ATTENTION_MODE, waking=self._radar_waking_since is not None,
+                unattended=attention.unattended,
                 frames=knobs['frames'], tiles=knobs['tiles'],
                 waiting=self._radar_attention_active() and self._radar_quiet_at is not None
                     and not self._radar_result.available and self._radar_result.reason == 'no data yet')
@@ -4005,6 +4008,24 @@ class AlmanacEmitter:
     }
 
     @staticmethod
+    def _rain_starting(status, precip_start, obs_ts, now):
+        """ The Tempest's evt_precip arrives the moment its sensor feels rain,
+        up to a minute before the next obs_st carries any. Between the event
+        and that observation a dry status reads 'Rain Starting'; the
+        observation then governs, even if it measured nothing. Bounded by
+        RAIN_START_HOLD_SEC if observations stop. Never raises. """
+        try:
+            if status != 'Currently Dry' or precip_start is None:
+                return status
+            if obs_ts is not None and obs_ts >= precip_start:
+                return status
+            if not 0 <= now - precip_start <= RAIN_START_HOLD_SEC:
+                return status
+            return 'Rain Starting'
+        except TypeError:
+            return status
+
+    @staticmethod
     def _snowify_status(status, temp, temp_unit, fc_rows):
         """ The Tempest's haptic rain sensor cannot register snowfall, so in
         freezing weather with snow in today's forecast, 'Currently Dry' is
@@ -4713,9 +4734,9 @@ class AlmanacEmitter:
             'rainRate':     self._rain_rate_display(Obs, config, rain_eff_mm),
             'rainRateMm':   rain_eff_mm,    # mm/hr, max(raw minute, 10-min mean) - drives the gauge
             'rainRateInstMm': rain_raw_mm,  # the sensor's raw minute, for the record
-            'rainStatus':   self._snowify_status(
+            'rainStatus':   self._rain_starting(self._snowify_status(
                                 self._rain_status_for(rain_eff_mm, _text(_idx(Obs.get('RainRate'), 2))),
-                                temp_val, temp_unit, fc_rows),
+                                temp_val, temp_unit, fc_rows), _num(Obs.get('precipStartTs')), obs_ts, now),
             'drySpellDays': None,   # not reliably sourced - see report
             'lastRainDate': None,   # not sourced - no last-rain date/amount is tracked
             'lastRainAmt':  None,   # not sourced

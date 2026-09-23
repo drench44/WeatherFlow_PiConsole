@@ -200,7 +200,7 @@ class websocketClient():
         try:
             if self.message:
                 if 'type' in self.message:
-                    if self.message['type'] in ['connection_opened', 'ack', 'evt_precip']:
+                    if self.message['type'] in ['connection_opened', 'ack']:
                         pass
                     else:
                         if 'device_id' in self.message:
@@ -246,6 +246,8 @@ class websocketClient():
                                 self.app.obsParser.parse_rapid_wind(self.message, self.config)
                             elif self.message['type'] == 'evt_strike':
                                 self.app.obsParser.parse_evt_strike(self.message, self.config)
+                            elif self.message['type'] == 'evt_precip':
+                                self.app.obsParser.parse_evt_precip(self.message, self.config)
                             else:
                                 Logger.warning(f'Websocket: {self.system.log_time()} - Unknown message type: {json.dumps(self.message)}')
                         else:

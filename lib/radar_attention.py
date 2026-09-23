@@ -37,6 +37,7 @@ PRECIP_WORDS = re.compile(r'\b(rain|shower|drizzle|snow|sleet|hail|thunder|storm
 PERCENT = re.compile(r'(\d{1,3})\s*%')
 
 WARM_HOLD_SEC = 45 * 60
+UNATTENDED_SEC = 30 * 60   # an open Radar tab with no touch this long is on display, not in use
 WET_HOLD_SEC = 60 * 60
 LIGHTNING_HOLD_SEC = 30 * 60
 ECHO_HOLD_SEC = 60 * 60
@@ -92,6 +93,7 @@ class Attention:
         self.rest_since = now if tier in ('rest', 'dormant') else None
         self.transitions = []          # (ts, from, to, reason), bounded
         self.forced = None
+        self.unattended = False
 
     # ---- weather holds ---------------------------------------------------
     def _weather(self, s):
@@ -129,8 +131,12 @@ class Attention:
         holds, unknown = self._weather(s)
         attention_age = min(a for a in (s.viewed_age, s.touch_age) if a is not None) if any(
             a is not None for a in (s.viewed_age, s.touch_age)) else None
+        # A tab left open on a kitchen panel is on display, not being studied:
+        # keep the 8-frame loop current, drop the zoom/mode prefetch that only
+        # pays while fingers are on the map. The next touch restores it.
+        self.unattended = bool(s.viewing) and (s.touch_age is None or s.touch_age >= UNATTENDED_SEC)
         if s.viewing:
-            want, why = 'live', 'radar tab open'
+            want, why = 'live', 'radar tab open, unattended' if self.unattended else 'radar tab open'
         elif attention_age is not None and attention_age < WARM_HOLD_SEC:
             want, why = 'warm', f'attention {int(attention_age/60)} min ago'
         elif holds:
@@ -151,6 +157,7 @@ class Attention:
                 want, why = 'dormant', 'away' if away else 'quiet night'
 
         if self.forced in TIERS:                                  # a test/ops override: no dwell
+            self.unattended = False
             if self.forced != self.tier:
                 self._move(s.now, self.forced, f'forced {self.forced}')
             else:
@@ -184,10 +191,11 @@ class Attention:
         k = KNOBS[self.tier]
         night = is_night(local_hour)
         return dict(tier=self.tier, frames=k['frames'][1 if night else 0], tiles=k['tiles'],
-                    listing=k['listing'], sentinel=k['sentinel'][1 if night else 0], prefetch=k['prefetch'])
+                    listing=k['listing'], sentinel=k['sentinel'][1 if night else 0],
+                    prefetch=k['prefetch'] and not (self.tier == 'live' and self.unattended))
 
     def telemetry(self, now):
-        return dict(tier=self.tier, reason=self.reason, since=self.since, forced=self.forced,
+        return dict(tier=self.tier, reason=self.reason, since=self.since, forced=self.forced, unattended=self.unattended,
                     weather=self.weather(now), holds=dict(
                         rain=max(0, int(self.wet_until - now)), lightning=max(0, int(self.lightning_until - now)),
                         echo=max(0, int(self.echo_until - now)), forecast=self.forecast_on),

@@ -21,6 +21,7 @@ def Obs():
     """ Define the Obs property values """
 
     return {'obsTs': None,         'strikeTs': None,        # raw epochs (almanac freshness)
+            'precipStartTs': None,                              # evt_precip: rain began (epoch)
             'outTemp': '--',       'FeelsLike': '----',     'DewPoint': '--',
             'outTempDiff': '---',  'outTempTrend': '---',   'outTempMax': '---',
             'outTempMin': '---',   'Humidity': '--',        'SLP': '---',

@@ -256,6 +256,11 @@ The radar engine reports its own health at `/health` under `radar`:
 - `discovery`, `pending`, `phases`, `requests`: the acquisition schedule and the
   last 128 requests.
 
+A Radar tab left open with nobody touching the screen for 30 minutes keeps its
+8-frame loop current but stops the zoom and source prefetch; a touch restores it.
+The Rainfall tile reads "Rain Starting" the moment the station senses rain, before
+the next minute's observation arrives.
+
 A panel with the tab bar off (`WFP_TABS=0`, for a screen without touch) runs no
 radar at all; set `WFP_RADAR=1` on the service to override.
 

@@ -4,6 +4,30 @@ Changes in Weather Almanac, newest first. The upstream WeatherFlow
 PiConsole keeps its own release notes; entries under **Core** below are fixes
 to shared upstream code that the classic console benefits from too.
 
+## 2026-09-23
+
+### Before the rain
+- **Radar no longer flips between live and warm while you watch it.** About
+  twice an hour an open Radar tab dropped to warm and back, cutting the loop
+  target from 8 frames to 4 and cancelling any pass in flight. The server only
+  cleared the "tab open" marker on polls that were accepted for camera
+  ownership, so once a radar session owned the camera the tab-closed signal never
+  fired and the engine guessed from a 10-second silence. Every kiosk poll now
+  writes or clears the marker; silence alone must last a minute.
+- **An open Radar tab nobody touches stays live but stops prefetching.** A panel
+  left on Radar counted as someone studying it all day (21.6 MB by 3 PM). After
+  30 minutes without a touch it keeps the full 8-frame loop current and drops the
+  zoom and mode prefetch; the next touch restores it.
+- **Rain onset is instant.** The Tempest sends a rain-start event the moment its
+  sensor feels rain; both transports discarded it, so the panel waited up to a
+  minute for the next observation. The Rainfall tile now reads "Rain Starting"
+  until that observation confirms or contradicts it (never longer than five
+  minutes), and the radar warms at once.
+- **Quieter radar notes.** The history note counts the frames of the loop on
+  screen ("frame 6 of 8", never "frame 25 of 31"), and the engine pacing itself
+  ("Retrying · work budget") is not announced while the whole loop is on screen
+  and current.
+
 ## 2026-09-17
 
 ### Radar
