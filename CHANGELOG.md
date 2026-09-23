@@ -23,6 +23,12 @@ to shared upstream code that the classic console benefits from too.
   minute for the next observation. The Rainfall tile now reads "Rain Starting"
   until that observation confirms or contradicts it (never longer than five
   minutes), and the radar warms at once.
+- **Reviewed before the rain.** Astra's review hardened all of the above: the
+  page reports Radar visibility as an ordered message, so a stray or delayed
+  request can never clear or resurrect it; going unattended no longer cancels the
+  visible loop, only optional warming; the silent budget note requires the
+  current view's frames actually on screen; the rain-start event is validated and
+  timed by the Pi's clock, so a station clock that drifts cannot hide it.
 - **Quieter radar notes.** The history note counts the frames of the loop on
   screen ("frame 6 of 8", never "frame 25 of 31"), and the engine pacing itself
   ("Retrying · work budget") is not announced while the whole loop is on screen
