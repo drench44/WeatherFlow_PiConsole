@@ -22,6 +22,7 @@ def Obs():
 
     return {'obsTs': None,         'strikeTs': None,        # raw epochs (almanac freshness)
             'precipStartTs': None,                              # evt_precip: rain began (epoch)
+            'precipStartReceivedTs': None,                      # Pi receipt epoch (expiry independent of station clock)
             'outTemp': '--',       'FeelsLike': '----',     'DewPoint': '--',
             'outTempDiff': '---',  'outTempTrend': '---',   'outTempMax': '---',
             'outTempMin': '---',   'Humidity': '--',        'SLP': '---',

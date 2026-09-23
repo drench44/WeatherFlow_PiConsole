@@ -96,6 +96,37 @@ RADAR_VIEW_POLL_GAP_SEC = 5
 # every ten seconds; a browser left open never writes it.
 _presence_lock = threading.Lock()
 _presence_at = 0.0
+_view_owner = None
+
+
+def _view_transaction(params):
+    """Explicit page reports, independently ordered from camera transactions.
+
+    Caller holds _count_lock. Once a current page reports, auxiliary reads and
+    delayed/aborted requests cannot clear or resurrect its viewing marker.
+    A reload claims the owner returned in X-View-Session, like camera ownership.
+    """
+    global _view_owner
+    if 'viewSession' not in params:
+        return _view_owner is None  # legacy pages, until the first explicit report
+    if any(len(params.get(k, [])) != 1 for k in ('viewSession', 'viewSeq', 'view')):
+        return False
+    session, seq = params['viewSession'][0], params['viewSeq'][0]
+    if (not re.fullmatch(r'[A-Za-z0-9-]{16,64}', session)
+            or not re.fullmatch(r'[0-9]{1,12}', seq)
+            or params['view'] not in (['radar'], ['none'])):
+        return False
+    seq = int(seq)
+    if _view_owner is None:
+        _view_owner = dict(session=session, seq=-1)
+    elif session != _view_owner['session']:
+        if params.get('viewClaim') != [_view_owner['session']]:
+            return False
+        _view_owner = dict(session=session, seq=-1)
+    if seq <= _view_owner['seq']:
+        return False
+    _view_owner['seq'] = seq
+    return True
 
 
 def _note_presence():
@@ -425,12 +456,8 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                     camera_report = viewed_radar and params.get('radarTheme',[''])[0] in ('paper','night')
                     ordered = 'radarSession' in params
                     accepted = _camera_transaction(_radar_activity(params), params) if ordered and camera_report else not ordered and _radar_owner is None
-                    # Whether the Radar tab is on screen is a presence fact, not a
-                    # camera one: every kiosk poll writes it (view=radar) or clears it.
-                    # It used to follow camera acceptance, so once a radar session
-                    # owned the camera a plain poll never cleared it, and the engine
-                    # had to infer "tab closed" from a 10 s silence (live<->warm flaps).
-                    _write_radar_viewing(viewed_radar)
+                    if _view_transaction(params):
+                        _write_radar_viewing(viewed_radar)
                     if accepted:
                         _write_radar_preference('radar_smooth', params.get('radarSmooth', []))
                     if camera_report and accepted:
@@ -504,6 +531,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 except (OSError, UnicodeError):
                     smooth = False
                 self.send_header('X-Radar-Smooth', 'on' if smooth else 'off')
+                self.send_header('X-View-Session', _view_owner['session'] if _view_owner else '')
                 self.send_header('X-Radar-Intent', json.dumps(dict(intent=record, acceptedGeneration=owner['generation'], **owner), separators=(',', ':')))
         if getattr(self, '_immutable_radar', False):
             self.send_header('Cache-Control', 'public, max-age=31536000, immutable')

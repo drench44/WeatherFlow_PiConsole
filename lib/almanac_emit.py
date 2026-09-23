@@ -1445,6 +1445,7 @@ class AlmanacEmitter:
             lan_viewer_age=self._radar_marker_age('last_viewer', now, content=False),
             obs_age=payload.get('obsAgeSec') if payload.get('obsTs') is not None else None,
             rain_rate_mm=payload.get('rainRateMm'),
+            rain_starting=payload.get('rainStatus') == 'Rain Starting',
             rain_wet=payload.get('rainStatus') in ('Rain Starting', 'Very Light Rain', 'Light Rain', 'Moderate Rain',
                 'Heavy Rain', 'Very Heavy Rain', 'Extreme Rain', 'Snow Likely'),
             lightning_age=lightning_since if isinstance(lightning_since, (int, float)) else None,
@@ -1514,7 +1515,7 @@ class AlmanacEmitter:
         running is retained by the existing single-flight pending mechanism.
         """
         after = self._radar_attention_knobs()
-        if after == before:
+        if all(after[k] == before[k] for k in after if k != 'prefetch'):
             return
         if (after['tier'] in ('warm', 'live') and RANK[after['tier']] > RANK[before['tier']]
                 and not self._radar_current_complete(now)):
@@ -1892,8 +1893,13 @@ class AlmanacEmitter:
             raise _RadarSuperseded('radar intent changed')
         if self._radar_attention_active() and 'attention_knobs' in ctx:
             before, after = ctx['attention_knobs'], self._radar_attention_knobs()
-            if any(before[k] != after[k] for k in ('frames', 'tiles', 'prefetch')):
+            if any(before[k] != after[k] for k in ('frames', 'tiles')):
                 raise _RadarSuperseded('radar attention demand changed')
+            # Optional demand never invalidates the visible loop. Yield only
+            # optional work, and let the foreground finish with current knobs.
+            ctx['attention_knobs'] = after
+            if not after['prefetch'] and (ctx.get('prefetch') or ctx.get('deep_history')):
+                raise _RadarBudget('radar optional work no longer requested')
         if self._radar_discovery_pending and (ctx.get('prefetch') or ctx.get('request_reserve')):
             raise _RadarBudget('radar warming yielded to readiness discovery')
         if ctx.get('deep_history') and self._radar_deep_view_delay(ctx) != 0:
@@ -2956,6 +2962,8 @@ class AlmanacEmitter:
                 for deep, tier in ((False, ordered[:RADAR_LOOP_FRAMES]),
                                    (True, ordered[RADAR_LOOP_FRAMES:])):
                     if deep:
+                        if self._radar_attention_active() and not self._radar_attention_knobs()['prefetch']:
+                            break
                         if deferred or any(not frames[t]['complete'] for t in ordered[:RADAR_LOOP_FRAMES]):
                             break
                         self._radar_publish_refresh(ctx, state='idle')
@@ -3033,6 +3041,12 @@ class AlmanacEmitter:
                 ctx.pop('deep_history', None)
                 ctx.pop('request_reserve', None)
                 self._radar_session.on_retry = retry
+            if self._radar_attention_active() and not self._radar_attention_knobs()['prefetch']:
+                # Optional demand may disappear after `ordered` was built.
+                # Finish/retry the visible target only, not abandoned warming.
+                ordered = ordered[:target]
+                ctx['attention_knobs'] = self._radar_attention_knobs()
+                pending_work()
             if any(not frames[t]['complete'] for t in ordered):
                 if deferred and retry_reason == 'budget':
                     # The gate refused before this frame's cost was priced, so
@@ -4008,7 +4022,7 @@ class AlmanacEmitter:
     }
 
     @staticmethod
-    def _rain_starting(status, precip_start, obs_ts, now):
+    def _rain_starting(status, precip_start, obs_ts, now, received=None):
         """ The Tempest's evt_precip arrives the moment its sensor feels rain,
         up to a minute before the next obs_st carries any. Between the event
         and that observation a dry status reads 'Rain Starting'; the
@@ -4019,7 +4033,9 @@ class AlmanacEmitter:
                 return status
             if obs_ts is not None and obs_ts >= precip_start:
                 return status
-            if not 0 <= now - precip_start <= RAIN_START_HOLD_SEC:
+            # Ordering uses the station's clock; expiry uses the Pi's clock.
+            # Older Obs holders without receipt metadata retain epoch expiry.
+            if not 0 <= now - (received if received is not None else precip_start) <= RAIN_START_HOLD_SEC:
                 return status
             return 'Rain Starting'
         except TypeError:
@@ -4736,7 +4752,8 @@ class AlmanacEmitter:
             'rainRateInstMm': rain_raw_mm,  # the sensor's raw minute, for the record
             'rainStatus':   self._rain_starting(self._snowify_status(
                                 self._rain_status_for(rain_eff_mm, _text(_idx(Obs.get('RainRate'), 2))),
-                                temp_val, temp_unit, fc_rows), _num(Obs.get('precipStartTs')), obs_ts, now),
+                                temp_val, temp_unit, fc_rows), _num(Obs.get('precipStartTs')), obs_ts, now,
+                                _num(Obs.get('precipStartReceivedTs'))),
             'drySpellDays': None,   # not reliably sourced - see report
             'lastRainDate': None,   # not sourced - no last-rain date/amount is tracked
             'lastRainAmt':  None,   # not sourced

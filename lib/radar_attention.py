@@ -68,7 +68,7 @@ def is_night(local_hour):
 class Signals:
     """Everything the decision reads. Ages are seconds; None means unknown."""
     __slots__ = ('now', 'local_hour', 'viewing', 'viewed_age', 'touch_age', 'lan_viewer_age',
-                 'obs_age', 'rain_rate_mm', 'rain_wet', 'lightning_age', 'precip_pct', 'conditions',
+                 'obs_age', 'rain_rate_mm', 'rain_wet', 'rain_starting', 'lightning_age', 'precip_pct', 'conditions',
                  'echo', 'echo_age', 'sentinel_echo', 'sentinel_age', 'expected_glance')
 
     def __init__(self, now, **values):
@@ -101,6 +101,8 @@ class Attention:
         unknown = not fresh
         if fresh and ((s.rain_rate_mm or 0) > 0 or s.rain_wet):
             self.wet_until = max(self.wet_until, s.now - s.obs_age + WET_HOLD_SEC)
+        if s.rain_starting:  # the emitter independently bounds this event's age
+            self.wet_until = max(self.wet_until, s.now + WET_HOLD_SEC)
         if s.lightning_age is not None and 0 <= s.lightning_age <= LIGHTNING_HOLD_SEC:
             self.lightning_until = max(self.lightning_until, s.now + LIGHTNING_HOLD_SEC - s.lightning_age)
         for echo, age in ((s.echo, s.echo_age), (s.sentinel_echo, s.sentinel_age)):

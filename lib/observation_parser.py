@@ -17,6 +17,7 @@ this program. If not, see <http://www.gnu.org/licenses/>.
 
 # Import required library modules
 import time
+import math
 
 from lib.request_api import weatherflow_api
 from lib.system      import system
@@ -524,11 +525,17 @@ class obs_parser():
             config              Console configuration object
         """
         evt = message.get('evt') if isinstance(message, dict) else None
-        if not evt or not isinstance(evt[0], (int, float)):
+        if not isinstance(evt, (list, tuple)) or not evt or type(evt[0]) not in (int, float):
             return
-        if self.display_obs.get('precipStartTs') == evt[0]:
-            return                                              # the websocket repeats messages
-        self.display_obs['precipStartTs'] = evt[0]
+        try:
+            if not math.isfinite(evt[0]) or evt[0] <= 0:
+                return
+        except OverflowError:
+            return
+        previous = self.display_obs.get('precipStartTs')
+        if previous is not None and evt[0] <= previous:
+            return                                              # repeats and out-of-order delivery
+        self.display_obs.update(precipStartTs=evt[0], precipStartReceivedTs=time.time())
         self.update_display('evt_precip')
 
     def calc_derived_variables(self, device, config, device_type):
@@ -742,6 +749,8 @@ class obs_parser():
         # Update display values with new derived observations
         reference_error = False
         for key, value in list(self.display_obs.items()):
+            if ob_type == 'evt_precip' and key not in ('precipStartTs', 'precipStartReceivedTs'):
+                continue  # an obs worker may still be deriving the other fields
             if not (ob_type == 'obs_all' and 'rapid' in key):
                 try:                                                            # Don't update rapidWind display when type is 'all'
                     self.app.CurrentConditions.Obs[key] = value                 # as the RapidWind rose is not animated in this case

@@ -1276,13 +1276,13 @@
     });
     /* the radar loop runs only while its tab is open (idle off-tab, Pi-friendly) */
     if (typeof radarLoopSync === "function" && radarView) {
-      var enteringRadar = id === "s-radar" && !radarView.active;
+      var radarVisibilityChanged = (id === "s-radar") !== radarView.active;
       radarView.active = (id === "s-radar");
       if (!radarView.active) { radarGestureCancel(); radarRelease(); }
       else if (radarView.data) radarActivate();
       radarIdleSync(false);
       radarLoopSync();
-      if (enteringRadar) {
+      if (radarVisibilityChanged) {
         poll(true);
       }
     }
@@ -3189,7 +3189,7 @@
   $('rad-plate').addEventListener('dblclick',e=>{if(!e.target.closest(RAD_CONTROLS))radarZoomChange(1,radarPointer(e));});
   $('rad-recenter').addEventListener('click',radarRecenter);$('rad-zoom-in').addEventListener('click',()=>radarZoomChange(1));$('rad-zoom-out').addEventListener('click',()=>radarZoomChange(-1));$('rad-zoom-reset').addEventListener('click',()=>radarZoomChange(0));
   document.addEventListener('keydown',e=>{if(!radarView.active||e.ctrlKey||e.metaKey||e.altKey||e.target.isContentEditable||/^(INPUT|TEXTAREA|SELECT)$/.test(e.target.tagName))return;var step={'+':1,'=':1,'-':-1,'−':-1,'_':-1,'0':0}[e.key];if(step!==undefined){e.preventDefault();radarZoomChange(step);}});
-  document.addEventListener('visibilitychange',()=>{if(document.hidden){radarGestureCancel();radarRelease();}else if(radarView.active)radarActivate();});
+  document.addEventListener('visibilitychange',()=>{if(document.hidden){radarGestureCancel();radarRelease();}else if(radarView.active)radarActivate();poll(true);});
   window.matchMedia('(prefers-reduced-motion: reduce)').addEventListener('change',()=>{radarView.blend=null;radarView.singleSweep=false;radarView.current=radarView.good;radarEchoDirty=true;if(radarGesture.inertia)radarSettle();radarLoopSync();});
   function radarPostIntent(immediate=false){clearTimeout(radarIntent.timer);radarIntent.postedAt=Date.now();radarIntent.generation++;radarIntent.ready=true;
     if(!radarIntent.preferredMode)radarIntent.preferredMode=radarView.data?.sourcePref||'mosaic';
@@ -3204,7 +3204,11 @@
     if(!isNum(at)||!isNum(now)||at<=now)return null;
     // A budget retry is the engine pacing itself; with the whole loop on screen and
     // current there is nothing for the viewer to wait for, so it stays silent.
-    if(f.retryReason==='budget'&&radarView.data&&!radarView.data.stale&&radarReady().length>=radarStartCount(radarView.data)&&radarReady().length>=Math.min(8,radarView.loaded.length))return null;
+    var r=radarView.data,target=r?.tiles?.frames?.slice(-8)||[],loaded=radarView.loaded;
+    var currentLoop=r&&!r.stale&&f.state!=='failed'&&!radarView.holdingWindow&&!radarView.pendingSource&&!radarSource.desired&&
+      target.length>=radarStartCount(r)&&target.every(want=>loaded.some(frame=>frame.ts===want.ts&&frame.bitmap&&frame.ready&&
+        JSON.stringify(frame.camera)===JSON.stringify(radarCamera)));
+    if(f.retryReason==='budget'&&currentLoop)return null;
     var reasons={budget:'work budget',deadline:'acquisition deadline',provider:'provider issue',local:'local issue','not reporting':'site not reporting'};
     return {reason:reasons[f.retryReason]||reasons[f.reason]||'scheduled retry',when:at-now<1?'now':Math.ceil(at-now)+'s'};
   }
@@ -3532,15 +3536,17 @@
     if(!radarIntent.owned&&radarIntent.owner!==null)zoomQuery+='&radarClaim='+encodeURIComponent(radarIntent.owner);
     if(posting&&radarIntent.owned)zoomQuery+='&radarCommit=1&radarPolicy='+(radarZoom.auto?'auto':'manual')+'&radarSource='+radarIntent.preferredMode;
     var geoQuery=radarActive&&radarCamera?'&radarGeoZoom='+clamp(Math.round(radarCamera.zoom),4,10)+'&radarGeoCenter='+encodeURIComponent(radarCamera.lat.toFixed(10)+','+(((radarCamera.lon+180)%360+360)%360-180).toFixed(10)):'';
+    var viewQuery='&viewSession='+radarIntent.session+'&viewSeq='+gen+(radarIntent.viewOwner==null?'':'&viewClaim='+encodeURIComponent(radarIntent.viewOwner));
     var touched = presenceDirty; presenceDirty = false;
-    fetch("wx.json?_=" + started + (ack ? "&r=1" : "") + (touched ? "&touch=1" : "") + (radarActive ? "&view=radar&radarTheme="+radarBaseStyle.theme+"&radarMoving="+(radarGesture.state!=='idle'?1:0) + geoQuery + zoomQuery + (radarSmooth.pending===null?"":"&radarSmooth="+(radarSmooth.pending?"on":"off")) : ""), opts)
+    fetch("wx.json?_=" + started + viewQuery + (ack ? "&r=1" : "") + (touched ? "&touch=1" : "") + (radarActive ? "&view=radar&radarTheme="+radarBaseStyle.theme+"&radarMoving="+(radarGesture.state!=='idle'?1:0) + geoQuery + zoomQuery + (radarSmooth.pending===null?"":"&radarSmooth="+(radarSmooth.pending?"on":"off")) : "&view=none"), opts)
       .then(function (r) {
         if (!r.ok) throw new Error("HTTP " + r.status);
         var srv = Date.parse(r.headers.get("Date") || "");   /* the producer's clock, 1 s resolution */
-        return r.json().then(function (d) { return { d: d, srvMs: srv, ack:JSON.parse(r.headers.get('X-Radar-Intent')||'null'), smooth:r.headers.get('X-Radar-Smooth') }; });
+        return r.json().then(function (d) { return { d: d, srvMs: srv, ack:JSON.parse(r.headers.get('X-Radar-Intent')||'null'), smooth:r.headers.get('X-Radar-Smooth'), viewOwner:r.headers.get('X-View-Session') }; });
       })
       .then(function (x) {
         if (gen !== pollGen) return;              /* superseded; this one was abandoned */
+        if(x.viewOwner!=null)radarIntent.viewOwner=x.viewOwner;
         var d = x.d;
         if (!validPayload(d)) throw new Error("bad payload");
         if(x.ack){radarIntent.owner=x.ack.session;if(!radarIntent.owned){radarIntent.accepted=x.ack.intent;if(!radarIntent.edited)radarIntent.preferredMode=x.ack.intent.source||radarIntent.preferredMode;radarIntent.owned=x.ack.session===radarIntent.session;if(radarIntent.owned&&!radarIntent.edited&&x.ack.intent.zoom!==undefined&&radarCamera){var r=radarView.data,c=x.ack.intent.center==='station'?r.center:x.ack.intent.center,z=x.ack.intent.zoom==='auto'?r.zoomAutoLevel:x.ack.intent.zoom;radarZoom.auto=x.ack.intent.zoomPolicy==='auto'||x.ack.intent.zoom==='auto';if(Math.abs(radarCamera.lat-c.lat)>1e-8||Math.abs(radarCamera.lon-c.lon)>1e-8||radarCamera.zoom!==z){radarCameraSet({...c,zoom:z});radarSettle();}if(x.ack.intent.source!==r.sourceMode)radarSource.desired=x.ack.intent.source;}}if(x.ack.session===radarIntent.session&&x.ack.generation===sentIntentGeneration){radarIntent.ready=false;radarTrace('accepted');}}

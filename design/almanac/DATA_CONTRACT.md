@@ -176,8 +176,14 @@ count never proved anything reached the screen.
 
 ## Viewing, unattended radar and rain start (2026-09-23)
 
-`radar_viewing` is written by every loopback `wx.json` poll with `view=radar` and
-removed by every loopback poll without it, independent of camera ownership. The
+The page sends `view=radar` or `view=none` on every main loopback `wx.json`
+poll, including first load, render acknowledgement, immediate polls, and visibility
+changes. `viewSession` and increasing `viewSeq` order these reports independently
+of camera ownership. Reloads claim the session returned by `X-View-Session` using
+`viewClaim`. Once this protocol is established, auxiliary reads and obsolete
+reports cannot change `radar_viewing`. Legacy polls retain their prior semantics
+until the first explicit report. An accepted Radar report writes the marker;
+an accepted exit removes it. The
 engine treats the tab as open while the marker exists and its `last` is under
 `RADAR_VIEWING_LAPSE_SEC` (60 s) old. `radar.attention.unattended` is true while the
 tab is open and no touch (`presence` marker) has arrived for 30 minutes; the tier
@@ -185,8 +191,12 @@ stays `live` with 8 frames but `prefetch` is off.
 
 `rainStatus` may read `"Rain Starting"`: the station's `evt_precip` event arrived
 after the latest observation (`precipStartTs` > `obsTs`), the observed status is
-dry, and the event is under `RAIN_START_HOLD_SEC` (300 s) old. The next observation
-governs. It counts as wet for the attention tiers.
+dry, and the event was received within `RAIN_START_HOLD_SEC` (300 s). The parser keeps
+`precipStartReceivedTs` on the Pi's clock for expiry; station epochs remain the
+ordering clock. Duplicate and older events cannot renew receipt time. The next
+observation governs, even if dry. A bounded onset counts as wet for attention even
+when the preceding observation is stale. Event display updates publish only event
+fields, so they cannot expose an observation worker's unfinished values.
 
 ## Radar off (2026-09-18)
 
