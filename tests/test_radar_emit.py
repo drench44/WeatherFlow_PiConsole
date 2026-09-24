@@ -269,8 +269,7 @@ _UNIVERSAL_BLUE_SNOW = {20: '#7fbfffff'}
 
 
 def test_shared_legend_replaces_native_scales():
-    assert all(settings['legend'] is (ae._RADAR_SITE_RAMP if source=='iem-nexrad-n0b' else ae._RADAR_RAMP)
-               for source, settings in ae._RADAR_SOURCES.items())
+    assert all(settings['legend'] is ae._RADAR_DISPLAY_RAMP for settings in ae._RADAR_SOURCES.values())
     assert all(source['legend'].get('snow') is None for source in ae._RADAR_SOURCES.values())
 
 

@@ -66,8 +66,9 @@ def test_all_indices_and_clear_air_alpha(source):
     allowed = {c[:3] for _,c in rp.source_palette(source)}
     assert all(c[:3] in allowed for c in result.getdata() if c[3])
     if source.endswith('n0b'):
+        # clear air (index 80, 7 dBZ) draws nothing under the 15 dBZ display floor, smoothed or not
         clear = rp.smooth_remap(gates(source,[80,80]),source,rp.source_palette(source))
-        assert set(clear.getdata()) == {(127,130,149,180)}
+        assert all(c[3] == 0 for c in clear.getdata())
 
 
 @pytest.mark.parametrize('address', ['127.0.0.1','::1','::ffff:127.0.0.1','198.51.100.1'])

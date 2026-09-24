@@ -63,10 +63,12 @@ def test_frame_echo_and_reloaded_inventory_exclude_low_dbz(make_emitter, hybrid,
     assert metadata['weatherPixels'] == ae._radar_tile_metadata(path, 'iem-mrms-lcref')['weatherPixels']
 
 
-def test_site_clear_air_is_visible_but_not_precipitation():
-    with Image.open(io.BytesIO(native_png('iem-nexrad-n0b', 7))) as native:
+@pytest.mark.parametrize('dbz', [7, 12.5])
+def test_clear_air_and_sub_floor_returns_are_neither_drawn_nor_counted(dbz):
+    # 2026-09-24: below DISPLAY_FLOOR_DBZ (15) the panel draws nothing (clutter, insects).
+    with Image.open(io.BytesIO(native_png('iem-nexrad-n0b', dbz))) as native:
         with rp.remap(native, 'iem-nexrad-n0b', rp.source_palette('iem-nexrad-n0b')) as mapped:
-            assert mapped.getchannel('A').getextrema()[1] > 0
+            assert mapped.getchannel('A').getextrema()[1] == 0
             assert rp.weather_pixels(mapped) == 0
 
 

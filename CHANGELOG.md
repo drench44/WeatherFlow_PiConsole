@@ -4,6 +4,17 @@ Changes in Weather Almanac, newest first. The upstream WeatherFlow
 PiConsole keeps its own release notes; entries under **Core** below are fixes
 to shared upstream code that the classic console benefits from too.
 
+## 2026-09-24
+
+### Radar
+- **The radar draws rain, not clutter.** Nothing below 15 dBZ is drawn now, from
+  any source, and the grey clear-air band is gone from site mode. On a dry
+  afternoon with a 0 % forecast, 49 % of what the panel drew was that grey band
+  and another 32 % was 10 to 15 dBZ: insects, birds and ground clutter fanning out
+  around each radar. Light rain starts above the floor, so every shower still
+  shows. The colour ramp itself is unchanged; the legend now starts at 15, and the
+  render revision moved, so every cached tile re-renders once.
+
 ## 2026-09-23
 
 ### Before the rain

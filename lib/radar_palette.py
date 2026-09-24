@@ -40,8 +40,36 @@ _RADAR_SITE_RAMP = dict(_RADAR_RAMP, floorDbz=5, bands=[_CLEAR_AIR_BAND] + _RADA
 _RADAR_SITE_PALETTE = ((5.0, (0x7F, 0x82, 0x95, 180)),) + _RADAR_LUT
 
 
+# What the panel draws. The ramp and its LUT stay the designed 10-75 dBZ scale
+# (echo counting and contrast checks use them); below DISPLAY_FLOOR_DBZ nothing
+# is drawn. Measured on the panel on a dry afternoon (2026-09-24, 0 % forecast):
+# 49 % of drawn site pixels were the 5-10 dBZ clear-air grey and 32 % were
+# 10-15 dBZ, insects, birds and ground clutter. Light rain starts above it.
+DISPLAY_FLOOR_DBZ = 15
+
+
+def _clip_ramp(ramp, floor):
+    bands = []
+    for band in ramp['bands']:
+        if band['hi'] <= floor or band.get('kind') == 'clear-air':
+            continue
+        if band['lo'] < floor:
+            start, end = (bytes.fromhex(band[k][1:]) for k in ('start', 'end'))
+            t = (floor - band['lo']) / (band['hi'] - band['lo'])
+            band = dict(band, lo=floor, start='#%02X%02X%02X' % tuple(round(a+(b-a)*t) for a, b in zip(start, end)))
+        bands.append(band)
+    return dict(ramp, floorDbz=floor, bands=bands)
+
+
+_RADAR_DISPLAY_RAMP = _clip_ramp(_RADAR_RAMP, DISPLAY_FLOOR_DBZ)
+# A stop with alpha 0 explicitly suppresses its bin (see remap); below the first
+# stop is transparent too, so the site clear-air band no longer draws.
+_RADAR_DISPLAY_LUT = tuple((dbz, rgba if dbz >= DISPLAY_FLOOR_DBZ else rgba[:3] + (0,)) for dbz, rgba in _RADAR_LUT)
+
+
 def source_palette(source):
-    return _RADAR_SITE_PALETTE if source == 'iem-nexrad-n0b' else _RADAR_LUT
+    """The drawing palette for every source: the designed LUT above the display floor."""
+    return _RADAR_DISPLAY_LUT
 
 
 WEATHER_FLOOR_DBZ = 25  # rain, not insects: the Puget Sound night sky is thick with 10-20 dBZ that never falls

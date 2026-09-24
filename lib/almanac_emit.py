@@ -147,19 +147,19 @@ RADAR_RAINVIEWER_COLOR = 2
 RADAR_RAINVIEWER_TILE_OPTS = "0_0"
 RADAR_RAINVIEWER_MANIFEST_URL = "https://api.rainviewer.com/public/weather-maps.json"
 RADAR_DIR = os.environ.get("WFP_RADAR_DIR", os.path.expanduser("~/almanac_web/radar"))
-from lib.radar_palette import _RADAR_RAMP, _RADAR_LUT, _RADAR_SITE_RAMP, REMAP_REVISION, SMOOTH_REVISION, remap, smooth_remap, source_palette
+from lib.radar_palette import _RADAR_RAMP, _RADAR_LUT, _RADAR_SITE_RAMP, _RADAR_DISPLAY_RAMP, REMAP_REVISION, SMOOTH_REVISION, remap, smooth_remap, source_palette
 _RADAR_SOURCES = {
     'iem-nexrad-n0b': dict(provider='iem', attribution='IEM / NOAA',
         attribution_url='https://mesonet.agron.iastate.edu/GIS/ridge.phtml',
-        cadence=300, stale_sec=900, legend=_RADAR_SITE_RAMP, max_zoom=10),
+        cadence=300, stale_sec=900, legend=_RADAR_DISPLAY_RAMP, max_zoom=10),
     'iem-mrms-lcref': dict(provider='iem', attribution='IEM / NOAA MRMS',
         attribution_url='https://mesonet.agron.iastate.edu/ogc/',
         cadence=RADAR_IEM_FRAME_INTERVAL_SEC, stale_sec=RADAR_IEM_STALE_SEC,
-        legend=_RADAR_RAMP, max_zoom=9),
+        legend=_RADAR_DISPLAY_RAMP, max_zoom=9),
     'rainviewer': dict(provider='rainviewer', attribution='RainViewer',
         attribution_url='https://www.rainviewer.com/',
         cadence=RADAR_RAINVIEWER_FRAME_INTERVAL_SEC, stale_sec=RADAR_RAINVIEWER_STALE_SEC,
-        legend=_RADAR_RAMP, max_zoom=7),
+        legend=_RADAR_DISPLAY_RAMP, max_zoom=7),
 }
 # Coarse station-center CONUS land mask (lon, lat), deliberately independent of
 # the nearest-NEXRAD caption. Coast/border detail is approximate, not geocoding.
@@ -781,7 +781,7 @@ def _radar_revision_digest(remap_revision,basemap_revision,native_revision):
     # per revision, rather than serializing three palettes for every inventory stat.
     pixels=repr([(source,source_palette(source)) for source in sorted(_RADAR_SOURCES)])
     return hashlib.sha256(('tile-wire-visible-v41-1'+remap_revision+repr(_RADAR_RAMP)+
-                          repr(_RADAR_SITE_RAMP)+pixels+native_revision+basemap_revision).encode()).hexdigest()[:12]
+                          repr(_RADAR_SITE_RAMP)+repr(_RADAR_DISPLAY_RAMP)+pixels+native_revision+basemap_revision).encode()).hexdigest()[:12]
 
 
 def _radar_render_revision(smooth=False):
@@ -944,7 +944,7 @@ _RadarResult = namedtuple('_RadarResult',
     'source_id provider attribution attribution_url cadence stale_sec legend partial_coverage '
     'max_zoom zoom_desired zoom_auto_level geo source_mode site_id sources scanning_slowly sites sites_considered source_pref source_fallback tiles units scan_cadence_sec scan_mode scan_mode_source',
     defaults=('rainviewer', 'rainviewer', 'RainViewer', 'https://www.rainviewer.com/',
-              RADAR_RAINVIEWER_FRAME_INTERVAL_SEC, RADAR_RAINVIEWER_STALE_SEC, _RADAR_RAMP, False,
+              RADAR_RAINVIEWER_FRAME_INTERVAL_SEC, RADAR_RAINVIEWER_STALE_SEC, _RADAR_DISPLAY_RAMP, False,
               7, None, 7, None, 'mosaic', None, (), False, (), 0, 'mosaic', None, None, 'mi', None, None, None))
 _RADAR_NONE = _RadarResult(False, 'no data yet', (), None, None, None, None, None,
                            None, None, None, None)

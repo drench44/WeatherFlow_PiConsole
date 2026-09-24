@@ -16,17 +16,16 @@ def indexed(source):
 
 
 def test_k1_source_legends():
+    # One drawn scale for every source since 2026-09-24: 15-75 dBZ, no clear-air band.
     for source, settings in ae._RADAR_SOURCES.items():
         legend = settings['legend']
-        if source == 'iem-nexrad-n0b':
-            assert legend['floorDbz'] == 5
-            assert legend['bands'][0] == dict(lo=5, hi=10, start='#7F8295', end='#7F8295', alpha=180, kind='clear-air')
-            assert legend['bands'][1:] == rp._RADAR_RAMP['bands']
-        else:
-            assert legend['floorDbz'] == 10
-            assert all('kind' not in b and 'alpha' not in b for b in legend['bands'])
-    assert len(rp._RADAR_LUT) == 26
-    assert rp._RADAR_SITE_PALETTE[1:] == rp._RADAR_LUT
+        assert legend['floorDbz'] == rp.DISPLAY_FLOOR_DBZ == 15
+        assert legend['bands'][0] == dict(lo=15, hi=20, start='#639C7B', end='#50956C')   # the ramp's own colour at 15
+        assert legend['bands'][1:] == rp._RADAR_RAMP['bands'][1:]
+        assert all('kind' not in b and 'alpha' not in b for b in legend['bands'])
+    assert len(rp._RADAR_LUT) == 26                                   # the designed ramp is unchanged
+    assert [d for d, c in rp._RADAR_DISPLAY_LUT if not c[3]] == [10.0, 12.5]
+    assert all(rp.source_palette(s) is rp._RADAR_DISPLAY_LUT for s in rp._FILES)
 
 
 def luminance(rgb):
@@ -51,16 +50,12 @@ def test_k2_computed_contrast():
 def test_k3_k4_index_floor_and_coverage():
     tile = indexed('iem-nexrad-n0b')
     site = rp.remap(tile, 'iem-nexrad-n0b', rp.source_palette('iem-nexrad-n0b'))
-    for i in (0, 1, 2, 75):
-        assert site.getpixel((i, 0))[3] == 0
-    for i in range(76, 86):
-        coverage = rp._indexed_colors('iem-nexrad-n0b')[i][3]
-        assert site.getpixel((i, 0)) == (127,130,149,round(coverage*180/255))
-    assert site.getpixel((86, 0)) == (118,163,138,255)
-    mosaic = rp.remap(tile, 'iem-nexrad-n0b', rp.source_palette('iem-mrms-lcref'))
-    assert all(mosaic.getpixel((i, 0))[3] == 0 for i in range(76, 86))
+    # N0B index 96 is 15 dBZ: everything below it, clear air included, is transparent.
+    assert all(site.getpixel((i, 0))[3] == 0 for i in range(0, 96))
+    assert site.getpixel((96, 0)) == (99,156,123,255)
     mrms = rp.remap(indexed('iem-mrms-lcref'), 'iem-mrms-lcref', rp.source_palette('iem-mrms-lcref'))
-    assert all(mrms.getpixel((i, 0))[3] == 0 for i in range(76, 84))
+    assert all(mrms.getpixel((i, 0))[3] == 0 for i in range(0, 94))          # MRMS index 94 is 15 dBZ
+    assert mrms.getpixel((94, 0)) == (99,156,123,255)
     # RGBA coverage is independent of intensity, including fractional edge alpha.
     color = rp._indexed_colors('iem-nexrad-n0b')[76]
     for coverage in (1, 73, 128, 180, 254, 255):
@@ -122,7 +117,7 @@ def test_k6_site_zoom_floor(make_emitter, hybrid, tmp_path):
     emitter = make_emitter(); emitter._do_radar()
     r = emitter._build_payload()['radar']
     assert r['sourcePref'] == 'site' and r['sourceMode'] == 'mosaic'
-    assert r['legend']['floorDbz'] == 10
+    assert r['legend']['floorDbz'] == 15
     assert all(b.get('kind') != 'clear-air' for b in r['legend']['bands'])
 
 

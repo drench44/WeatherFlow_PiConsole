@@ -174,6 +174,16 @@ its next poll only after `render()` returned, and the server credits that mark o
 from a loopback client. The launcher's watchdog reads `renders`, because a request
 count never proved anything reached the screen.
 
+## Radar display floor (2026-09-24)
+
+`DISPLAY_FLOOR_DBZ` (15) is the drawing floor for every source. `source_palette()`
+returns `_RADAR_DISPLAY_LUT`: the designed 26-stop LUT with the stops below the
+floor (10, 12.5 dBZ) at alpha 0, so they and anything below the first stop render
+transparent; the site clear-air band (5-10 dBZ) is no longer drawn. `radar.legend`
+is `_RADAR_DISPLAY_RAMP`: `floorDbz` 15, first band 15-20 starting at the ramp's
+own colour at 15 (`#639C7B`), no `kind`/`alpha` bands. `_RADAR_RAMP`, `_RADAR_LUT`
+and the echo count (`weather_pixels`, 25 dBZ) are unchanged.
+
 ## Viewing, unattended radar and rain start (2026-09-23)
 
 The page sends `view=radar` or `view=none` on every main loopback `wx.json`
