@@ -3465,7 +3465,7 @@
         var swatch=document.createElement('i'); swatch.style.flex=String(band.hi-band.lo)+' 1 0px';
         swatch.style.background=band.kind==='clear-air' ? 'var(--rad-clear-air)' : 'linear-gradient(90deg,'+band.start+','+band.end+')'; ramp.append(swatch);
       });
-      [floorDbz,10,20,30,40,50,60,70].filter((v,i,a)=>a.indexOf(v)===i).forEach(function(dbz) {
+      [floorDbz,10,20,30,40,50,60,70].filter((v,i,a)=>v>=floorDbz&&a.indexOf(v)===i).forEach(function(dbz) {
         var tick=document.createElement('span'); tick.className='rad-tick'; tick.textContent=dbz;
         tick.style.left=((dbz-floorDbz)/(75-floorDbz)*372)+'px'; ticks.append(tick);
       });

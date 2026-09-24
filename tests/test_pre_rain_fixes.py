@@ -155,3 +155,11 @@ assert.notEqual(radarPendingRetry(),null,'other retry reasons are still reported
 ''')
     html = Path('design/almanac/console_live.html').read_text()
     assert "copy='Refreshing · frame '+f.frameIndex+' of '+f.frameTotal" not in html
+
+
+def test_legend_ticks_never_fall_below_the_display_floor():
+    # 2026-09-24: with the scale starting at 15 dBZ the fixed "10" tick hung off the left end
+    html = Path('design/almanac/console_live.html').read_text()
+    assert '[floorDbz,10,20,30,40,50,60,70].filter((v,i,a)=>v>=floorDbz&&a.indexOf(v)===i)' in html
+    ticks = [v for i, v in enumerate([15, 10, 20, 30, 40, 50, 60, 70]) if v >= 15 and [15, 10, 20, 30, 40, 50, 60, 70].index(v) == i]
+    assert ticks == [15, 20, 30, 40, 50, 60, 70]
