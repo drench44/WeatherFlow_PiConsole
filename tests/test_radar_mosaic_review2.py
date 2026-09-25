@@ -142,7 +142,10 @@ def test_prefetch_pending_classification_continues_region_targets(make_emitter, 
 def test_stalled_hca_does_not_occupy_next_frame_workers(make_emitter, hybrid, monkeypatch):
     emitter = make_emitter(); hybrid.now = hybrid.latest+60
     release, started = threading.Event(), threading.Barrier(4)
-    monkeypatch.setattr(ae, 'RADAR_N0H_FRAME_BUDGET_SEC', .04)
+    # Stalled work is held by events, never by the clock; the budget only has to
+    # outlast thread scheduling of FRESH work on a loaded CI runner (a 30 ms
+    # budget failed there once, 2026-09-25).
+    monkeypatch.setattr(ae, 'RADAR_N0H_FRAME_BUDGET_SEC', 1.0)
     def acquire(site, stamp, ctx, deadline, product='N0B', volume_ts=None):
         if product == 'N0B':
             return scan(ts=stamp+24)

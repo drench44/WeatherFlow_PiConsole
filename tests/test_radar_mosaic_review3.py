@@ -206,7 +206,10 @@ def test_stalled_hca_has_next_frame_capacity_and_bounded_saturation(make_emitter
     emitter = make_emitter()
     release = threading.Event()
     started = threading.Barrier(4)
-    monkeypatch.setattr(ae, 'RADAR_N0H_FRAME_BUDGET_SEC', .03)
+    # Stalled work is held by events, never by the clock; the budget only has to
+    # outlast thread scheduling of FRESH work on a loaded CI runner (a 30 ms
+    # budget failed there once, 2026-09-25).
+    monkeypatch.setattr(ae, 'RADAR_N0H_FRAME_BUDGET_SEC', 1.0)
     calls = []
     def acquire(site, stamp, ctx, deadline, product='N0B', volume_ts=None):
         if product == 'N0B':

@@ -42,7 +42,8 @@ def test_four_stalled_classifications_share_one_frame_wait(make_emitter, hybrid,
     started, release = Barrier(4), Event()
     reflectivity = Barrier(4)
     requests = []
-    monkeypatch.setattr(ae, 'RADAR_N0H_FRAME_BUDGET_SEC', .08)
+    # One shared wait, not four serial ones: serial would take >= 4 x .5 s.
+    monkeypatch.setattr(ae, 'RADAR_N0H_FRAME_BUDGET_SEC', .5)
     def acquire(site, stamp, ctx, deadline, product='N0B', volume_ts=None):
         requests.append((site, product, deadline))
         if product == 'N0B':
@@ -58,10 +59,10 @@ def test_four_stalled_classifications_share_one_frame_wait(make_emitter, hybrid,
             hybrid.latest, {}, 100)
         elapsed = time.perf_counter()-start
         assert len(inputs) == 4 and metadata['unfilteredSites'] == ['A','B','C','D']
-        assert len(requests) == 8 and .06 <= elapsed < .25
+        assert len(requests) == 8 and .45 <= elapsed < 1.5
         assert {end for _, product, end in requests if product == 'N0H'} == {98}
         # Flight deadlines do not grow serially; the coordinator alone owns
-        # the .08 s wait and may reuse their late successes on the next pass.
+        # the .5 s wait and may reuse their late successes on the next pass.
     finally:
         release.set()
         emitter._radar_hca_pool.shutdown(wait=True)
