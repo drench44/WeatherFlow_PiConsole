@@ -13,7 +13,7 @@ def run_remote(body):
     progress = html[html.index('  setInterval(()=>{if(radarView.active)'):html.index('  setInterval(updateFreshness')]
     setup = r'''
 const assert=require('node:assert/strict'),vm=require('node:vm');
-const server={owner:'',epoch:0,high:new Map(),generation:0,heartbeat:0,throttled:false,seq:1,smooth:'off',render:'v1',public:false,hold:false,waiting:[],requests:[],
+const server={owner:'',epoch:0,high:new Map(),generation:0,heartbeat:0,ownerIdle:0,throttled:false,seq:1,smooth:'off',render:'v1',public:false,hold:false,waiting:[],requests:[],
  intent:{seq:1,zoom:8,zoomPolicy:'auto',source:'auto',center:{lat:47,lon:-122}},
  handle(q,panel=false){
    const session=q.get('radarSession'),generation=Number(q.get('radarGeneration')),heartbeat=Number(q.get('radarHeartbeat'));
@@ -27,7 +27,7 @@ const server={owner:'',epoch:0,high:new Map(),generation:0,heartbeat:0,throttled
      this.intent={seq:++this.seq,session,generation,epoch:this.epoch,acceptedAt:1000,zoom:Number(q.get('radarGeoZoom')),center:{lat:center[0],lon:center[1]},zoomPolicy:q.get('radarPolicy'),source:q.get('radarSource')||this.intent.source};
    }
    if(!this.public&&!this.throttled){if(q.has('radarSmooth'))this.smooth=q.get('radarSmooth');if(q.has('radarRender'))this.render=q.get('radarRender');}
-   const headers=this.public?{}:{'X-Radar-Intent':JSON.stringify({session:this.owner,epoch:this.epoch,generation:this.generation,intent:this.intent}),
+   const headers=this.public?{}:{'X-Radar-Intent':JSON.stringify({session:this.owner,epoch:this.epoch,generation:this.generation,ownerIdleSec:this.ownerIdle,intent:this.intent}),
      'X-Radar-Smooth':this.smooth,'X-Radar-Render':this.render,'X-View-Session':'','X-Radar-Panel':panel?'1':'0','X-Radar-Throttled':this.throttled?'1':null};
    return {ok:true,headers:{get:k=>headers[k]??null},json:()=>Promise.resolve({ts:1000000,radar:{...manifest(),intent:structuredClone(this.intent),sourcePref:this.intent.source}})};
  },

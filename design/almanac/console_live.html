@@ -3179,18 +3179,37 @@
   function radarEase(target,duration,focal){radarBegin();if(radarReduced()){radarCameraSet(target);radarSettle();return;}radarGesture.animation={from:{...radarCamera},target,duration,start:performance.now(),focal};radarWake();}
   function radarZoomChange(step,focal={x:478,y:245}){if(radarIntent.writable===false||!radarView.active||!radarCamera)return;radarSwitchStart();radarSourceRender();var r=radarView.data,z=step===0?clamp(r.zoomAutoLevel,r.zoomMin,10):clamp(Math.round(radarGesture.animation?.target.zoom??radarCamera.zoom)+step,r.zoomMin,10);radarZoom.auto=step===0;radarEase(radarFocal(radarCamera,z,focal),160,focal);}
   function radarRecenter(){if(radarIntent.writable!==false&&radarView.active&&radarCamera)radarEase({...radarView.data.center,zoom:radarCamera.zoom},280);}
+  // Drift home after a minute and a half untouched by whoever is looking. The
+  // owning page (panel or LAN) times it from its own last gesture, as the single
+  // page always did. The panel, when another page owns the view, recenters only
+  // once that owner has gone quiet (closed or hidden: no radar polls for
+  // RAD_OWNER_GONE_MS) and the accepted view is 90 s old, so a phone watching a
+  // storm is never yanked home, and a reloaded panel is never stranded.
+  var RAD_IDLE_MS=90000, RAD_OWNER_GONE_MS=15000, RAD_ACK_FRESH_MS=10000;
   function radarIdleSync(reset){
     if(reset){clearTimeout(radarGesture.idleTimer);radarGesture.idleTimer=null;}
     if(!radarView.active||document.hidden||!radarCamera||!radarView.data?.center)return;
     var home=radarView.data.center,away=Math.hypot(radarCamera.lat-home.lat,radarCamera.lon-home.lon)>1e-8;
     $('rad-recenter').hidden=!away;
-    var clock=radarIntent.acceptedClock;
-    if(!radarIntent.panel||radarIntent.writable===false||!away||radarGesture.state!=='idle'||radarIntent.ready||!clock)return;
-    var remaining=Math.max(0,90000-clock.age-(performance.now()-clock.at));
-    if(!radarGesture.idleTimer)radarGesture.idleTimer=setTimeout(()=>{
-      radarGesture.idleTimer=null;
-      if(radarIntent.panel&&radarIntent.writable!==false&&radarView.active&&!document.hidden&&radarGesture.state==='idle'&&!radarIntent.ready&&radarCamera&&radarView.data?.center&&radarIntent.acceptedClock===clock)radarRecenter();
-    },remaining);
+    if(radarIntent.writable===false||!away||radarGesture.state!=='idle'||radarIntent.ready||radarGesture.idleTimer)return;
+    if(radarIntent.owned){
+      radarGesture.idleTimer=setTimeout(()=>{radarGesture.idleTimer=null;
+        if(radarIntent.owned&&radarView.active&&!document.hidden&&radarGesture.state==='idle'&&!radarIntent.ready)radarRecenter();},RAD_IDLE_MS);
+      return;
+    }
+    if(!radarIntent.panel)return;
+    var clock=radarIntent.acceptedClock,owner=radarIntent.ownerIdle;
+    if(!clock||!owner)return;
+    var now=performance.now(),viewAge=clock.age+(now-clock.at);
+    var wait=Math.max(0,RAD_IDLE_MS-viewAge,RAD_OWNER_GONE_MS-owner.sec*1000);
+    radarGesture.idleTimer=setTimeout(()=>{radarGesture.idleTimer=null;
+      // Re-judge with the newest acknowledgement: the owner may have come back.
+      // Only a fresh one counts (this panel polls every 2 s); a stale one means
+      // this panel does not know, and not knowing never moves someone's view.
+      var c=radarIntent.acceptedClock,o=radarIntent.ownerIdle,t=performance.now();
+      if(radarIntent.panel&&!radarIntent.owned&&radarIntent.writable!==false&&radarView.active&&!document.hidden&&radarGesture.state==='idle'&&!radarIntent.ready&&radarCamera&&radarView.data?.center&&c&&o&&
+         t-o.at<RAD_ACK_FRESH_MS&&c.age+(t-c.at)>=RAD_IDLE_MS&&o.sec*1000>=RAD_OWNER_GONE_MS)radarRecenter();
+      else radarIdleSync(false);},Math.max(1000,wait));
   }
   function radarGestureCancel(){
     var moved=radarGesture.state!=='idle',ids=[...radarGesture.pointers.keys()];radarGesture.pointers.clear();
@@ -3480,7 +3499,9 @@
     if (r.sourceFallback==='site-zoom-floor' && site && radarSource.desired!=='mosaic') exceptions.push('wider than '+site.siteId+' reaches');
     var switching=radarSource.desired,retry=radarPendingRetry();
     var target=radarView.pendingSource?.data?.sourceMode||radarView.refresh?.targetMode;
-    if(target&&target!==mode&&(radarView.pendingSource||pref==='auto'))switching=target;
+    // Any staged source says so, including one site radar handing off to another
+    // (same mode, different source); a renderer-only change has its own copy below.
+    if(radarView.pendingSource&&!radarView.pendingSource.variantOnly&&(radarView.pendingSource.data?.sourceId!==r.sourceId||radarView.pendingSource.data?.siteId!==r.siteId)||target&&target!==mode&&(radarView.pendingSource||pref==='auto'))switching=target||mode;
     if(radarView.pendingSource?.variantOnly){cap.replaceChildren(document.createTextNode('Sharpening to '+(radarView.pendingSource.data.native?'v2':'v1')+' · showing '+(r.native?'v2':'v1')+' · '));var credit=document.createElement('a');credit.id='rad-attrib';credit.className='rad-attrib';credit.textContent=rainviewer?'RainViewer':r.native?'NOAA Level III':'IEM / NOAA';cap.append(credit);radarNoteRender();return;}
     if(switching){cap.replaceChildren(document.createTextNode((retry?'Retrying ':'Switching to ')+(switching==='site'?choice.subject:switching==='auto'?'Auto':'Region')+(retry?' · '+retry.reason:'')+' · showing '+(mode==='site'?info.subject:'Region')+' · '));var credit=document.createElement('a');credit.id='rad-attrib';credit.className='rad-attrib';credit.textContent=rainviewer?'RainViewer':r.native?'NOAA Level III':'IEM / NOAA';cap.append(credit);radarNoteRender();return;}
     if(radarSwitch?.requiresIntent||retry){cap.replaceChildren(document.createTextNode((retry?'Retrying view · '+retry.reason:'Updating view')+' · showing '+(mode==='site'?info.subject:'Region')+' · '));var credit=document.createElement('a');credit.id='rad-attrib';credit.className='rad-attrib';credit.textContent=rainviewer?'RainViewer':r.native?'NOAA Level III':'IEM / NOAA';cap.append(credit);radarNoteRender();return;}
@@ -3609,7 +3630,7 @@
         if(x.ack){
           radarIntent.owner=x.ack.session;radarIntent.epoch=x.ack.epoch;radarIntent.owned=x.ack.session===radarIntent.session;
           radarIntent.accepted=x.ack.intent;
-          radarIntent.acceptedClock=isNum(x.ack.intent.acceptedAt)?{age:Math.max(0,(isFinite(x.srvMs)?x.srvMs:Date.now())-x.ack.intent.acceptedAt*1000),at:performance.now()}:null;
+          radarIntent.acceptedClock=isNum(x.ack.intent.acceptedAt)?{age:Math.max(0,(isFinite(x.srvMs)?x.srvMs:Date.now())-x.ack.intent.acceptedAt*1000),at:performance.now()}:null;radarIntent.ownerIdle=isNum(x.ack.ownerIdleSec)?{sec:x.ack.ownerIdleSec,at:performance.now()}:null;
           if(!radarIntent.owned){
             // Only discard the rejected request's generation. A gesture begun
             // during this request remains a user action of its own.

@@ -201,13 +201,20 @@ def test_default_routes_are_decoded_and_forwarding_gateways_are_read_only(server
     assert server._is_controller('192.168.1.20') and server._is_controller('127.0.0.1')
 
 
-def test_page_claims_echo_epoch_and_panel_auto_recenter_takes_ownership():
+def test_panel_leaves_a_live_lan_owner_alone_and_recenters_after_it_goes():
+    """A phone watching a storm is never yanked home; a closed phone does not
+    strand the kiosk away from home."""
     run_remote(r'''
 const remote=page(),panel=page(true);await remote.poll();
 remote.run('radarBegin();radarCameraSet({lat:48,lon:-121,zoom:8});radarSettle()');await remote.poll();
-const owner=server.owner;await panel.poll();
-panel.run("assert.equal(radarIntent.owned,false);assert.equal(delays.get(radarGesture.idleTimer),90000);now+=89000");
-await panel.poll();panel.run("assert.equal(delays.get(radarGesture.idleTimer),1000);now+=1000;timers.get(radarGesture.idleTimer)()");
+const owner=server.owner;server.ownerIdle=1;await panel.poll();
+panel.run("assert.equal(radarIntent.owned,false);assert.equal(delays.get(radarGesture.idleTimer),90000);now+=90000");
+await panel.poll();panel.run("timers.get(radarGesture.idleTimer)()");       // fresh ack: owner alive
+await panel.poll();assert.equal(server.owner,owner);assert.equal(server.intent.center.lat,48);   // kept
+panel.run("now+=30000;radarIdleSync(true);timers.get(radarGesture.idleTimer)()");              // stale ack: unknown, never moves
+await panel.poll();assert.equal(server.owner,owner);
+server.ownerIdle=20;await panel.poll();
+panel.run("radarIdleSync(true);assert.equal(delays.get(radarGesture.idleTimer),1000);timers.get(radarGesture.idleTimer)()");
 await panel.poll();assert.notEqual(server.owner,owner);assert.equal(server.intent.center.lat,47);
 const claim=server.requests.filter(q=>q.has('radarCommit')).at(-1);
 assert.equal(claim.get('radarClaim'),owner);assert.equal(claim.get('radarClaimEpoch'),'1');
@@ -216,13 +223,13 @@ await remote.poll();remote.run("assert.equal(radarIntent.owned,false);assert.equ
 
 
 @pytest.mark.parametrize('state', ['gesturing', 'inertia'])
-def test_panel_recenter_checks_gestures_at_timer_fire_and_lan_never_recenters(state):
+def test_panel_recenter_for_a_gone_owner_checks_gestures_at_timer_fire(state):
     run_remote(r'''
-server.owner='dead-panel-session-123';server.epoch=4;server.generation=3;
+server.owner='dead-panel-session-123';server.epoch=4;server.generation=3;server.ownerIdle=600;
 server.intent={...server.intent,session:server.owner,generation:3,epoch:4,acceptedAt:800,center:{lat:48,lon:-121}};
 const panel=page(true),lan=page();await panel.poll();await lan.poll();
-lan.run('assert.equal(radarGesture.idleTimer,null)');
-panel.run("assert.equal(delays.get(radarGesture.idleTimer),0);radarGesture.state=STATE;timers.get(radarGesture.idleTimer)();assert.equal(radarIntent.ready,false)");
+lan.run('assert.equal(radarGesture.idleTimer,null)');                     // a LAN follower never recenters
+panel.run("assert.equal(delays.get(radarGesture.idleTimer),1000);radarGesture.state=STATE;timers.get(radarGesture.idleTimer)();assert.equal(radarIntent.ready,false)");
 panel.run("radarGesture.state='idle';radarIdleSync(true);timers.get(radarGesture.idleTimer)()");
 await panel.poll();assert.equal(server.owner,panel.run('radarIntent.session'));
 assert.equal(server.intent.center.lat,47);
@@ -264,12 +271,16 @@ await p.poll();assert.equal(server.requests.at(-1).get('touch'),'1');
 ''')
 
 
-def test_new_acceptance_resets_panel_deadline_and_lan_owner_never_recenters():
+def test_owning_lan_page_drifts_home_after_its_own_idle_and_panel_waits():
+    """The owner, wherever it is, keeps the single-page rule: 90 s untouched."""
     run_remote(r'''const lan=page(),panel=page(true);await lan.poll();
 lan.run('radarBegin();radarCameraSet({lat:48,lon:-121,zoom:8});radarSettle()');await lan.poll();
-lan.run('assert.equal(radarGesture.idleTimer,null)');await panel.poll();
-panel.run('now+=80000');server.intent={...server.intent,acceptedAt:1080};
-await panel.poll();panel.run("assert.equal(delays.get(radarGesture.idleTimer),90000);document.hidden=true;timers.get(radarGesture.idleTimer)();assert.equal(radarIntent.ready,false);document.hidden=false;radarView.data=null;radarIdleSync(true);assert.equal(radarGesture.idleTimer,null)");
+lan.run("assert.equal(radarIntent.owned,true);assert.equal(delays.get(radarGesture.idleTimer),90000)");
+server.ownerIdle=1;await panel.poll();
+panel.run("now+=80000");server.intent={...server.intent,acceptedAt:1080};await panel.poll();
+panel.run("radarIdleSync(true);assert.equal(delays.get(radarGesture.idleTimer),90000);document.hidden=true;timers.get(radarGesture.idleTimer)();assert.equal(radarIntent.ready,false);document.hidden=false;radarView.data=null;radarIdleSync(true);assert.equal(radarGesture.idleTimer,null)");
+lan.run("timers.get(radarGesture.idleTimer)()");await lan.poll();
+assert.equal(server.owner,lan.run('radarIntent.session'));assert.equal(server.intent.center.lat,47);   // own recenter, no takeover
 ''')
 
 
@@ -283,3 +294,48 @@ def test_failed_camera_write_consumes_neither_epoch_nor_generation(server, monke
     monkeypatch.setattr(server, '_write_settled_camera', writer)
     request(server, **pending)
     assert server._radar_owner['epoch'] == 2 and server._radar_high_water[B]['generation'] == 1
+
+
+def test_gateways_are_reread_not_frozen_at_import(server, monkeypatch, tmp_path):
+    """The kiosk starts before DHCP on the dongle Pi: an empty startup read must
+    not disable the router exclusion for the life of the process."""
+    route = tmp_path / 'route'
+    route.write_text('Iface Destination Gateway Flags RefCnt Use Metric Mask MTU Window IRTT\n')
+    reads = []
+    def gateways(route_path='/proc/net/route'):
+        reads.append(1)
+        return server.__dict__['_real_default_gateways'](route)
+    monkeypatch.setitem(server.__dict__, '_real_default_gateways', server._default_gateways)
+    monkeypatch.setattr(server, '_default_gateways', gateways)
+    monkeypatch.setattr(server, '_DEFAULT_GATEWAYS', None)
+    monkeypatch.setattr(server, '_gateway_cache', (float('-inf'), frozenset()))
+    clock = [1000.0]
+    monkeypatch.setattr(server.time, 'monotonic', lambda: clock[0])
+    assert server._is_controller('192.168.1.1')                  # no route yet
+    route.write_text(route.read_text() + 'wlan0 00000000 0101A8C0 0003 0 0 600 00000000 0 0 0\n')
+    assert server._is_controller('192.168.1.1')                  # cached for the TTL
+    clock[0] += server._GATEWAY_TTL_SEC
+    assert not server._is_controller('192.168.1.1')              # re-read: router excluded
+    assert server._is_controller('192.168.0.14') and len(reads) == 2
+
+
+def test_intent_header_reports_owner_idle(server, monkeypatch):
+    clock = [5000.0]
+    monkeypatch.setattr(server.time, 'monotonic', lambda: clock[0])
+    request(server, **commit(server))
+    clock[0] += 12.5
+    headers = request(server, **dict(commit(server), radarCommit='0', radarHeartbeat=99))
+    ack = json.loads(headers['X-Radar-Intent'])
+    assert ack['ownerIdleSec'] == 0.0                             # the owner's own poll refreshes it
+    clock[0] += 20
+    headers = request(server, '192.168.0.14', **{'radarSession': B, 'radarGeneration': '0', 'radarHeartbeat': '1',
+                                                  'view': 'radar', 'radarTheme': 'night'})
+    assert json.loads(headers['X-Radar-Intent'])['ownerIdleSec'] == 20.0
+    assert 'seen' not in json.loads(headers['X-Radar-Intent'])
+
+
+def test_site_to_site_handoff_says_switching():
+    run_remote(r'''
+const p=page();await p.poll();
+p.run("radarView.data={...manifest(),sourceId:'iem-nexrad-n0b',sourceMode:'site',siteId:'KATX',sourcePref:'auto'};radarView.pendingSource={frames:[],data:{...manifest(),sourceId:'iem-nexrad-n0b',sourceMode:'site',siteId:'KRTX'}};assert.match(caption(),/^Switching to /);radarView.pendingSource={frames:[],variantOnly:true,data:{...radarView.data,native:true}};assert.match(caption(),/^Sharpening to v2/)");
+''')

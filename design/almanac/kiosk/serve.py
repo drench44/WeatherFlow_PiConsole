@@ -90,12 +90,27 @@ def _default_gateways(route_path='/proc/net/route'):
     return gateways
 
 
-_DEFAULT_GATEWAYS = _default_gateways()
+# Re-read, not frozen at import: the kiosk unit starts before DHCP on the USB
+# wifi dongle, and a gateway can change, so a startup read could stay empty and
+# silently stop excluding the router. None reads live; tests inject a set.
+_DEFAULT_GATEWAYS = None
+_GATEWAY_TTL_SEC = 30
+_gateway_cache = (float('-inf'), frozenset())
+
+
+def _gateways():
+    global _gateway_cache
+    if _DEFAULT_GATEWAYS is not None:
+        return _DEFAULT_GATEWAYS
+    now = time.monotonic()
+    if now - _gateway_cache[0] >= _GATEWAY_TTL_SEC:
+        _gateway_cache = (now, frozenset(_default_gateways()))
+    return _gateway_cache[1]
 
 
 def _is_controller(address):
     ip = _client_ip(address)
-    return ip is not None and ip not in _DEFAULT_GATEWAYS and (ip.is_loopback or any(ip in net for net in _CONTROLLER_NETWORKS))
+    return ip is not None and ip not in _gateways() and (ip.is_loopback or any(ip in net for net in _CONTROLLER_NETWORKS))
 
 
 def _is_private_ipv4(address):
@@ -420,6 +435,7 @@ _camera_persist_timer = None
 # reconcile without changing ownership. The handler holds _count_lock across
 # comparison, durable runtime intent replacement and activity publication.
 _radar_owner = None
+_radar_owner_seen = None
 # Per-session fences for requests that arrive late. Stale takeovers are already
 # refused by the ownership epoch (every transfer advances it, and a claim must
 # echo the current one), and the owner's own fences live in _radar_owner, so an
@@ -451,7 +467,7 @@ def _camera_owner(record):
 
 
 def _camera_transaction(activity, params):
-    global _radar_owner
+    global _radar_owner, _radar_owner_seen
     if not _valid_radar_session(params):
         return False
     if len(params.get('radarGeneration', [])) != 1:
@@ -497,6 +513,7 @@ def _camera_transaction(activity, params):
     if heartbeat:
         owner['heartbeat'] = heartbeat
     _radar_owner = owner
+    _radar_owner_seen = time.monotonic()  # the owner is alive while its radar polls are accepted
     _radar_high_water[session] = dict(generation=generation, heartbeat=heartbeat, seen=time.monotonic())
     return True
 
@@ -706,7 +723,11 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 render = render_preference(Path(DATA).with_name('radar_render'))
                 self.send_header('X-Radar-Render', render)
                 self.send_header('X-View-Session', _view_owner['session'] if _view_owner else '')
-                self.send_header('X-Radar-Intent', json.dumps(dict(intent=record, acceptedGeneration=owner['generation'], **owner), separators=(',', ':')))
+                # ownerIdleSec lets the panel tell a live owner (a phone still
+                # watching a storm) from a dead one (closed or hidden tab).
+                idle = None if _radar_owner_seen is None else round(time.monotonic() - _radar_owner_seen, 1)
+                self.send_header('X-Radar-Intent', json.dumps(dict(intent=record, acceptedGeneration=owner['generation'],
+                    ownerIdleSec=idle, **owner), separators=(',', ':')))
         if getattr(self, '_immutable_radar', False):
             self.send_header('Cache-Control', 'public, max-age=31536000, immutable')
         super().end_headers()
