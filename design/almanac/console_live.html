@@ -629,7 +629,7 @@
   .rad-smooth { width: 64px; min-width: 44px; padding: 0 9px; font: 600 10px var(--sans); letter-spacing: .06em; }
   .rad-smooth[aria-pressed="true"] { border-color: var(--ink); text-decoration: underline; text-underline-offset: 4px; }
   .rad-reset[hidden] { display: none; }
-  .rad-render { display: flex; height: 44px; border: 1px solid var(--rule); border-radius: 2px; }
+  .rad-render { display: flex; height: 44px; border: 1px solid var(--rule); border-radius: 2px; background: var(--plate-scrim); }
   .rad-render .rad-seg { min-width: 48px; height: 42px; margin-top: 0; padding: 0 12px; font: 600 12px var(--sans); letter-spacing: .04em; }
   .rad-smooth[aria-disabled="true"] { opacity: .38; cursor: default; }
   .rad-reset:active { opacity: .5; }
@@ -3435,13 +3435,13 @@
     if ((frame && frame.legend ? frame.legend : r.legend || {}).remapped===false) exceptions.push('palette incomplete');
     if (r.sourceFallback==='site-zoom-floor' && site && radarSource.desired!=='mosaic') exceptions.push('wider than '+site.siteId+' reaches');
     var switching=radarSource.desired,retry=radarPendingRetry();
-    if(switching){cap.replaceChildren(document.createTextNode((retry?'Retrying ':'Switching to ')+(switching==='site'?choice.subject:'Region')+(retry?' · '+retry.reason:'')+' · showing '+(mode==='site'?info.subject:'Region')+' · '));var credit=document.createElement('a');credit.id='rad-attrib';credit.className='rad-attrib';credit.textContent=rainviewer?'RainViewer':'IEM / NOAA';cap.append(credit);radarNoteRender();return;}
-    if(radarSwitch||retry){cap.replaceChildren(document.createTextNode((retry?'Retrying view · '+retry.reason:'Updating view')+' · showing '+(mode==='site'?info.subject:'Region')+' · '));var credit=document.createElement('a');credit.id='rad-attrib';credit.className='rad-attrib';credit.textContent=rainviewer?'RainViewer':'IEM / NOAA';cap.append(credit);radarNoteRender();return;}
+    if(switching){cap.replaceChildren(document.createTextNode((retry?'Retrying ':'Switching to ')+(switching==='site'?choice.subject:'Region')+(retry?' · '+retry.reason:'')+' · showing '+(mode==='site'?info.subject:'Region')+' · '));var credit=document.createElement('a');credit.id='rad-attrib';credit.className='rad-attrib';credit.textContent=rainviewer?'RainViewer':r.native?'NOAA Level III':'IEM / NOAA';cap.append(credit);radarNoteRender();return;}
+    if(radarSwitch||retry){cap.replaceChildren(document.createTextNode((retry?'Retrying view · '+retry.reason:'Updating view')+' · showing '+(mode==='site'?info.subject:'Region')+' · '));var credit=document.createElement('a');credit.id='rad-attrib';credit.className='rad-attrib';credit.textContent=rainviewer?'RainViewer':r.native?'NOAA Level III':'IEM / NOAA';cap.append(credit);radarNoteRender();return;}
     function write(){
       cap.replaceChildren(document.createTextNode(info.subject+resolution+nearby+(distance?' · '+distance:'')+(scanMode?' · '+scanMode:'')+(cadence?' · '+cadence:'')+' · '));
       // Keep attribution visible and text-only: the kiosk has no way back.
       var credit=document.createElement('a');credit.id='rad-attrib';credit.className='rad-attrib';
-      credit.textContent=rainviewer?'RainViewer':'IEM / NOAA';credit.removeAttribute('href');cap.append(credit);
+      credit.textContent=rainviewer?'RainViewer':r.native?'NOAA Level III':'IEM / NOAA';credit.removeAttribute('href');cap.append(credit);
       if(exceptions.length)cap.append(document.createTextNode(' · '+exceptions.join(' · ')));
       if(switching)cap.append(document.createTextNode(' · switching'));
     }
