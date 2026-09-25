@@ -94,17 +94,24 @@ so insects and clear-air clutter never film the map, and no guessing at rain ver
 Recent frames play as a smooth loop, five a second with a short crossfade and
 a hold on the newest, whose scan time is printed beside the clock and is never
 dressed up as "live"; opening the tab brings the loop up from cache in
-milliseconds, and play means play even while frames are still arriving. Two
-buttons choose the picture: **Region**, many radars blended with a new image
-every two minutes, or the nearest **NEXRAD** site by its callsign — its own
+milliseconds, and play means play even while frames are still arriving. The
+source picker is **Auto | Region | <site>**. Auto is the default. It chooses Site
+at settled zoom 8 or higher and Region at zoom 6 or lower. Zoom 7 keeps the
+current source; a cold start uses Region. Site requires a reporting closest
+radar and 85% viewport coverage. Reverse switches wait 10 seconds unless zoom
+moves at least 2 levels. The old map stays visible during acquisition. Manual
+choices return to Auto after 45 minutes without a touch. **Region** blends
+many radars with a new image every two minutes. The nearest **NEXRAD** site
+keeps its callsign and nearby-site count on the button. It shows its own
 scans at their real times, every neighbouring radar whose range reaches the
 view composited underneath, and a plain caption under the buttons that says which radar,
 how far, and how often, with the radar's operating mode read from its own
 cadence: a scan every four minutes or so is precipitation mode, every ten is
 clear-air. The site button tells you before you tap when that radar is off the
 air or its last scan is stale, and a tap on a dark site says so in the same
-breath instead of trying for ten seconds. A tap answers at once and the switch
-lands in a second or two. A quiet +/− sets the zoom and remembers it across
+breath instead of trying for ten seconds. A tap acknowledges the choice at once.
+The old source stays visible while the selected source loads. A quiet +/− sets
+the zoom and remembers it across
 reboots — a zoom step keeps the loop you were watching playing until the new
 frames are in — and a **SMOOTH** toggle, off by default, softens the gate edges
 of every echo without inventing detail, interpolated on the reflectivity field
@@ -112,7 +119,11 @@ so every pixel is still a legend colour. Beside it, **v1 | v2** picks how the
 site radar is drawn: v1 from IEM's tiles, gridded to about a kilometre; v2
 from NOAA's Level III product, the radar's own half-degree by 250-metre cells,
 so zoom 9 and 10 look like a phone radar app instead of a mosaic of squares.
-v2 is a first version: neighbouring radars are layered rather than merged cell
+v2 is the default unless the device is a Raspberry Pi 3; explicit choices win.
+It fetches native data only in the live and warm attention tiers. Above 150 MB
+per UTC day it fetches newest scans only. Above 250 MB it uses v1 until the next
+UTC day and shows “v2 paused · daily data limit”. The byte count survives engine
+restarts and appears in `/health`. Neighbouring radars are layered rather than merged cell
 by cell yet, and a cold switch takes about a minute to fill the loop. The station glyph shows where home is
 while you're away and the view drifts back to it after a minute and a half
 untouched.

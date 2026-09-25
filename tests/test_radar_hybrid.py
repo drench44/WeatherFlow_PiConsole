@@ -25,6 +25,9 @@ def png(color=(0, 204, 0, 255), size=(256, 256)):
 
 @pytest.fixture
 def hybrid(tmp_path, monkeypatch):
+    # This transport fixture exercises Region/IEM; Auto and native have their own fixtures.
+    (tmp_path / 'radar_source').write_text('mosaic')
+    (tmp_path / 'radar_render').write_text('v1')
     latest = int(datetime(2026, 9, 13, 0, 2, tzinfo=timezone.utc).timestamp())
     state = SimpleNamespace(latest=latest, rv=latest - 120, now=latest + 360,
         mono=0., calls=[], failure=None, tile=png(), metadata=None, conditional=False)

@@ -266,7 +266,7 @@ def test_native_budget_prices_scans_instead_of_output_tiles(scan_engine, monkeyp
     emitter = scan_engine
     tiles = [(x, 1, 0, 0) for x in range(30)]
     monkeypatch.setattr(ae, '_radar_site_tiles', lambda ctx, site: tiles)
-    ctx = dict(native=True, zoom=7, inventory=emitter._radar_disk_inventory)
+    ctx = dict(native=True, attention='live', zoom=7, inventory=emitter._radar_disk_inventory)
     pairs = [('KNEA', STAMP), ('KNEA', STAMP+60)]
     assert emitter._radar_frame_request_cost(SOURCE, ctx, pairs) == 3  # one hourly listing, two products
     emitter._radar_level3_scans[('KNEA', STAMP)] = object()
@@ -306,14 +306,14 @@ def test_render_switch_reconciles_headers_region_smooth_and_readonly_viewers():
 const assert = require('node:assert/strict'), nodes = {};
 const $ = id => nodes[id] ||= {addEventListener:(_,fn)=>nodes[id].click=fn};
 let polls=0; const poll=()=>polls++,radarZoomRender=()=>{};
-const radarRender={value:'v1',pending:null},radarSmooth={value:true,pending:null},radarView={data:{sourceMode:'site'}};
+const radarRender={value:'v1',pending:null},radarSmooth={value:true,pending:null},radarView={data:{sourceMode:'site',native:true}};
 CONTROLS
 const reconcile=(x,d)=>{RECONCILE};
 $('rad-v2').click(); assert.equal(radarRender.pending,'v2');
 reconcile({render:'v1'},{radar:{native:false}}); assert.equal(radarRender.value,'v2');
 reconcile({render:'v2'},{radar:{native:false}}); assert.equal(radarRender.pending,null);
 $('rad-smooth').click(); assert.equal(radarSmooth.value,true); assert.equal(radarSmooth.pending,null);
-radarView.data.sourceMode='mosaic'; $('rad-smooth').click(); assert.equal(radarSmooth.value,false);
+radarView.data.sourceMode='mosaic'; radarView.data.native=false; $('rad-smooth').click(); assert.equal(radarSmooth.value,false);
 reconcile({render:null},{radar:{native:false}}); assert.equal(radarRender.value,'v1');
 const count=polls; $('rad-v2').click(); assert.equal(polls,count); assert.equal($('rad-v2').disabled,true);
 reconcile({render:null},{radar:{native:true}}); assert.equal(radarRender.value,'v2');
@@ -365,5 +365,6 @@ def test_s3_outage_does_not_block_switch_back_to_v1(make_emitter, hybrid, multis
 def test_s3_recovery_is_a_required_dependency_only_for_native(scan_engine):
     emitter = scan_engine
     emitter._radar_native_requested = True
+    emitter._radar_attention.tier = 'live'
     assert set(emitter._radar_transport_sources(SOURCE)) == {SOURCE, ae.RADAR_LEVEL3_TRANSPORT}
     assert emitter._radar_transport_sources('iem-mrms-lcref') == ('iem-mrms-lcref',)

@@ -47,8 +47,9 @@ def radar_net(monkeypatch):
         assert url.endswith('/2/0_0.png') and int(url.split('/256/')[1].split('/')[0]) in range(4, 8)
         return io.BytesIO(state['tile'])
 
-    # This fixture tests the RainViewer adapter, not automatic MRMS fallback.
+    # Isolate the global adapter: Auto now considers NEXRAD independently of MRMS.
     monkeypatch.setattr(ae, '_radar_iem_eligible', lambda *args: False)
+    monkeypatch.setattr(ae, '_NEXRAD_SITES', {})
     monkeypatch.setattr(ae.RadarSession, 'open', lambda self, *a, **k: fetch(*a, **k))
     monkeypatch.setattr(ae.time, 'sleep', lambda _: None)
     monkeypatch.setattr(ae.time, 'time', lambda: state['times'][-1] + 240)

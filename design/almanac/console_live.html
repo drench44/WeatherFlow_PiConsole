@@ -1180,7 +1180,8 @@
         </div>
         <button class="rad-step rad-recenter" id="rad-recenter" type="button" aria-label="Recenter on station" hidden>↩</button>
         <div class="rad-src" id="rad-src" data-mode="mosaic" data-state="confirmed" role="group" aria-label="Radar source">
-          <button class="rad-seg" id="rad-src-mosaic" type="button" aria-pressed="true" aria-label="Region: many radars blended">Region</button>
+          <button class="rad-seg" id="rad-src-auto" type="button" aria-pressed="true" aria-label="Auto: radar source follows settled zoom">Auto</button>
+          <button class="rad-seg" id="rad-src-mosaic" type="button" aria-pressed="false" aria-label="Region: many radars blended">Region</button>
           <button class="rad-seg" id="rad-src-site" type="button" aria-pressed="false" aria-label="No site: radar unavailable" disabled>No site</button>
         </div>
         <figcaption class="rad-src-cap" id="rad-src-cap"></figcaption>
@@ -2932,7 +2933,7 @@
     for(var f of held.values())if(f.bitmap){f.bitmap.close();delete f.bitmap;}
     if(radarCompositeJob&&!pending.frames.includes(radarCompositeJob.f))radarCompositeJob=null;
     pending.data=r;pending.payloadTs=payloadTs;pending.frame=pending.frames.at(-1);
-    radarView.pendingSource=pending;radarView.refresh=r.refresh||{state:'idle'};radarNoteRender();radarQueueTiles();
+    radarView.pendingSource=pending;radarView.refresh=r.refresh||{state:'idle'};radarSourceRender();radarNoteRender();radarQueueTiles();
   }
   function radarAcceptSource(){
     var pending=radarView.pendingSource;if(!pending)return;
@@ -3196,14 +3197,14 @@
   document.addEventListener('visibilitychange',()=>{if(document.hidden){radarGestureCancel();radarRelease();}else if(radarView.active)radarActivate();poll(true);});
   window.matchMedia('(prefers-reduced-motion: reduce)').addEventListener('change',()=>{radarView.blend=null;radarView.singleSweep=false;radarView.current=radarView.good;radarEchoDirty=true;if(radarGesture.inertia)radarSettle();radarLoopSync();});
   function radarPostIntent(immediate=false){clearTimeout(radarIntent.timer);radarIntent.postedAt=Date.now();radarIntent.generation++;radarIntent.ready=true;
-    if(!radarIntent.preferredMode)radarIntent.preferredMode=radarView.data?.sourcePref||'mosaic';
+    if(!radarIntent.preferredMode)radarIntent.preferredMode=radarView.data?.sourcePref||'auto';
     if(radarSwitch){radarSwitch.generation=radarIntent.generation;radarSwitch.requiresIntent=true;radarSwitch.committed=true;}
     radarIntent.timer=setTimeout(()=>{poll(immediate);},immediate?0:120);}
   $('rad-smooth').addEventListener('click',()=>{if(radarNativeActive())return;radarSmooth.value=radarSmooth.pending=!radarSmooth.value;radarZoomRender();poll(true);});
   ['v1','v2'].forEach(v=>$('rad-'+v).addEventListener('click',()=>{if(radarRender.writable===false||radarRender.value===v)return;radarRender.value=radarRender.pending=v;radarZoomRender();poll(true);}));
   // v2 draws gates, not IEM colours: Smooth has nothing to soften there. Region has no single radar, so it stays v1.
-  function radarNativeActive(){return radarRender.value==='v2'&&radarView.data?.sourceMode==='site';}
-  function radarZoomRender(){var r=radarView.data,rail=$('rad-zoom');rail.hidden=!r;if(!r||!radarCamera)return;var native=radarNativeActive();$('rad-smooth').setAttribute('aria-pressed',String(!!radarSmooth.value&&!native));$('rad-smooth').setAttribute('aria-disabled',String(native));$('rad-v1').setAttribute('aria-pressed',String(radarRender.value!=='v2'));$('rad-v2').setAttribute('aria-pressed',String(radarRender.value==='v2'));var z=Math.round(radarCamera.zoom);rail.dataset.mode=radarZoom.auto?'auto':'manual';rail.dataset.state='confirmed';rail.setAttribute('aria-busy','false');$('rad-zoom-mode').textContent=radarZoom.auto?'Auto':String(z);$('rad-zoom-reset').hidden=radarZoom.auto;$('rad-zoom-out').disabled=z<=r.zoomMin;$('rad-zoom-in').disabled=z>=10;radarView.zoomNote=z>r.zoomMax?r.zoomSource+' reaches zoom '+r.zoomMax+' — scaled to this view.':radarRender.value==='v2'&&r.sourceMode!=='site'?'v2 draws one radar’s own cells · Region stays v1':'';radarNoteRender();}
+  function radarNativeActive(){return radarView.data?.native===true;}
+  function radarZoomRender(){var r=radarView.data,rail=$('rad-zoom');rail.hidden=!r;if(!r||!radarCamera)return;var native=radarNativeActive();$('rad-smooth').setAttribute('aria-pressed',String(!!radarSmooth.value&&!native));$('rad-smooth').setAttribute('aria-disabled',String(native));$('rad-v1').setAttribute('aria-pressed',String(radarRender.value!=='v2'));$('rad-v2').setAttribute('aria-pressed',String(radarRender.value==='v2'));var z=Math.round(radarCamera.zoom);rail.dataset.mode=radarZoom.auto?'auto':'manual';rail.dataset.state='confirmed';rail.setAttribute('aria-busy','false');$('rad-zoom-mode').textContent=radarZoom.auto?'Auto':String(z);$('rad-zoom-reset').hidden=radarZoom.auto;$('rad-zoom-out').disabled=z<=r.zoomMin;$('rad-zoom-in').disabled=z>=10;radarView.zoomNote=radarRender.value==='v2'&&r.nativeBudget?.ceilingState==='paused'?'v2 paused · daily data limit':z>r.zoomMax?r.zoomSource+' reaches zoom '+r.zoomMax+' — scaled to this view.':radarRender.value==='v2'&&r.sourceMode!=='site'?'v2 draws one radar’s own cells · Region stays v1':'';radarNoteRender();}
   // Retry epochs and their reference clock come from the same payload. A kiosk
   // wall clock can be wrong; elapsed UI/switch time is not a scheduled retry.
   function radarPendingRetry(){
@@ -3300,7 +3301,7 @@
     if(old&&old.geo&&r.geo&&old.geo.version!==r.geo.version){radarGeoClear();radarBaseDirty=true;}
     if(r.tiles?.publishedAt!==radarView.data?.tiles?.publishedAt)radarTrace('publication',{intent:r.intent,publishedAt:r.tiles?.publishedAt});radarView.data=r;radarView.receivedAt=performance.now();radarView.receivedAge=r.ageSec||0;radarView.refresh=r.refresh||{state:'idle'};
     if(radarSource.desired&&own&&(r.sourcePref||r.sourceMode)===radarSource.desired){
-      var showing=r.sourceMode===radarSource.desired,busy=['newest','history'].includes(radarView.refresh.state);
+      var showing=radarSource.desired==='auto'||r.sourceMode===radarSource.desired,busy=['newest','history'].includes(radarView.refresh.state);
       if(showing&&radarReady().length>=radarStartCount(r)){radarSource.refused=false;radarSource.desired=null;}
     }else if(switchFailed){
       radarSource.refused=radarSource.desired;
@@ -3313,7 +3314,7 @@
     if(!radarView.active||!radarCamera||$('rad-src-'+mode).disabled||radarSource.desired===mode&&!radarSwitch?.overdue)return;
     // Native click covers keyboard/assistive activation; pointerdown responds on
     // contact. Its subsequent compatibility click is idempotent.
-    var showing=!radarSource.desired&&radarView.data.sourceMode===mode;
+    var showing=!radarSource.desired&&(mode==='auto'?radarView.data.sourcePref==='auto':radarView.data.sourceMode===mode);
     if(showing&&(radarIntent.preferredMode||radarView.data.sourcePref||mode)===mode)return;
     // Already on screen but not the recorded preference: a refused site tap left
     // preferredMode on 'site' while Region kept showing. Record the preference
@@ -3328,7 +3329,7 @@
     if(mode==='site'&&radarView.data.sourceMode==='mosaic'&&n?.checkedTs!=null&&n.reason==='not reporting'&&n.newestTs===null){radarSource.refused='site';radarSource.desired=null;clearTimeout(radarSwitch?.timer);radarSwitch=null;}
     radarSourceRender();radarNoteRender();
   }
-  ['mosaic','site'].forEach(mode=>{var b=$('rad-src-'+mode);
+  ['auto','mosaic','site'].forEach(mode=>{var b=$('rad-src-'+mode);
     b.addEventListener('pointerdown',e=>{if(e.isPrimary&&e.button===0)radarChooseSource(mode);});
     b.addEventListener('click',e=>{if(e.detail===0)radarChooseSource(mode);});
   });
@@ -3398,12 +3399,11 @@
     var r=radarView.data; if (!r) return;
     var site=(r.sources || []).find(s => s.mode==='site');
     var mode=r.sourceMode || 'mosaic', picker=$('rad-src'), button=$('rad-src-site');
-    picker.hidden=(r.sourceId || 'rainviewer')==='rainviewer';
+    picker.hidden=false;
     picker.dataset.mode=mode; picker.dataset.state=radarSource.desired ? 'pending' : 'confirmed';
     picker.setAttribute('aria-busy',String(!!radarSource.desired));
-    ['mosaic','site'].forEach(m=>$('rad-src-'+m).dataset.state=radarSource.desired===m?'pending':'confirmed');
-    $('rad-src-mosaic').setAttribute('aria-pressed',String(mode==='mosaic'));
-    button.setAttribute('aria-pressed',String(mode==='site'));
+    var pref=radarSource.desired||r.sourcePref||'auto';
+    ['auto','mosaic','site'].forEach(m=>{var b=$('rad-src-'+m);b.dataset.state=radarSource.desired===m?'pending':'confirmed';b.setAttribute('aria-pressed',String(pref==='auto'?m==='auto':m===mode));});
     button.dataset.preferred=String(radarSource.desired!==null ? radarSource.desired==='site' : r.sitePreferred===true);
     var info=radarSourceSubject(r),choice=radarSourceSubject(r,true),contributors=info.contributors;
     button.textContent=(choice.id||'No site')+(info.extra?' +'+info.extra:'');
@@ -3420,6 +3420,7 @@
     var interval=r.scanCadenceSec!=null?'every ~'+Math.max(1,Math.round(r.scanCadenceSec/60))+' min':'';
     var cadence=mode==='site'?(interval?'new scan '+interval:''):'new image every '+(r.cadenceSec||600)/60+' min';
     var exceptions=[];
+    if (radarRender.value==='v2'&&r.nativeBudget?.ceilingState==='paused') exceptions.push('v2 paused · daily data limit');
     if (rainviewer) exceptions.push('reflectivity only');
     if (r.latestOnly) exceptions.push('latest only');
     if (r.scanningSlowly) exceptions.push('scanning slowly');
@@ -3436,10 +3437,12 @@
     if ((frame && frame.legend ? frame.legend : r.legend || {}).remapped===false) exceptions.push('palette incomplete');
     if (r.sourceFallback==='site-zoom-floor' && site && radarSource.desired!=='mosaic') exceptions.push('wider than '+site.siteId+' reaches');
     var switching=radarSource.desired,retry=radarPendingRetry();
-    if(switching){cap.replaceChildren(document.createTextNode((retry?'Retrying ':'Switching to ')+(switching==='site'?choice.subject:'Region')+(retry?' · '+retry.reason:'')+' · showing '+(mode==='site'?info.subject:'Region')+' · '));var credit=document.createElement('a');credit.id='rad-attrib';credit.className='rad-attrib';credit.textContent=rainviewer?'RainViewer':r.native?'NOAA Level III':'IEM / NOAA';cap.append(credit);radarNoteRender();return;}
+    var target=radarView.pendingSource?.data?.sourceMode||radarView.refresh?.targetMode;
+    if(pref==='auto'&&target&&target!==mode)switching=target;
+    if(switching){cap.replaceChildren(document.createTextNode((retry?'Retrying ':'Switching to ')+(switching==='site'?choice.subject:switching==='auto'?'Auto':'Region')+(retry?' · '+retry.reason:'')+' · showing '+(mode==='site'?info.subject:'Region')+' · '));var credit=document.createElement('a');credit.id='rad-attrib';credit.className='rad-attrib';credit.textContent=rainviewer?'RainViewer':r.native?'NOAA Level III':'IEM / NOAA';cap.append(credit);radarNoteRender();return;}
     if(radarSwitch||retry){cap.replaceChildren(document.createTextNode((retry?'Retrying view · '+retry.reason:'Updating view')+' · showing '+(mode==='site'?info.subject:'Region')+' · '));var credit=document.createElement('a');credit.id='rad-attrib';credit.className='rad-attrib';credit.textContent=rainviewer?'RainViewer':r.native?'NOAA Level III':'IEM / NOAA';cap.append(credit);radarNoteRender();return;}
     function write(){
-      cap.replaceChildren(document.createTextNode(info.subject+resolution+nearby+(distance?' · '+distance:'')+(scanMode?' · '+scanMode:'')+(cadence?' · '+cadence:'')+' · '));
+      cap.replaceChildren(document.createTextNode((pref==='auto'?'Auto · ':'')+(pref==='auto'&&mode==='mosaic'?'Region':info.subject)+resolution+nearby+(distance?' · '+distance:'')+(scanMode?' · '+scanMode:'')+(cadence?' · '+cadence:'')+' · '));
       // Keep attribution visible and text-only: the kiosk has no way back.
       var credit=document.createElement('a');credit.id='rad-attrib';credit.className='rad-attrib';
       credit.textContent=rainviewer?'RainViewer':r.native?'NOAA Level III':'IEM / NOAA';credit.removeAttribute('href');cap.append(credit);
@@ -3556,11 +3559,11 @@
         if(x.viewOwner!=null)radarIntent.viewOwner=x.viewOwner;
         var d = x.d;
         if (!validPayload(d)) throw new Error("bad payload");
-        if(x.ack){radarIntent.owner=x.ack.session;if(!radarIntent.owned){radarIntent.accepted=x.ack.intent;if(!radarIntent.edited)radarIntent.preferredMode=x.ack.intent.source||radarIntent.preferredMode;radarIntent.owned=x.ack.session===radarIntent.session;if(radarIntent.owned&&!radarIntent.edited&&x.ack.intent.zoom!==undefined&&radarCamera){var r=radarView.data,c=x.ack.intent.center==='station'?r.center:x.ack.intent.center,z=x.ack.intent.zoom==='auto'?r.zoomAutoLevel:x.ack.intent.zoom;radarZoom.auto=x.ack.intent.zoomPolicy==='auto'||x.ack.intent.zoom==='auto';if(Math.abs(radarCamera.lat-c.lat)>1e-8||Math.abs(radarCamera.lon-c.lon)>1e-8||radarCamera.zoom!==z){radarCameraSet({...c,zoom:z});radarSettle();}if(x.ack.intent.source!==r.sourceMode)radarSource.desired=x.ack.intent.source;}}if(x.ack.session===radarIntent.session&&x.ack.generation===sentIntentGeneration){radarIntent.ready=false;radarTrace('accepted');}}
+        if(x.ack){radarIntent.owner=x.ack.session;if(!radarIntent.owned){radarIntent.accepted=x.ack.intent;if(!radarIntent.edited)radarIntent.preferredMode=x.ack.intent.source||radarIntent.preferredMode;radarIntent.owned=x.ack.session===radarIntent.session;if(radarIntent.owned&&!radarIntent.edited&&x.ack.intent.zoom!==undefined&&radarCamera){var r=radarView.data,c=x.ack.intent.center==='station'?r.center:x.ack.intent.center,z=x.ack.intent.zoom==='auto'?r.zoomAutoLevel:x.ack.intent.zoom;radarZoom.auto=x.ack.intent.zoomPolicy==='auto'||x.ack.intent.zoom==='auto';if(Math.abs(radarCamera.lat-c.lat)>1e-8||Math.abs(radarCamera.lon-c.lon)>1e-8||radarCamera.zoom!==z){radarCameraSet({...c,zoom:z});radarSettle();}if(x.ack.intent.source!==(r.sourcePref||r.sourceMode))radarSource.desired=x.ack.intent.source;}}if(x.ack.session===radarIntent.session&&x.ack.generation===sentIntentGeneration){radarIntent.ready=false;if(x.ack.intent.source&&!radarSource.desired)radarIntent.preferredMode=x.ack.intent.source;radarTrace('accepted');}}
         if(x.smooth==='on'||x.smooth==='off'){var smooth=x.smooth==='on';if(radarSmooth.pending===smooth)radarSmooth.pending=null;if(radarSmooth.pending===null)radarSmooth.value=smooth;}
         else if(radarSmooth.value===null)radarSmooth.value=!!d.radar?.smooth;
         if(x.render==='v1'||x.render==='v2'){radarRender.writable=true;if(radarRender.pending===x.render)radarRender.pending=null;if(radarRender.pending===null)radarRender.value=x.render;}
-        else {radarRender.writable=false;radarRender.pending=null;radarRender.value=d.radar?.native?'v2':'v1';}
+        else {radarRender.writable=false;radarRender.pending=null;radarRender.value=d.radar?.renderPref||(d.radar?.native?'v2':'v1');}
         ['v1','v2'].forEach(v=>$('rad-'+v).disabled=radarRender.writable===false);
         render(d);                                /* may throw — book success AFTER it */
 
