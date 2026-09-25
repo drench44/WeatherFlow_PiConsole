@@ -107,7 +107,7 @@ let presenceDirty=false,pollTimer=null,pollController=null,polling=false,pollSta
 const schedulePoll=()=>{},updateFreshness=()=>{};
 const $=()=>({classList:{contains:()=>true}}),document={hidden:false};
 const clamp=(v,a,b)=>Math.max(a,Math.min(b,v));
-const radarIntent={generation:1,ready:true,owned:true,owner:null,session:'auto-session-12345',heartbeat:0,preferredMode:'auto'},
+const radarIntent={generation:1,ready:true,owned:true,owner:null,session:'auto-session-12345',heartbeat:0,preferredMode:'auto',sourceDirty:true},
  radarGesture={state:STATE},radarZoom={auto:false},radarSmooth={pending:null},radarRender={pending:null},radarBaseStyle={theme:'paper'};
 let radarCamera={lat:47,lon:-122,zoom:8},urls=[];
 // An unresolved thenable records the production request synchronously, without I/O.

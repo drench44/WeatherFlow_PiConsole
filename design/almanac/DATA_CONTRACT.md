@@ -595,25 +595,38 @@ The v1/v2 preference chooses the site renderer in Auto too.
 - At zoom 8 or higher, choose Site.
 - At zoom 6 or lower, choose Region.
 - At zoom 7, retain the displayed source. A cold start uses Region.
-- Require a fresh reporting closest site and at least 85% viewport coverage by
-  the reporting sites selected for the view. Unknown, dark, stale or refused
-  closest-site evidence keeps Region. Coverage is the union of the existing
+- Enter Site with a fresh reporting closest radar and at least 85% coverage;
+  remain in Site down to 70%. At zoom 7, measure coverage on the zoom-8
+  footprint at the same centre. Coverage is the union of the reporting sites'
   230 km spherical range discs, integrated over 512 Web Mercator screen rows.
   Overlaps count once. Tile margins do not count as viewport area.
+- Budget, timeout, transport and `scan unavailable` outcomes are unknown: keep
+  the displayed source. Preserve the last good listing and coverage evidence,
+  using it only within `RADAR_SITE_MAX_AGE_SEC`; expiry alone does not turn an
+  unknown result into a confirmed outage. A real not-reporting listing or
+  existing dark-site refusal can select Region immediately.
 - Hold against a reverse automatic switch for 10 seconds after publication,
   unless settled zoom moved at least 2 levels since that switch. Loss of valid
-  reporting or coverage takes precedence over this hold. The existing intent
+  reporting takes precedence over this hold; coverage changes obey it. The existing intent
   watcher retries when the hold ends. Failed candidates never reset the clock.
 
 Selection does not publish a candidate. The existing frame staging path retains
 the old source until the candidate newest frame is publishable. The page keeps
-its decoded frame staging. Region still has a native zoom ceiling of 9; Auto
+its decoded frame staging for source and renderer/variant changes: the complete
+previous loop stays visible until min(4, n) frames of the new loop are decoded,
+where n is the advertised target, not just the newest frame published so far.
+The existing “Switching …” and “sharpening” copy describes the wait.
+Region still has a native zoom ceiling of 9; Auto
 can select Site at camera zoom 10 when the guards permit it.
 
 A manual Region or Site choice holds until Auto is tapped or 45 minutes pass
 without a touch. The lease reads the existing `presence` marker used by radar
 attention; view polling does not renew it. Without a touch marker, the source
-preference's timestamp starts the hold. Camera moves alone do not renew it.
+preference's timestamp starts the hold. Future lease timestamps are clamped to
+the first observed current time so repeated polls cannot extend the hold.
+Camera moves alone do not renew it; the page sends
+`radarSource` only for an explicit source change, and camera-only transactions
+preserve the source lease's acceptance time.
 The engine checks expiry without needing a browser. The server persists Auto
 before recording a subsequent touch, so an expired choice cannot revive on the
 next poll or restart. Manual Site retains the zoom-7 floor and
@@ -622,16 +635,19 @@ next poll or restart. Manual Site retains the zoom-7 floor and
 ### Closest-site evidence and refusal (v6.0)
 
 The closest-site identity stays independent of the drawn timeline. When `nexrad`
-is non-null, these fields describe its **last listing**, even while Region is
-showing and even when tile acquisition subsequently fails:
+is non-null, these fields describe its **last known listing evidence**, even
+while Region is showing and even when acquisition subsequently fails. Failed
+checks preserve known evidence and its original observation time; without prior
+known evidence they report unknown availability. Auto bounds evidence reuse by
+`RADAR_SITE_MAX_AGE_SEC`. The scan age remains visible after that bound:
 
 | Field | Meaning |
 | --- | --- |
-| `nexrad.reporting` | Boolean freshness result at the last listing evaluation; null before any check. False alone does not prove an empty listing: inspect `reason` and `newestTs`. |
+| `nexrad.reporting` | Boolean freshness result at the last known listing evaluation; null when unknown. False alone does not prove an empty listing: inspect `reason` and `newestTs`. |
 | `nexrad.newestTs` | Newest accepted UTC scan epoch from the listing, or null for an empty/failed listing. Existing listing validation and history horizon still apply. |
 | `nexrad.ageSec` | Nonnegative whole seconds since `newestTs`, recomputed at publication; null without a scan. This clock advances while `checkedTs` stays fixed. |
 | `nexrad.reason` | Null when reporting, `not reporting` for an empty or over-age listing, `scan unavailable` for a failed/invalid listing; null before any check. |
-| `nexrad.checkedTs` | Wall-clock epoch of the listing attempt's observation time. Cache reuse and heartbeat publication do not advance it. Null before a check. |
+| `nexrad.checkedTs` | Wall-clock epoch of the retained listing evidence. Failed retries, cache reuse and heartbeat publication do not advance known evidence. Null before a check. |
 | `nexrad.checkedAt` | Station-local configured-clock rendering of `checkedTs`, or null. It is a check time, never a claimed outage start. |
 | `nexrad.nextCheckTs` | Current existing discovery wakeup epoch, or null when no wakeup is scheduled. Budget/busy-lane rescheduling changes this value. |
 | `nexrad.nextCheckAt` | Station-local configured-clock rendering of `nextCheckTs`, or null. |
@@ -1445,8 +1461,8 @@ are Smooth's exactly: one value, loopback and accepted camera transactions only,
 atomic replace only on change, durable at
 `$XDG_STATE_HOME/wfpiconsole/radar_render`, acknowledged by
 `X-Radar-Render: v1|v2`, and watched by the emitter even under an ordered intent.
-Default is v2, except when `/proc/device-tree/model` contains `Raspberry Pi 3`,
-which defaults to v1. The shared device reader is cached once per process and
+Default is v2, except for BCM2837-class boards (Raspberry Pi 3,
+Compute Module 3/3+, and Raspberry Pi Zero 2), which default to v1. The shared device reader is cached once per process and
 injectable in tests. An explicit preference always wins. Region stays v1.
 Smooth is disabled while native frames are drawn. A paused v2 preference can
 show v1 with Smooth enabled; the requested renderer and the drawn variant are
@@ -1475,14 +1491,25 @@ even if the scan timestamp has not changed.
 `lib/radar_native_budget.py` counts received Level III response-body bytes,
 including listings, products, invalid bodies and partial reads. Cache hits and
 304 responses add no body bytes. Counts use UTC days and persist by atomic
-replacement of `radar_native_bytes.json` beside the other runtime markers.
-An engine restart keeps the count. This is a response-body budget, not an ISP
-traffic counter. A request already in flight may cross a threshold.
+replacement through the `radar_native_bytes.json` runtime symlink into
+`$XDG_STATE_HOME/wfpiconsole/` (default `~/.local/state/wfpiconsole/`). Counts
+survive engine restarts and reboots. A clock before the stored UTC day cannot
+reset its count; rollover requires a later day. Accounting holds a short memory
+lock, and SD persistence runs outside the renderer/accounting locks: flush on
+threshold crossings and day changes, otherwise at most once per 60 seconds.
+A crash may lose the unflushed interval. A write failure logs once and pauses
+native access without replacing the transport result or losing metrics.
+This is a response-body budget, not an ISP traffic counter. A request already
+in flight may cross a threshold.
 
 Above 150,000,000 bytes in a UTC day, native acquisition is newest-only, with no
-native history backfill or optional warming. Above 250,000,000 bytes, Site uses
+native history backfill or optional warming. Up to two older scans may be tried
+if the newest scan is unavailable, still building just one frame. Region keeps
+its normal loop. Above 250,000,000 bytes, Site uses
 v1 for the rest of the UTC day. Preferences are retained. Policy changes
-supersede an acquisition as a whole, so a tile key never changes renderer.
+supersede a Site acquisition as a whole, so a tile key never changes renderer;
+Site-only tier/ceiling transitions do not invalidate Region acquisitions.
+In attention shadow mode, tiers gate neither native access nor Auto evaluation.
 The intent watcher also detects UTC rollover and resumes the eligible variant.
 
 `/health.radar.native` and `radar.nativeBudget` contain `day` (UTC `YYYY-MM-DD`),

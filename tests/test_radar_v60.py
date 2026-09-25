@@ -33,7 +33,7 @@ def test_region_publishes_last_listing_on_discovery(make_emitter, hybrid, multis
     assert n['id'] == 'KNEA' and n['checkedTs'] == hybrid.now
     assert n['nextCheckTs'] == e._radar_discovery.due
     assert n['checkedAt'] and n['nextCheckAt']
-    assert n['reporting'] is (status == 'fresh')
+    assert n['reporting'] is (None if status == 'failed' else status == 'fresh')
     assert n['reason'] == ('scan unavailable' if status == 'failed' else None if status == 'fresh' else 'not reporting')
     assert n['ageSec'] == (1620 if status == 'old' else 360 if status == 'fresh' else None)
     if status != 'failed':

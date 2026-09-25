@@ -31,6 +31,7 @@ def hybrid(tmp_path, monkeypatch):
     latest = int(datetime(2026, 9, 13, 0, 2, tzinfo=timezone.utc).timestamp())
     state = SimpleNamespace(latest=latest, rv=latest - 120, now=latest + 360,
         mono=0., calls=[], failure=None, tile=png(), metadata=None, conditional=False)
+    os.utime(tmp_path / 'radar_source', (state.now, state.now))
     monkeypatch.setattr(ae, 'RADAR_DIR', str(tmp_path / 'radar'))
     monkeypatch.setattr(ae.time, 'time', lambda: state.now + state.mono)
     monkeypatch.setattr(ae.time, 'monotonic', lambda: state.mono)

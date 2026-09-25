@@ -1,5 +1,7 @@
 """Fork-only settled-camera source policy and spherical viewport coverage."""
 import math
+import threading
+from collections import OrderedDict
 from pathlib import Path
 
 from lib.radar_attention import WARM_HOLD_SEC
@@ -8,22 +10,39 @@ from lib.radar_geometry import EARTH_RADIUS_METERS, world_point, world_inverse
 UP_ZOOM = 8
 DOWN_ZOOM = 6
 MIN_COVERAGE = .85
+STAY_COVERAGE = .70
 SWITCH_GUARD_SEC = 10
 MANUAL_HOLD_SEC = WARM_HOLD_SEC
+_lease_clocks = OrderedDict()
+_lease_lock = threading.Lock()
+
+
+def _lease_timestamp(root, marker, stamp, now):
+    # Anchor an unchanged future marker once, so repeated polls cannot slide the
+    # start of its hold forward forever after a backwards clock adjustment.
+    key = (str(root), marker)
+    with _lease_lock:
+        old_stamp, anchor = _lease_clocks.get(key, (None, now))
+        anchor = min(anchor if stamp == old_stamp else stamp, now)
+        _lease_clocks[key] = (stamp, anchor)
+        _lease_clocks.move_to_end(key)
+        while len(_lease_clocks) > 128:
+            _lease_clocks.popitem(last=False)
+        return anchor
 
 
 def choose(settled_zoom, showing=None, site_available=False, coverage=0.,
            last_switch_age=None, zoom_moved=0):
-    """Choose a source without side effects. Safety takes precedence over dwell.
-
-    ``showing`` is the published source, never a pending acquisition. Movement
-    is measured from the zoom at the last committed automatic source switch.
-    Unknown, stale or refused closest-site evidence means unavailable.
-    """
+    """Use tri-state availability: unknown evidence cannot change the source."""
     current = showing if showing in ('site', 'mosaic') else 'mosaic'
-    if not site_available or not coverage >= MIN_COVERAGE:
-        return 'mosaic'
-    target = 'site' if settled_zoom >= UP_ZOOM else 'mosaic' if settled_zoom <= DOWN_ZOOM else current
+    if site_available is None:
+        return current
+    if site_available is False:
+        return 'mosaic'  # confirmed not reporting / refused
+    threshold = STAY_COVERAGE if current == 'site' else MIN_COVERAGE
+    target = ('mosaic' if not coverage >= threshold else
+              'site' if settled_zoom >= UP_ZOOM else
+              'mosaic' if settled_zoom <= DOWN_ZOOM else current)
     if (target != current and last_switch_age is not None and
             last_switch_age < SWITCH_GUARD_SEC and abs(zoom_moved) < 2):
         return current
@@ -82,7 +101,7 @@ def source_preference(directory, record=None, now=0):
         # Accepted camera moves do not renew the source lease. Until the
         # debounce persists a new source, its transaction supplies the start.
         if record['source'] != pref or not selected:
-            selected = record.get('acceptedAt', selected)
+            selected = record.get('sourceAcceptedAt', record.get('acceptedAt', selected))
         pref = record['source']
     if pref not in ('mosaic', 'site'):
         return 'auto'
@@ -92,4 +111,6 @@ def source_preference(directory, record=None, now=0):
             touched = 0.
     except (OSError, ValueError, IndexError):
         touched = 0.
+    selected = _lease_timestamp(root, 'source', selected, now)
+    touched = _lease_timestamp(root, 'presence', touched, now)
     return 'auto' if now-max(touched, selected) >= MANUAL_HOLD_SEC else pref

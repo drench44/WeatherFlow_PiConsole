@@ -9,17 +9,25 @@ to shared upstream code that the classic console benefits from too.
 ### Radar
 - Added Auto beside Region and the nearest site's callsign. Auto is the default.
   It selects Site at settled zoom 8 and Region at zoom 6. Zoom 7 retains the
-  displayed source. Site needs a reporting closest radar and 85% viewport
-  coverage. Reverse switches wait 10 seconds unless zoom moves 2 levels.
-  The old map stays visible while the new source loads.
+  displayed source using the zoom-8 coverage footprint. Site needs a reporting
+  closest radar and 85% coverage to enter, 70% to stay. Unknown discovery results
+  keep the displayed source and bounded last-good evidence. Reverse switches
+  wait 10 seconds unless zoom moves 2 levels; confirmed outages may leave Site
+  immediately. The complete old loop stays visible until min(4, n) frames of a
+  new source or renderer variant are decoded.
 - Manual source choices expire after 45 minutes without a touch. Auto uses the
   existing validated, durable camera transaction and acknowledges the preference
-  separately from the source on screen.
-- Native v2 acquisition runs only in live and warm attention tiers. Above
-  150 MB per UTC day it fetches newest scans only. Above 250 MB it uses v1 for
-  the rest of that day. Counts survive engine restarts and appear in the payload
+  separately from the source on screen. Camera-only commits preserve the source
+  and its lease clock; future lease timestamps are clamped.
+- With active attention policy, native v2 acquisition runs only in live and warm
+  tiers; shadow tiers do not gate acquisition. Above 150 MB per UTC day it builds
+  one native frame, allowing two older-scan fallbacks. Region keeps its loop.
+  Above 250 MB it uses v1 for the rest of that day. A durable, debounced ledger
+  survives reboots and ignores backwards UTC day changes. Accounting failures
+  pause native without masking request results. Counts appear in the payload
   and `/health`. The page says “v2 paused · daily data limit”.
-- Defaulted to v2 except on Raspberry Pi 3 devices. Explicit renderer choices
+- Defaulted to v2 except on BCM2837-class devices (Pi 3, Compute Module 3,
+  and Zero 2). Explicit renderer choices
   remain authoritative. Tier and budget transitions preserve cache identity and
   retained frames, including when the latest scan timestamp is unchanged.
 

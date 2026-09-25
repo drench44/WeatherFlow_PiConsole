@@ -379,7 +379,7 @@ def _camera_transaction(activity, params):
         if generation > _radar_owner['generation']:
             if activity.get('moving') or 'zoom' not in activity or 'center' not in activity:
                 return False
-            if params.get('radarSource') not in (['auto'], ['site'], ['mosaic']) or params.get('radarPolicy') not in (['auto'], ['manual']):
+            if ('radarSource' in params and params['radarSource'] not in (['auto'], ['site'], ['mosaic'])) or params.get('radarPolicy') not in (['auto'], ['manual']):
                 return False
             if not _write_settled_camera(activity, params):
                 return False
@@ -407,6 +407,10 @@ def _write_settled_camera(activity, params):
     if source not in ('auto', 'site', 'mosaic'):
         source = 'auto'
     record = dict(zoom=activity['zoom'], center=activity['center'], source=source, camera=True)
+    if sources:
+        record['sourceAcceptedAt'] = time.time()
+    elif 'sourceAcceptedAt' in old or 'acceptedAt' in old:
+        record['sourceAcceptedAt'] = old.get('sourceAcceptedAt', old.get('acceptedAt'))
     if 'radarSession' in params:
         record.update(session=params['radarSession'][0], generation=int(params['radarGeneration'][0]),
                       zoomPolicy=params['radarPolicy'][0], acceptedAt=time.time())

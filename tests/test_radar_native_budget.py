@@ -65,13 +65,14 @@ def test_server_and_engine_share_missing_preference_default(make_emitter, hybrid
 
 def test_ledger_boundaries_restart_concurrency_and_utc_rollover(tmp_path):
     clock = [1789257599.]
+    mono = [0.]
     path = tmp_path/'radar_native_bytes.json'
-    ledger = budget.NativeBudget(path, lambda: clock[0])
+    ledger = budget.NativeBudget(path, lambda: clock[0], lambda: mono[0])
     ledger.add(budget.NATIVE_NEWEST_ONLY_BYTES)
     assert ledger.snapshot()['ceilingState'] == 'normal'
     ledger.add(1)
     assert ledger.snapshot()['ceilingState'] == 'newest-only'
-    ledger = budget.NativeBudget(path, lambda: clock[0])
+    ledger = budget.NativeBudget(path, lambda: clock[0], lambda: mono[0])
     assert ledger.snapshot()['bytesToday'] == budget.NATIVE_NEWEST_ONLY_BYTES+1
     ledger.add(budget.NATIVE_PAUSE_BYTES-ledger.bytes)
     assert ledger.snapshot()['ceilingState'] == 'newest-only'
@@ -79,13 +80,15 @@ def test_ledger_boundaries_restart_concurrency_and_utc_rollover(tmp_path):
         list(pool.map(ledger.add, [100]*20))
     assert ledger.snapshot()['bytesToday'] == budget.NATIVE_PAUSE_BYTES+2000
     assert ledger.snapshot()['ceilingState'] == 'paused'
+    mono[0] += 60
+    ledger.persist()
     assert json.loads(path.read_text())['bytes'] == ledger.bytes
     assert not list(tmp_path.glob('*.tmp'))
     clock[0] += 1  # midnight UTC, independent of the station's timezone
     assert ledger.snapshot()['ceilingState'] == 'normal'
     assert ledger.snapshot()['bytesToday'] == 0
     ledger.add(20)
-    assert budget.NativeBudget(path, lambda: clock[0]).snapshot()['bytesToday'] == 20
+    assert budget.NativeBudget(path, lambda: clock[0], lambda: mono[0]).snapshot()['bytesToday'] == 20
 
 
 def test_atomic_counter_preserves_durable_symlink(tmp_path):
@@ -170,7 +173,7 @@ def test_transport_counts_invalid_and_valid_bodies(make_emitter, monkeypatch, bo
 def test_threshold_crossing_supersedes_whole_variant_not_individual_tiles(make_emitter):
     emitter = make_emitter()
     emitter._radar_native_budget.add(budget.NATIVE_PAUSE_BYTES)
-    ctx = dict(native=True, native_ceiling='newest-only')
+    ctx = dict(native=True, native_ceiling='newest-only', target_source=SOURCE)
     emitter._radar_native_budget.add(1)
     with pytest.raises(ae._RadarSuperseded, match='native daily budget'):
         emitter._radar_checkpoint(ctx)
@@ -183,6 +186,7 @@ def test_unknown_attention_never_grants_native():
 def test_promotion_wakes_even_when_target_frame_count_falls(make_emitter, monkeypatch):
     monkeypatch.setattr(ae, 'RADAR_ATTENTION_MODE', 'active')
     emitter = make_emitter(); emitter._running = True; emitter._radar_native_requested = True
+    emitter._radar_target_source = SOURCE
     emitter._radar_attention.tier = 'watch'
     before = emitter._radar_attention_knobs()
     emitter._radar_attention.tier = 'warm'
@@ -197,6 +201,7 @@ def test_native_ceiling_rollover_wakes_existing_watcher(make_emitter, monkeypatc
     emitter = make_emitter(); emitter._running = True
     emitter._radar_zoom_stamp = emitter._radar_preference_stamp()
     emitter._radar_policy_ceiling = 'paused'
+    emitter._radar_target_source = SOURCE
     wakes = []
     monkeypatch.setattr(emitter, '_spawn', lambda key, work: wakes.append(key))
     emitter._check_radar_zoom()
@@ -228,20 +233,20 @@ def test_304_reuse_does_not_recount_cached_listing(make_emitter, monkeypatch):
     assert emitter._radar_native_budget.snapshot()['bytesToday'] == 0
 
 
-def test_newest_failure_above_soft_ceiling_does_not_fetch_older_native(make_emitter, hybrid, multisite, native):
+def test_newest_failure_above_soft_ceiling_builds_only_one_native_frame(make_emitter, hybrid, multisite, native):
     emitter = make_emitter(); emitter._radar_native_budget.add(budget.NATIVE_NEWEST_ONLY_BYTES+1)
-    # Every newest aligned site scan is corrupt. History is not an escape hatch.
+    # Failed newest scans may fall back, but must not build a history loop.
+    multisite.scans['KNEA'].insert(-1, hybrid.latest-120)
+    multisite.scans['KMID'].insert(-2, hybrid.latest-180)
     native.bad.update({hybrid.latest+24, hybrid.latest-60+24})
     emitter._do_radar()
-    from lib.radar_level3 import s3_key_time
-    assert all(s3_key_time(key) >= hybrid.latest-60 for kind, key in native.calls if kind == 'get')
+    assert len(emitter._radar_result.frames) == 1
 
 
 def test_unwritable_ledger_pauses_further_native(make_emitter, monkeypatch):
     emitter = make_emitter()
     monkeypatch.setattr(budget.os, 'replace', lambda *args: (_ for _ in ()).throw(OSError('read-only ledger')))
-    with pytest.raises(OSError):
-        emitter._radar_native_budget.add(20)
+    emitter._radar_native_budget.add(20)
     assert emitter._radar_native_budget.snapshot()['ceilingState'] == 'paused'
 
 

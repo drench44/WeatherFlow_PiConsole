@@ -21,7 +21,8 @@ def test_zoom_table(zoom, showing, expected):
 @pytest.mark.parametrize('available,coverage', [(False, 1.), (False, 0.), (True, .849999)])
 @pytest.mark.parametrize('showing', [None, 'site', 'mosaic'])
 def test_coverage_and_reporting_are_safety_guards(available, coverage, showing):
-    assert auto.choose(10, showing, available, coverage, 0, 0) == 'mosaic'
+    expected = 'site' if showing == 'site' and available and coverage >= auto.STAY_COVERAGE else 'mosaic'
+    assert auto.choose(10, showing, available, coverage, 0, 0) == expected
 
 
 @pytest.mark.parametrize('age,moved,expected', [

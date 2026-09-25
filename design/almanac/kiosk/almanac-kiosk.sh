@@ -146,6 +146,10 @@ if [ ! -e "$RADAR_STATE/radar_render" ] && [ -f "$DATA_DIR/radar_render" ]; then
   cp "$DATA_DIR/radar_render" "$RADAR_STATE/radar_render"
 fi
 ln -sfn "$RADAR_STATE/radar_render" "$DATA_DIR/radar_render"
+if [ ! -e "$RADAR_STATE/radar_native_bytes.json" ] && [ -f "$DATA_DIR/radar_native_bytes.json" ]; then
+  cp "$DATA_DIR/radar_native_bytes.json" "$RADAR_STATE/radar_native_bytes.json"
+fi
+ln -sfn "$RADAR_STATE/radar_native_bytes.json" "$DATA_DIR/radar_native_bytes.json"
 cp -f "$APP/design/almanac/console_live.html" "$WEB/index.html"
 ln -sf "$DATA" "$WEB/wx.json"
 

@@ -72,6 +72,7 @@ def multisite(hybrid, monkeypatch, tmp_path):
         return original(self, req, timeout)
     monkeypatch.setattr(ae.RadarSession, 'open', fetch)
     (tmp_path/'radar_source').write_text('site')
+    os.utime(tmp_path/'radar_source', (hybrid.now, hybrid.now))
     return state
 
 
@@ -143,7 +144,7 @@ def test_neighbor_listing_error_does_not_fail_reporting_primary(make_emitter, hy
     monkeypatch.setattr(emitter, '_radar_request', fetch)
     emitter._do_radar()
     assert emitter._radar_available and emitter._radar_result.site_id == 'KNEA'
-    assert emitter._radar_result.sites[1]['reporting'] is False
+    assert emitter._radar_result.sites[1]['reporting'] is None
 
 
 def test_site_budget_aborts_without_negative_cache(make_emitter, hybrid, multisite, monkeypatch):
