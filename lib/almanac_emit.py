@@ -29,7 +29,7 @@ from kivy.logger import Logger
 from kivy.clock  import Clock
 
 from collections import Counter, OrderedDict, deque, namedtuple
-from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED
+from concurrent.futures import Future, ThreadPoolExecutor, wait, FIRST_COMPLETED
 from datetime import datetime, timedelta, timezone
 import json
 import io
@@ -42,7 +42,7 @@ import os
 import re
 import sys
 import threading
-from threading import Event as _Event, Thread as _InventoryThread, RLock as _RLock   # kept apart from `threading`, which tests stub
+from threading import Event as _Event, Thread as _InventoryThread, RLock as _RLock, BoundedSemaphore as _BoundedSemaphore   # kept apart from `threading`, which tests stub
 import time
 import pytz
 
@@ -1055,6 +1055,52 @@ def _snapshot_field(snapshot_attr, field):
 # ==============================================================================
 # EMITTER
 # ==============================================================================
+class _RadarInputExecutor(ThreadPoolExecutor):
+    """Bound running + queued flights; saturation never blocks the coordinator.
+
+    Keep admission until a worker consumes even a cancelled job, so repeatedly
+    cancelling frames cannot accumulate dead work items in the executor queue.
+    """
+    def __init__(self, workers, name):
+        super().__init__(max_workers=workers, thread_name_prefix=name)
+        self._admission = _BoundedSemaphore(workers)
+
+    def submit(self, fn, /, *args, **kwargs):
+        result = Future()
+        if not self._admission.acquire(blocking=False):
+            result.set_exception(TimeoutError('radar input workers occupied'))
+            return result
+
+        def run():
+            if not result.set_running_or_notify_cancel():
+                self._admission.release()
+                return
+            try:
+                value = fn(*args, **kwargs)
+            except BaseException as error:
+                self._admission.release()
+                result.set_exception(error)
+            else:
+                # Publish completion after returning admission, so the next
+                # frame cannot see a finished flight still occupying a slot.
+                self._admission.release()
+                result.set_result(value)
+
+        try:
+            work = super().submit(run)
+        except RuntimeError as error:
+            self._admission.release()
+            result.set_exception(error)
+            return result
+
+        def retired(work):
+            if work.cancelled():  # shutdown cancelled a wrapper before dequeue
+                result.cancel()
+                self._admission.release()
+        work.add_done_callback(retired)
+        return result
+
+
 class AlmanacEmitter:
     """ Periodically snapshots the console's live Obs/Astro/Met/Sager/System
     DictProperties into a flat JSON file for the almanac HTML overlay.
@@ -1077,8 +1123,7 @@ class AlmanacEmitter:
         self._radar_archive_positive = set()  # immutable successful archive URLs
         self._radar_tiles = OrderedDict()
         self._radar_native_groups = {}
-        self._radar_hca_pool = ThreadPoolExecutor(max_workers=RADAR_SITE_MAX_COUNT,
-                                                   thread_name_prefix='radar-hca')
+        self._radar_start_input_pools()
         self._radar_n0h_health = HostHealth()  # isolate optional product failures
         self._radar_level3_scans = OrderedDict()   # (site, stamp) -> decoded Scan, v2 only
         self._radar_level3_flights = {}            # (site, stamp) -> shared completion and verdict
@@ -1220,6 +1265,7 @@ class AlmanacEmitter:
         stacking a second set of timers. """
         with self._life_lock:
             self.stop()
+            self._radar_start_input_pools()
             self._running = True
             try:
                 os.makedirs(os.path.dirname(self.output_path), exist_ok=True)
@@ -1248,6 +1294,12 @@ class AlmanacEmitter:
                 Logger.info('almanac_emit: radar disabled (WFP_RADAR=0): no acquisition, cache scan, geography or listings')
             return self._event
 
+    def _radar_start_input_pools(self):
+        # One frame uses at most four slots. A second frame has four spare
+        # slots while a preceding frame's transports finish their deadlines.
+        self._radar_input_pool = _RadarInputExecutor(2*RADAR_SITE_MAX_COUNT, 'radar-input')
+        self._radar_hca_pool = _RadarInputExecutor(2*RADAR_SITE_MAX_COUNT, 'radar-hca')
+
     def stop(self):
         """ Cancel every scheduled handle, including the boot one-shots and any
         pending provider retry, and fence the callbacks that are already due.
@@ -1255,6 +1307,8 @@ class AlmanacEmitter:
         arming a retry cannot slip a handle in after the registry is cleared. """
         with self._life_lock:
             self._running = False
+            self._radar_input_pool.shutdown(wait=False, cancel_futures=True)
+            self._radar_hca_pool.shutdown(wait=False, cancel_futures=True)
             for handle in self._events:
                 try:
                     handle.cancel()
@@ -2464,6 +2518,8 @@ class AlmanacEmitter:
         from PIL import Image
         workers = ctx.get('tile_workers', RADAR_TILE_WORKERS)
         variant = _radar_variant(ctx, source)
+        foreground_tiles = ({(x, y) for x, y, _, _ in _radar_grid(ctx)}
+                            if variant == 'native' and not ctx.get('prefetch') else set())
         interactive = workers == RADAR_NEWEST_TILE_WORKERS and not ctx.get('prefetch')
         hedge_budget = ctx.setdefault('hedge_budget', dict(count=0, limit=len(ctx['tiles'])//2))
         def claim_hedge(tile_url):
@@ -2494,7 +2550,10 @@ class AlmanacEmitter:
                 scans = ctx['mosaic_scans']
                 self._radar_checkpoint(ctx)
                 drawn, visible = render_mosaic(scans, ctx['zoom'], tx, ty, source_palette(source),
-                    RADAR_SITE_RANGE_METERS, filtered=ctx.get('mosaic_filtered'), deadline=deadline)
+                    RADAR_SITE_RANGE_METERS, filtered=ctx.get('mosaic_filtered'), deadline=deadline,
+                    cache_geometry=(not ctx.get('prefetch') and
+                        ctx['zoom'] == ctx.get('camera_zoom', ctx['zoom']) and
+                        (tx, ty) in foreground_tiles))
                 with drawn:
                     colours = sum(1 for _, index in drawn.getcolors(256) if index)
                     # Gates are measured values, never matched colours: nothing is unmatched or ambiguous.
@@ -2689,13 +2748,9 @@ class AlmanacEmitter:
         from lib.radar_mosaic import mosaic_key, quality_control
         scans, contributors, identities = [], [], []
         cancelled = _Event()
-        # A frame owns its classification queue. Old running flights have bounded
-        # transport deadlines and can still cache late successes, but cannot take
-        # worker slots from another frame. Never wait for optional flights here.
-        self._radar_hca_pool.shutdown(wait=False, cancel_futures=True)
-        hca_pool = ThreadPoolExecutor(max_workers=RADAR_SITE_MAX_COUNT,
-                                      thread_name_prefix='radar-hca')
-        self._radar_hca_pool = hca_pool
+        # Jobs/cancellation belong to the frame; executors belong to the emitter.
+        # Bounded spare capacity isolates the next frame from stalled transports.
+        hca_pool = self._radar_hca_pool
         hca_jobs = []
         # Each successful reflectivity immediately starts its independent HCA
         # flight, while the other sites' reflectivity is still being acquired.
@@ -2711,7 +2766,7 @@ class AlmanacEmitter:
                 hca_jobs.append((site, scan.volume_ts, future))
             return scan, future
         available = []
-        pool = ThreadPoolExecutor(max_workers=RADAR_SITE_MAX_COUNT, thread_name_prefix='radar-input')
+        pool = self._radar_input_pool
         jobs = [(site, stamp, pool.submit(acquire, site, stamp)) for site, stamp in sorted(pairs)
                 if ts - 480 <= stamp <= ts + 60]
         try:
@@ -2750,13 +2805,13 @@ class AlmanacEmitter:
             with self._radar_lock:
                 cancelled.set()
                 flights = tuple(hca_jobs)
-            pool.shutdown(wait=False, cancel_futures=True)
+            for _, _, job in jobs:
+                job.cancel()
             for site, volume, hca in flights:
                 if not hca.done() or hca.cancelled():
                     self._radar_remember_level3_failure((site, volume, 'N0H'),
                         10, 'classification flight timed out or cancelled', TimeoutError)
                     hca.cancel()
-            hca_pool.shutdown(wait=False, cancel_futures=True)
         return dict(mosaicKey=mosaic_key(identities, _radar_render_revision('native')), siteScans=contributors,
                     requestedPairs=sorted([list(p) for p in pairs]),
                     unfilteredSites=[p['id'] for p in contributors if not p['filtered']]), tuple(scans)
@@ -4363,7 +4418,7 @@ class AlmanacEmitter:
                 self._radar_clear_retry()
             if any(self._radar_pending.get(k) for k in ('newest','four','eight')) and not self._radar_restart and 'radar' not in self._retries:
                 self._radar_budget_retry(self._radar_result.source_id, 1)
-            self._radar_native_budget.persist()
+            self._radar_native_budget.persist(wait=False)
             self._radar_arm_discovery()
             self._radar_log_pass(pass_deadline-RADAR_BUILD_DEADLINE_SEC)
             if not self._running and self._radar_session is not None and 'radar' in self._inflight:

@@ -229,7 +229,8 @@ def test_geometry_eight_frame_loop_and_byte_eviction(monkeypatch, levels, mib):
             for dx, dy in ((0, 0), (0, 1), (1, 0), (1, 1)):
                 mosaic.mosaic_codes(candidates, z, x+dx, y+dy, size=512 if z < 8 else 256)
     info = mosaic.geometry_cache_info()
-    assert info == dict(bytes=mib*1024**2, hits=336, misses=48, entries=48)
+    assert 0 < info.pop('bytes') <= mib*1024**2  # covered projections can be smaller
+    assert info == dict(hits=336, misses=48, entries=48)
     monkeypatch.setattr(mosaic, 'GEOMETRY_MAX_BYTES', 512*1024)
     mosaic.clear_geometry_cache()
     x, y = map(int, tile_of(47.61, -122.33, 10))

@@ -1534,15 +1534,35 @@ unfiltered echo can still own a pixel; any unfiltered site drawing pixels keeps
 the unfiltered caption (contributor metadata conservatively labels the frame).
 
 A process-wide 48 MiB byte-bounded LRU caches each site's tile geometry by site
-position, antenna height, elevation, z/x/y, sample size and range limit. Compact
-int16 bearing bins and gates plus float32 beam heights cost eight bytes/sample.
-Bearing bins are translated through each volume's actual radial table; radial
-rows are never reused across volumes. Gate boundaries are computed in float64
-before integer compaction. The same geometry is reused across the eight-frame
-loop and nearby levels. Render slot count is `min(cpu_count, 4)`, at least one:
-a measured <=20 MB transient peak per cold supersampled render keeps concurrent
-working allocations within approximately 80 MB, separately from the 48 MiB
-retained geometry cache. Waiting for a slot observes the tile deadline.
+position, antenna height, elevation, z/x/y, sample size and range limit. A
+spherical disc/rectangle intersection rejects off-tile sites before projection;
+these sites never enter the cache. Each projection owns only the rectangular
+sampled footprint of its 230 km disc in the tile. uint16 bearing bins (0–3599)
+and gates (0–32767), the smallest integer dtypes that hold those domains, plus
+float32 beam heights cost eight bytes per retained sample. Cropped arrays own
+their storage, with no full-tile backing arrays. Bearing bins are translated
+through each volume's actual radial table; radial rows are never reused across
+volumes. Gate boundaries are computed in float64 before integer compaction.
+Only foreground viewport-grid tiles at the current camera zoom admit or promote
+entries. Margin builds and adjacent-zoom prefetch may read existing projections
+but compute misses without insertion or LRU promotion. An eight-frame four-site
+956×490 Seattle viewport loop, with margin-1 and z±1 warm rounds between frames,
+has 87.5% foreground hits including the cold first frame at z7–10. Retained
+projection bytes are respectively 34,131,024 / 19,467,888 / 23,231,248 / 25,165,824.
+
+Render allocation is charged from sample size `S` and candidate count `C`:
+`1 MiB + S² × max(96 + 12C, 16 + 26C)` bytes. The first term bounds a cold
+projection's float64 temporaries plus previous projections/samples; the second
+bounds ownership sorting, masks and indices. It includes cold projections even
+when they become retained cache entries. The public renderer accepts at most
+four candidates and at most 512×512 samples. Its worst-case charge is
+38,797,312 bytes, so slot count is `min(cpu_count, floor(80,000,000 / 38,797,312))`,
+at least one (two on a multicore host; total charged transient 77,594,624 bytes).
+Cold measured peaks on the local arm64 Mac are 26.62 MB at z7 and 6.90 MB at
+z8–10, including newly retained geometry, with Pillow imported before measuring.
+The separate retained geometry cap remains 48 MiB. Waiting for a slot observes
+the tile deadline. `tools/benchmark_radar_mosaic.py --viewport --background
+--zooms 7 8 9 10 --memory` reproduces the workload from local N0B/N0H files.
 z7 uses 2×2 maximum supersampling after selection; z8–10 use one sample.
 The existing source palette code-to-slot table and PNG `weatherPixels` metadata
 are unchanged. Attention consumes the mosaic counts; the sentinel remains MRMS.
@@ -1600,8 +1620,16 @@ no longer disables unchanged discovery. Requested reflectivity pairs that did
 not contribute follow the same upgrade-window and negative-memory rules; they
 cannot make a partial sidecar permanently complete. Restarts detect these gaps
 from requestedPairs versus siteScans and upgrades get a new immutable key.
-Each frame owns its HCA worker queue so stalled flights cannot occupy the next
-frame's slots. Timed-out and cancelled flights enter bounded per-volume negative
+The emitter owns long-lived bounded N0B and HCA executors, each with eight
+running-plus-queued admissions and at most eight worker threads. A frame uses
+at most four per product, leaving a full frame's spare capacity when the previous
+frame's transports stall. HCA cannot occupy N0B workers. If two whole frames
+remain stalled, further admission fails promptly instead of growing threads or
+queues; foreground reflectivity can still publish without HCA. Cancellation is
+per frame and releases a queued admission only when its wrapper is consumed;
+late N0B completion cannot start HCA after that frame is cancelled. `stop()`
+shuts down both executors without waiting for transport I/O; `start()` creates
+the next lifecycle's executors. Timed-out and cancelled flights enter bounded per-volume negative
 memory; late successful products still clear that failure and can upgrade. Prefetch propagates HCA budget refusals
 and skips only the current target when classification is unfinished, continuing
 later targets (including Region). A budget denial may end the round. No unfinished
@@ -1663,7 +1691,8 @@ retained to tolerate a small backward clock correction. A day more than one day
 ahead is invalid and resets to zero on today's UTC day; normal rollover uses a
 later day. Accounting holds a short memory lock. A single asynchronous writer
 per ledger performs atomic replacement, file fsync and directory fsync outside
-the renderer/accounting locks; request workers never wait for storage. Threshold
+the renderer/accounting locks; request workers and pass completion use
+`persist(wait=False)` and never wait for ledger storage. Threshold
 crossings and day changes wake it immediately, bypassing ordinary coalescing.
 Other changes flush at most once per two seconds, including a trailing burst
 with no later request or watcher tick. With healthy storage, SIGTERM/SIGKILL or
