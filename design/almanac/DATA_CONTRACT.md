@@ -233,7 +233,7 @@ worth looking at. `radar.attention` is published with every payload:
 Promotion is immediate. Live drops to warm the moment the tab closes; every other
 demotion waits ten minutes in the tier and for every stronger hold to expire. The
 page adds `touch=1` to the poll after any pointer event on any screen; the server
-writes the `presence` marker (loopback only, at most every 10 s). `weather` (holds
+writes the `presence` marker (controllers only, at most every 10 s). `weather` (holds
 only, never "unknown") drives a small mark on the Radar tab. `waking` is true from a
 rise into warm/live until a fresh, complete frame for the accepted preferences
 publishes, or 90 s. Partial tile successes do not end waking. The radar note
@@ -379,16 +379,19 @@ and refresh-failure status.
 
 The page owns `{session, generation, camera, zoomPolicy, preferredMode}`.
 `radarSession` and `radarGeneration` accompany activity. `radarCommit=1`,
-`radarSource=mosaic|site`, `radarPolicy=auto|manual`, `radarGeoZoom` and
+`radarSource=auto|mosaic|site`, `radarPolicy=auto|manual`, `radarGeoZoom` and
 `radarGeoCenter` form one settled transaction. A mode tap commits immediately;
 settling increments generation before the network debounce. Heartbeats carry a
 separate increasing `radarHeartbeat` ordinal and never invent a new intent.
 
-A reload first claims generation zero with `radarClaim=<acknowledged owner>`.
-This compare-and-swap is read-only with respect to camera preferences. The page
-reconciles the accepted runtime intent before committing any restored camera;
-new input during reconciliation remains authoritative. Old sessions, generations
-and reordered heartbeats are rejected before intent **or activity** changes.
+A reload follows the accepted runtime intent without claiming. Only a user
+commit with a positive page-local generation may carry
+`radarClaim=<acknowledged owner>` (empty before the first owner). The server
+compares and swaps ownership and writes the camera atomically under its writer
+lock. Old sessions, generations and reordered heartbeats are rejected before
+intent **or activity** changes. A page whose acknowledgement names another
+session demotes itself, discards its rejected commit and follows the accepted
+camera, zoom policy and source. Reconciliation never creates a commit.
 `X-Radar-Intent` returns `{intent, session, generation, acceptedGeneration}`.
 Runtime records include session, generation, resolved numeric zoom, zoomPolicy,
 source, center, acceptedAt and the existing worker sequence. A 250ms debounce
@@ -400,6 +403,44 @@ intermediate camera. Moving ownership expires after five seconds; geo work
 resumes after settlement or lease expiry. A true camera/policy no-op retains
 all decoded frames. Policy-only Auto changes commit without invalidating them;
 rapid zoom presses accumulate from the pending animation target.
+
+### Remote control
+
+There is one engine view. Any browser on the home network can steer zoom, pan,
+Auto/Region/site, Smooth and v1/v2; the panel follows. Controllers are loopback
+and explicit private ranges: IPv4 `10/8`, `172.16/12`, `192.168/16`; IPv6
+`fc00::/7`, `fe80::/10`; IPv4-mapped IPv6 addresses use their IPv4 classification.
+The peer address is classified with `ipaddress`, not forwarded headers or the
+broader `is_private` category. Other addresses remain read-only and receive no
+control acknowledgement headers. The listener still requires a LAN bind
+(`WFP_BIND=0.0.0.0` for IPv4); the default is loopback.
+
+Ownership is **last user action wins**, using the compare-and-swap transaction
+above. Passive polls, opening Radar and reloading never claim. A rejected claim
+follows the winning view until another user action. Generation and heartbeat
+fences belong to the owner; delayed old-owner requests cannot overwrite the
+new owner's view. Smooth and renderer writes are explicit pending taps with a
+valid `radarSession`, independent of camera ownership, with the same value
+validation for every controller. Controllers receive `X-Radar-Intent`,
+`X-Radar-Smooth`, `X-Radar-Render` and `X-View-Session` acknowledgements.
+
+`_view_transaction`, `radar_viewing`, `radar_viewed`, and `r=1` render counts
+remain **panel-only (loopback)**, regardless of camera ownership. A LAN page
+cannot flap the live-view marker or vouch for a panel render. Its `touch=1`
+does write presence: attention becomes warm and native v2 is eligible. Source
+expiry runs before recording that touch, so expired manual source choices are
+not revived by presence. Merely leaving a remote browser open is weak evidence.
+
+A per-peer token bucket admits 20 controller polls/second with a burst of 60.
+All write side effects of a controller poll share this admission check, including
+activity, presence, expiry, preferences and panel viewing/render reports.
+Panel-only bad-tile POST reports share the bucket and return 429 when exhausted.
+IPv4 and mapped aliases share a bucket. Buckets use monotonic time, reclaim
+clients idle for 60 seconds and cap storage at 4096 clients (new clients cannot
+write while the table is full). Excess writes are discarded; the `wx.json`
+read and current acknowledgement headers still succeed. Normal polling and
+gestures fit within the limit. Followers never label background acquisition
+as their own “Updating view” or “Switching” operation.
 
 ### One worker and fixed work order
 
@@ -579,7 +620,7 @@ used to decide eligibility.
 The source picker is **Auto | Region | <site>**. The site keeps its callsign and
 contributor count, such as `KATX +3`. Auto is the default without a preference.
 `radar_source` and the camera transaction accept `auto`, `mosaic` and `site`.
-The same loopback check, single-value validation, camera owner/generation fence,
+The same controller check, single-value validation, camera owner/generation fence,
 atomic durable write and `X-Radar-Intent` acknowledgement apply to all three.
 Moving camera reports cannot commit a source choice.
 
@@ -1177,7 +1218,7 @@ retains progress and idles when complete; station or basemap revision changes
 rebuild it, reusing any existing immutable tiles. An engine restart checks the
 same disk set and does not rerender existing tiles.
 
-Loopback `radar_activity` atomically carries `{at, theme, moving, center, zoom}`.
+Accepted controller `radar_activity` atomically carries `{at, theme, moving, center, zoom}`.
 The displayed camera (`radarGeoCenter`, `radarGeoZoom` on the ordinary poll) is
 the only live zoom/centre intent. Each valid settled report updates the canonical
 runtime intent; moving reports affect geography priority only. The radar worker
@@ -1317,18 +1358,19 @@ camera supersedes them. First tab entry skips acquisition only after the full
 required eight-frame inventory has been checked against the validated memory index. Publishable partial
 frames are distinct from complete sets in completion counters and retry work.
 
-### Loopback reports and the single note
+### Controller reports and the single note
 
 The page sends the v5.7 session/generation transaction and independent heartbeat
 ordinal described above, using `radarGeoZoom`, `radarGeoCenter`, `radarSource`
-and `radarPolicy` on the existing loopback poll. Runtime intent wins over durable
+and `radarPolicy` on the existing controller poll. Runtime intent wins over durable
 defaults; reload reconciles ownership first. The resolved numeric camera drives
 acquisition and Auto remains an independently durable policy.
 
-Camera reports occur on activation and after settle's 120ms trailing debounce.
+Activation reports visibility without committing or claiming a camera. User
+camera commits follow settle's 120ms trailing debounce.
 **v4.3 source input** renders intent synchronously on primary pointer contact;
 native click also supports mouse, keyboard and assistive activation. The next
-event-loop task sends the complete intent on the existing loopback `wx.json` GET
+event-loop task sends the complete intent on the existing controller `wx.json` GET
 channel, coalescing a synchronous burst and aborting an obsolete in-flight poll.
 The pointer's compatibility click does not send a duplicate transaction. Source
 input below the site floor snaps the camera to zoom 7 before sending.
@@ -1391,14 +1433,14 @@ older than the displayed mosaic can still publish immediately.
 ### Smooth preference (v6.1; persistence introduced in v5.6)
 
 The quiet **SMOOTH** button beside zoom reset uses the existing control colours,
-`aria-pressed` and a 64×44px target. Default is **off**. The active loopback camera
-owner sends `radarSmooth=on|off` on `wx.json`; exactly one value is accepted.
-Duplicate, empty and invalid values, non-loopback callers and rejected camera
-transactions cannot write it. The handler atomically replaces `radar_smooth`
+`aria-pressed` and a 64×44px target. Default is **off**. Any controller with a
+valid page session sends `radarSmooth=on|off` on an explicit tap; exactly one
+value is accepted, independently of camera ownership. Duplicate, empty and
+invalid values and non-controller callers cannot write it. The handler atomically replaces `radar_smooth`
 only when its value changes, following the durable symlink just like zoom.
 The launcher backs it with `$XDG_STATE_HOME/wfpiconsole/radar_smooth` (default
 `~/.local/state/wfpiconsole/radar_smooth`), preserving it across tmpfs recreation.
-`X-Radar-Smooth: on|off` acknowledges the stored preference on loopback responses,
+`X-Radar-Smooth: on|off` acknowledges the stored preference on controller responses,
 including reloads while the emitter is still acquiring the selected variant.
 The emitter watches this marker even when an ordered `radar_intent` exists;
 changed preference supersedes in-flight work at the existing tile checkpoints.
@@ -1649,8 +1691,8 @@ read from the public bucket `https://unidata-nexrad-level3.s3.amazonaws.com/`.
 Design and the later phases: `RADAR-NATIVE-DESIGNS.md`.
 
 **Preference.** A `v1 | v2` group sits after SMOOTH (two 48×44 px segments on the
-plate scrim, `aria-pressed`). The camera owner sends `radarRender=v1|v2`; the rules
-are Smooth's exactly: one value, loopback and accepted camera transactions only,
+plate scrim, `aria-pressed`). A controller sends `radarRender=v1|v2` on a tap; the
+rules are Smooth's exactly: one value and a valid session, independent of camera ownership,
 atomic replace only on change, durable at
 `$XDG_STATE_HOME/wfpiconsole/radar_render`, acknowledged by
 `X-Radar-Render: v1|v2`, and watched by the emitter even under an ordered intent.

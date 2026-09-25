@@ -7,6 +7,12 @@ to shared upstream code that the classic console benefits from too.
 ## 2026-09-25
 
 ### Radar
+- **Remote control from your home network.** A browser on a Mac or phone can
+  zoom, pan, choose Auto, Region or a site, and change Smooth or v1 | v2; the
+  panel follows the same engine view. The last user action takes control.
+  Other pages and reloads follow without stealing it or getting stuck on
+  “Updating view”. Remote touches count as presence; only the panel reports
+  live viewing and painted frames. Per-client write limits keep polling readable.
 - **v2 merges nearby radars pixel by pixel and filters clutter.** The seams
   where one radar's layer ended are gone. Each pixel now shows the echo from the
   lowest radar beam that sees one, so a beam blocked by the Cascades no longer

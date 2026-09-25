@@ -24,20 +24,20 @@ def transaction(module, session, gen, source='site', zoom=8, claim=None, commit=
         return module._camera_transaction(activity, params)
 
 
-def test_ordered_requests_reload_claim_and_auto(serve_at, tmp_path):
+def test_ordered_requests_user_claim_and_auto(serve_at, tmp_path):
     module, _ = serve_at({})
     a, b = 'session-a-12345678', 'session-b-12345678'
-    assert transaction(module,a,0,claim='')
+    assert transaction(module,a,1,claim='')
     assert transaction(module,a,2,source='site',zoom=8,policy='auto')
     before = module._read_radar_intent()
     assert not transaction(module,a,1,source='mosaic',zoom=7)
     assert not transaction(module,a,1,commit=False)
     assert module._read_radar_intent() == before
     assert not transaction(module,b,0,claim='')
-    assert transaction(module,b,0,claim=a)
+    assert not transaction(module,b,0,claim=a)
     assert module._read_radar_intent() == before  # reload reconciliation is read-only
+    assert transaction(module,b,1,source='site',zoom=8,policy='auto',claim=a)
     assert not transaction(module,a,3)
-    assert transaction(module,b,1,source='site',zoom=8,policy='auto')
     module._camera_persist_timer.join(2)
     assert (tmp_path/'radar_zoom').read_text().strip() == 'auto'
 
@@ -45,8 +45,7 @@ def test_ordered_requests_reload_claim_and_auto(serve_at, tmp_path):
 def test_motion_heartbeat_cannot_reorder_same_generation_activity(serve_at, tmp_path):
     module, url = serve_at({})
     session='heartbeat-owner-12345'
-    assert transaction(module,session,0,claim='')
-    assert transaction(module,session,1)
+    assert transaction(module,session,1,claim='')
     base=url+'/wx.json?view=radar&radarSession='+session+'&radarGeneration=1&radarTheme=paper&radarGeoZoom=8&radarGeoCenter=47.61,-122.33'
     _get(base+'&radarHeartbeat=3&radarMoving=0')
     before=(tmp_path/'radar_activity').read_text()

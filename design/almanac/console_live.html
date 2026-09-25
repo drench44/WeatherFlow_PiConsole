@@ -3172,13 +3172,14 @@
     if(d>cap){q=[h[0]+v[0]*cap/d,h[1]+v[1]*cap/d];}q=[q[0],clamp(q[1],245,w-245)];if(resist)q=q.map((n,i)=>n+.3*(p[i]-n));var canonical=radarWorldInverse(...q,c.zoom);return {lat:+canonical.lat.toFixed(10),lon:+canonical.lon.toFixed(10),zoom:c.zoom};}
   function radarFocal(c,z,from,to=from){var p=radarWorldPoint(c.lat,c.lon,c.zoom),s=2**(z-c.zoom),q=[(p[0]+from.x-478)*s-(to.x-478),(p[1]+from.y-245)*s-(to.y-245)];return {...radarWorldInverse(...q,z),zoom:z};}
   function radarBegin(){radarIntent.edited=true;radarView.blend=null;clearTimeout(radarIntent.timer);radarGesture.animation=null;radarGesture.inertia=null;radarGesture.state='gesturing';radarCompositeJob=null;radarIdleSync(true);}
-  function radarSettle(){var identity=JSON.stringify(radarClampCamera(radarCamera)),changed=identity!==radarIntent.cameraKey,policyChanged=radarIntent.policy!==(radarZoom.auto?'auto':'manual');radarIntent.policy=radarZoom.auto?'auto':'manual';radarGesture.state='idle';radarGesture.animation=null;radarGesture.inertia=null;radarCameraSet(radarClampCamera(radarCamera));radarBaseDirty=true;radarCameraRevision++;radarCompositeJob=null;
-    if(changed){radarCancelJobs();if(!radarSwitch)radarSwitchStart();radarIntent.cameraKey=identity;radarRetarget();radarUpdateReady();radarNoteRender();}
-    try{sessionStorage.setItem('radarCamera',JSON.stringify({...radarCamera,auto:radarZoom.auto}));}catch(e){}radarOverlayBuild();radarGeoRequest();radarQueueTiles();radarZoomRender();if(changed||policyChanged)radarPostIntent();radarIdleSync(true);radarMemory();}
+  function radarSettle(commit=true){var identity=JSON.stringify(radarClampCamera(radarCamera)),changed=identity!==radarIntent.cameraKey,policyChanged=radarIntent.policy!==(radarZoom.auto?'auto':'manual');radarIntent.policy=radarZoom.auto?'auto':'manual';radarGesture.state='idle';radarGesture.animation=null;radarGesture.inertia=null;radarCameraSet(radarClampCamera(radarCamera));radarBaseDirty=true;radarCameraRevision++;radarCompositeJob=null;
+    if(commit&&!changed&&!policyChanged&&!radarIntent.ready&&!radarIntent.sourceDirty){clearTimeout(radarSwitch?.timer);radarSwitch=null;radarSourceRender();}
+    if(changed){radarCancelJobs();if(commit&&!radarSwitch)radarSwitchStart();radarIntent.cameraKey=identity;radarRetarget();radarUpdateReady();radarNoteRender();}
+    try{sessionStorage.setItem('radarCamera',JSON.stringify({...radarCamera,auto:radarZoom.auto}));}catch(e){}radarOverlayBuild();radarGeoRequest();radarQueueTiles();radarZoomRender();if(commit&&(changed||policyChanged))radarPostIntent();radarIdleSync(true);radarMemory();}
   function radarEase(target,duration,focal){radarBegin();if(radarReduced()){radarCameraSet(target);radarSettle();return;}radarGesture.animation={from:{...radarCamera},target,duration,start:performance.now(),focal};radarWake();}
-  function radarZoomChange(step,focal={x:478,y:245}){if(!radarView.active||!radarCamera)return;radarSwitchStart();radarSourceRender();var r=radarView.data,z=step===0?clamp(r.zoomAutoLevel,r.zoomMin,10):clamp(Math.round(radarGesture.animation?.target.zoom??radarCamera.zoom)+step,r.zoomMin,10);radarZoom.auto=step===0;radarEase(radarFocal(radarCamera,z,focal),160,focal);}
-  function radarRecenter(){if(radarView.active&&radarCamera)radarEase({...radarView.data.center,zoom:radarCamera.zoom},280);}
-  function radarIdleSync(reset){if(reset){clearTimeout(radarGesture.idleTimer);radarGesture.idleTimer=null;}if(!radarView.active||document.hidden||!radarCamera)return;var home=radarView.data.center,away=Math.hypot(radarCamera.lat-home.lat,radarCamera.lon-home.lon)>1e-8;$('rad-recenter').hidden=!away;if(away&&radarGesture.state==='idle'&&!radarGesture.idleTimer)radarGesture.idleTimer=setTimeout(radarRecenter,90000);}
+  function radarZoomChange(step,focal={x:478,y:245}){if(radarIntent.writable===false||!radarView.active||!radarCamera)return;radarSwitchStart();radarSourceRender();var r=radarView.data,z=step===0?clamp(r.zoomAutoLevel,r.zoomMin,10):clamp(Math.round(radarGesture.animation?.target.zoom??radarCamera.zoom)+step,r.zoomMin,10);radarZoom.auto=step===0;radarEase(radarFocal(radarCamera,z,focal),160,focal);}
+  function radarRecenter(){if(radarIntent.writable!==false&&radarView.active&&radarCamera)radarEase({...radarView.data.center,zoom:radarCamera.zoom},280);}
+  function radarIdleSync(reset){if(reset){clearTimeout(radarGesture.idleTimer);radarGesture.idleTimer=null;}if(!radarView.active||document.hidden||!radarCamera)return;var home=radarView.data.center,away=Math.hypot(radarCamera.lat-home.lat,radarCamera.lon-home.lon)>1e-8;$('rad-recenter').hidden=!away;if(radarIntent.owned&&away&&radarGesture.state==='idle'&&!radarGesture.idleTimer)radarGesture.idleTimer=setTimeout(radarRecenter,90000);}
   function radarGestureCancel(){
     var moved=radarGesture.state!=='idle',ids=[...radarGesture.pointers.keys()];radarGesture.pointers.clear();
     for(var id of ids)if($('rad-plate').hasPointerCapture(id))$('rad-plate').releasePointerCapture(id);
@@ -3188,7 +3189,7 @@
   }
   function radarPointer(e){var b=$('rad-plate').getBoundingClientRect();return {x:(e.clientX-b.left-$('rad-plate').clientLeft)*956/$('rad-plate').clientWidth,y:(e.clientY-b.top-$('rad-plate').clientTop)*490/$('rad-plate').clientHeight};}
   function radarPointerMode(){var g=radarGesture,pts=[...g.pointers.values()];g.start={camera:{...radarCamera},point:pts[0]};g.mode=pts.length>1?'pinch':'pan';g.samples=[{...pts[0],t:performance.now()}];if(pts.length>1){g.start.distance=Math.hypot(pts[1].x-pts[0].x,pts[1].y-pts[0].y);g.start.mid={x:(pts[0].x+pts[1].x)/2,y:(pts[0].y+pts[1].y)/2};}}
-  $('rad-plate').addEventListener('pointerdown',e=>{if(!radarView.active||!radarCamera||e.target.closest(RAD_CONTROLS)||radarGesture.pointers.size>=2||(e.pointerType==='mouse'&&e.button!==0))return;e.preventDefault();radarBegin();radarGesture.pointers.set(e.pointerId,radarPointer(e));try{$('rad-plate').setPointerCapture(e.pointerId);}catch(e){}radarPointerMode();});
+  $('rad-plate').addEventListener('pointerdown',e=>{if(radarIntent.writable===false||!radarView.active||!radarCamera||e.target.closest(RAD_CONTROLS)||radarGesture.pointers.size>=2||(e.pointerType==='mouse'&&e.button!==0))return;e.preventDefault();radarBegin();radarGesture.pointers.set(e.pointerId,radarPointer(e));try{$('rad-plate').setPointerCapture(e.pointerId);}catch(e){}radarPointerMode();});
   $('rad-plate').addEventListener('pointermove',e=>{var g=radarGesture;if(!g.pointers.has(e.pointerId))return;e.preventDefault();g.pointers.set(e.pointerId,radarPointer(e));var pts=[...g.pointers.values()],st=g.start;
     if(g.mode==='pinch'){var mid={x:(pts[0].x+pts[1].x)/2,y:(pts[0].y+pts[1].y)/2},z=clamp(st.camera.zoom+Math.log2(Math.hypot(pts[1].x-pts[0].x,pts[1].y-pts[0].y)/Math.max(1,st.distance)),radarView.data.zoomMin,10);g.focal=mid;radarZoom.auto=false;radarCameraSet(radarFocal(st.camera,z,st.mid,mid));}
     else {var p=radarWorldPoint(st.camera.lat,st.camera.lon,st.camera.zoom),q=radarWorldInverse(p[0]-(pts[0].x-st.point.x),p[1]-(pts[0].y-st.point.y),st.camera.zoom);radarCameraSet(radarClampCamera({...q,zoom:st.camera.zoom},true));var now=performance.now();g.samples.push({...pts[0],t:now});g.samples=g.samples.filter(p=>now-p.t<=60);}
@@ -3208,11 +3209,25 @@
   document.addEventListener('keydown',e=>{if(!radarView.active||e.ctrlKey||e.metaKey||e.altKey||e.target.isContentEditable||/^(INPUT|TEXTAREA|SELECT)$/.test(e.target.tagName))return;var step={'+':1,'=':1,'-':-1,'−':-1,'_':-1,'0':0}[e.key];if(step!==undefined){e.preventDefault();radarZoomChange(step);}});
   document.addEventListener('visibilitychange',()=>{if(document.hidden){radarGestureCancel();radarRelease();}else if(radarView.active)radarActivate();poll(true);});
   window.matchMedia('(prefers-reduced-motion: reduce)').addEventListener('change',()=>{radarView.blend=null;radarView.singleSweep=false;radarView.current=radarView.good;radarEchoDirty=true;if(radarGesture.inertia)radarSettle();radarLoopSync();});
-  function radarPostIntent(immediate=false){clearTimeout(radarIntent.timer);radarIntent.postedAt=Date.now();radarIntent.generation++;radarIntent.ready=true;
+  function radarFollowIntent(intent){
+    clearTimeout(radarGesture.idleTimer);radarGesture.idleTimer=null;
+    clearTimeout(radarSwitch?.timer);radarSwitch=null;radarSource.desired=null;radarSource.refused=false;
+    radarIntent.accepted=intent;radarIntent.edited=false;
+    if(!intent)return;
+    radarIntent.preferredMode=intent.source||radarView.data?.sourcePref||null;
+    if(intent.zoom===undefined||!radarCamera||!radarView.data)return;
+    var r=radarView.data,c=intent.center==='station'?r.center:intent.center,z=intent.zoom==='auto'?r.zoomAutoLevel:intent.zoom;
+    if(!c||!isNum(z))return;
+    radarZoom.auto=intent.zoomPolicy==='auto'||intent.zoom==='auto';
+    if(Math.abs(radarCamera.lat-c.lat)>1e-8||Math.abs(radarCamera.lon-c.lon)>1e-8||radarCamera.zoom!==z){
+      radarCameraSet({...c,zoom:z});radarSettle(false);
+    }else {radarIntent.policy=radarZoom.auto?'auto':'manual';radarZoomRender();}
+  }
+  function radarPostIntent(immediate=false){if(radarIntent.writable===false)return;radarIntent.claim=radarIntent.owner;clearTimeout(radarIntent.timer);radarIntent.postedAt=Date.now();radarIntent.generation++;radarIntent.ready=true;
     if(!radarIntent.preferredMode)radarIntent.preferredMode=radarView.data?.sourcePref||'auto';
     if(radarSwitch){radarSwitch.generation=radarIntent.generation;radarSwitch.requiresIntent=true;radarSwitch.committed=true;}
     radarIntent.timer=setTimeout(()=>{poll(immediate);},immediate?0:120);}
-  $('rad-smooth').addEventListener('click',()=>{if(radarNativeActive())return;radarSmooth.value=radarSmooth.pending=!radarSmooth.value;radarZoomRender();poll(true);});
+  $('rad-smooth').addEventListener('click',()=>{if(radarRender.writable===false||radarNativeActive())return;radarSmooth.value=radarSmooth.pending=!radarSmooth.value;radarZoomRender();poll(true);});
   ['v1','v2'].forEach(v=>$('rad-'+v).addEventListener('click',()=>{if(radarRender.writable===false||radarRender.value===v)return;radarRender.value=radarRender.pending=v;radarZoomRender();poll(true);}));
   // v2 draws gates, not IEM colours: Smooth has nothing to soften there. Region has no single radar, so it stays v1.
   function radarNativeActive(){return radarView.data?.native===true;}
@@ -3277,7 +3292,7 @@
     if(dataAge>=.8*r.staleSec)status.append(document.createTextNode(' · '+Math.floor(dataAge/60)+' min old'));
   }
   function radarActivate(){if(!radarView.data||document.hidden)return;radarMetrics.activationAt=performance.now();radarMetrics.firstPaintMs=null;if(!radarCamera){var r=radarView.data,saved=null;try{saved=JSON.parse(sessionStorage.getItem('radarCamera'));}catch(e){}var accepted=radarIntent.accepted;if(accepted?.center&&accepted.center!=='station')saved={...accepted.center,zoom:accepted.zoom==='auto'?r.zoomAutoLevel:accepted.zoom,auto:accepted.zoomPolicy==='auto'||accepted.zoom==='auto'};else if(accepted?.zoom!==undefined)saved={...r.center,zoom:accepted.zoom==='auto'?r.zoomAutoLevel:accepted.zoom,auto:accepted.zoomPolicy==='auto'||accepted.zoom==='auto'};radarCamera=saved&&isNum(saved.lat)&&isNum(saved.lon)&&isNum(saved.zoom)?{lat:clamp(saved.lat,-RAD_MAX_LAT,RAD_MAX_LAT),lon:clamp(saved.lon,-180,180),zoom:clamp(saved.zoom,r.zoomMin,10)}:{...r.center,zoom:clamp(r.zoomAuto?r.zoomAutoLevel:r.zoomDesired,r.zoomMin,10)};radarZoom.auto=saved&&typeof saved.auto==='boolean'?saved.auto:r.zoomAuto;radarCamera=radarClampCamera(radarCamera);radarIntent.cameraKey=JSON.stringify(radarCamera);radarIntent.policy=radarZoom.auto?'auto':'manual';}
-    if(!Object.keys(radarBaseStyle).length)radarResolveStyle();radarCameraDirty=true;radarOverlayBuild();radarGeoRequest();radarPreload(radarView.data);radarZoomRender();radarPostIntent();radarWake();
+    if(!Object.keys(radarBaseStyle).length)radarResolveStyle();radarCameraDirty=true;radarOverlayBuild();radarGeoRequest();radarPreload(radarView.data);radarZoomRender();radarWake();
     if(!radarSiteTable.length)fetch(radarView.data.geo.sites).then(r=>r.ok?r.json():[]).then(s=>{radarSiteTable=s.filter(p=>/^[A-Z0-9]{4}$/.test(p.id)&&isNum(p.lat)&&isNum(p.lon));if(radarGesture.state==='idle')radarOverlayBuild();radarSourceRender();}).catch(()=>{});
   }
   // A booting engine has no radar result yet; that is not "no radar here". The
@@ -3324,7 +3339,7 @@
     radarZoomRender();radarNoteRender();
   }
   function radarChooseSource(mode){
-    if(!radarView.active||!radarCamera||$('rad-src-'+mode).disabled||radarSource.desired===mode&&!radarSwitch?.overdue)return;
+    if(radarIntent.writable===false||!radarView.active||!radarCamera||$('rad-src-'+mode).disabled||radarSource.desired===mode&&!radarSwitch?.overdue)return;
     // Native click covers keyboard/assistive activation; pointerdown responds on
     // contact. Its subsequent compatibility click is idempotent.
     var showing=!radarSource.desired&&(mode==='auto'?radarView.data.sourcePref==='auto':radarView.data.sourceMode===mode);
@@ -3453,10 +3468,10 @@
     if (r.sourceFallback==='site-zoom-floor' && site && radarSource.desired!=='mosaic') exceptions.push('wider than '+site.siteId+' reaches');
     var switching=radarSource.desired,retry=radarPendingRetry();
     var target=radarView.pendingSource?.data?.sourceMode||radarView.refresh?.targetMode;
-    if(radarView.pendingSource||pref==='auto'&&target&&target!==mode)switching=target;
+    if((radarSource.desired||radarSwitch?.requiresIntent)&&(radarView.pendingSource||pref==='auto'&&target&&target!==mode))switching=target;
     if(radarView.pendingSource?.variantOnly){cap.replaceChildren(document.createTextNode('Sharpening to '+(radarView.pendingSource.data.native?'v2':'v1')+' · showing '+(r.native?'v2':'v1')+' · '));var credit=document.createElement('a');credit.id='rad-attrib';credit.className='rad-attrib';credit.textContent=rainviewer?'RainViewer':r.native?'NOAA Level III':'IEM / NOAA';cap.append(credit);radarNoteRender();return;}
     if(switching){cap.replaceChildren(document.createTextNode((retry?'Retrying ':'Switching to ')+(switching==='site'?choice.subject:switching==='auto'?'Auto':'Region')+(retry?' · '+retry.reason:'')+' · showing '+(mode==='site'?info.subject:'Region')+' · '));var credit=document.createElement('a');credit.id='rad-attrib';credit.className='rad-attrib';credit.textContent=rainviewer?'RainViewer':r.native?'NOAA Level III':'IEM / NOAA';cap.append(credit);radarNoteRender();return;}
-    if(radarSwitch||retry){cap.replaceChildren(document.createTextNode((retry?'Retrying view · '+retry.reason:'Updating view')+' · showing '+(mode==='site'?info.subject:'Region')+' · '));var credit=document.createElement('a');credit.id='rad-attrib';credit.className='rad-attrib';credit.textContent=rainviewer?'RainViewer':r.native?'NOAA Level III':'IEM / NOAA';cap.append(credit);radarNoteRender();return;}
+    if(radarSwitch?.requiresIntent||retry){cap.replaceChildren(document.createTextNode((retry?'Retrying view · '+retry.reason:'Updating view')+' · showing '+(mode==='site'?info.subject:'Region')+' · '));var credit=document.createElement('a');credit.id='rad-attrib';credit.className='rad-attrib';credit.textContent=rainviewer?'RainViewer':r.native?'NOAA Level III':'IEM / NOAA';cap.append(credit);radarNoteRender();return;}
     function write(){
       cap.replaceChildren(document.createTextNode((pref==='auto'?'Auto · ':'')+(pref==='auto'&&mode==='mosaic'?'Region':info.subject)+resolution+nearby+(distance?' · '+distance:'')+(scanMode?' · '+scanMode:'')+(cadence?' · '+cadence:'')+' · '));
       // Keep attribution visible and text-only: the kiosk has no way back.
@@ -3519,7 +3534,7 @@
   var pollTimer = null, pollController = null;
   function schedulePoll() {
     clearTimeout(pollTimer);
-    pollTimer=setTimeout(poll, radarView.active&&!document.hidden&&(radarIntent.ready||!radarIntent.owned||Date.now()<radarSource.fastUntil)?300:POLL_MS);
+    pollTimer=setTimeout(poll, radarView.active&&!document.hidden&&(radarIntent.ready||Date.now()<radarSource.fastUntil)?300:POLL_MS);
   }
   var FETCH_MS     = 4000;   /* deadline for one request; past it we abandon it */
   var failCount    = 0;
@@ -3557,11 +3572,11 @@
        failed request after it must not re-send it */
     var ack = reportRender; reportRender = false;
     var radarActive = $("s-radar").classList.contains("active") && !document.hidden;
-    var sentIntentGeneration=radarIntent.generation,zoomQuery = "", posting=radarIntent.ready && radarActive && radarGesture.state==='idle' && radarCamera;
-    zoomQuery=radarActive&&radarCamera?'&radarSession='+radarIntent.session+'&radarHeartbeat='+(++radarIntent.heartbeat)+'&radarGeneration='+(radarIntent.owned?radarIntent.generation:0):'';
-    if(!radarIntent.owned&&radarIntent.owner!==null)zoomQuery+='&radarClaim='+encodeURIComponent(radarIntent.owner);
-    var sentRadarSource=posting&&radarIntent.owned&&radarIntent.sourceDirty?radarIntent.preferredMode:null;
-    if(posting&&radarIntent.owned){zoomQuery+='&radarCommit=1&radarPolicy='+(radarZoom.auto?'auto':'manual');if(sentRadarSource!==null)zoomQuery+='&radarSource='+sentRadarSource;}
+    var sentIntentGeneration=radarIntent.generation,zoomQuery = "", posting=radarIntent.writable!==false && radarIntent.ready && (radarIntent.owned||radarIntent.owner!==null) && radarActive && radarGesture.state==='idle' && radarCamera;
+    zoomQuery=radarActive&&radarCamera?'&radarSession='+radarIntent.session+'&radarHeartbeat='+(++radarIntent.heartbeat)+'&radarGeneration='+(radarIntent.owned||posting?radarIntent.generation:0):'';
+    if(posting&&!radarIntent.owned)zoomQuery+='&radarClaim='+encodeURIComponent(radarIntent.claim??radarIntent.owner);
+    var sentRadarSource=posting&&radarIntent.sourceDirty?radarIntent.preferredMode:null;
+    if(posting){zoomQuery+='&radarCommit=1&radarPolicy='+(radarZoom.auto?'auto':'manual');if(sentRadarSource!==null)zoomQuery+='&radarSource='+sentRadarSource;}
     var geoQuery=radarActive&&radarCamera?'&radarGeoZoom='+clamp(Math.round(radarCamera.zoom),4,10)+'&radarGeoCenter='+encodeURIComponent(radarCamera.lat.toFixed(10)+','+(((radarCamera.lon+180)%360+360)%360-180).toFixed(10)):'';
     var viewQuery='&viewSession='+radarIntent.session+'&viewSeq='+gen+(radarIntent.viewOwner==null?'':'&viewClaim='+encodeURIComponent(radarIntent.viewOwner));
     var touched = presenceDirty; presenceDirty = false;
@@ -3576,7 +3591,24 @@
         if(x.viewOwner!=null)radarIntent.viewOwner=x.viewOwner;
         var d = x.d;
         if (!validPayload(d)) throw new Error("bad payload");
-        if(x.ack){radarIntent.owner=x.ack.session;if(!radarIntent.owned){radarIntent.accepted=x.ack.intent;if(!radarIntent.edited)radarIntent.preferredMode=x.ack.intent.source||radarIntent.preferredMode;radarIntent.owned=x.ack.session===radarIntent.session;if(radarIntent.owned&&!radarIntent.edited&&x.ack.intent.zoom!==undefined&&radarCamera){var r=radarView.data,c=x.ack.intent.center==='station'?r.center:x.ack.intent.center,z=x.ack.intent.zoom==='auto'?r.zoomAutoLevel:x.ack.intent.zoom;radarZoom.auto=x.ack.intent.zoomPolicy==='auto'||x.ack.intent.zoom==='auto';if(Math.abs(radarCamera.lat-c.lat)>1e-8||Math.abs(radarCamera.lon-c.lon)>1e-8||radarCamera.zoom!==z){radarCameraSet({...c,zoom:z});radarSettle();}if(x.ack.intent.source!==(r.sourcePref||r.sourceMode))radarSource.desired=x.ack.intent.source;}}if(x.ack.session===radarIntent.session&&x.ack.generation===sentIntentGeneration&&radarIntent.generation===sentIntentGeneration){if(sentRadarSource!==null&&radarIntent.preferredMode===sentRadarSource)radarIntent.sourceDirty=false;if(!radarIntent.sourceDirty)radarIntent.ready=false;if(x.ack.intent.source&&!radarSource.desired&&!radarIntent.sourceDirty)radarIntent.preferredMode=x.ack.intent.source;radarTrace('accepted');}}
+        radarIntent.writable=!!x.ack;
+        if(x.ack){
+          radarIntent.owner=x.ack.session;radarIntent.owned=x.ack.session===radarIntent.session;
+          radarIntent.accepted=x.ack.intent;
+          if(!radarIntent.owned){
+            // Only discard the rejected request's generation. A gesture begun
+            // during this request remains a user action of its own.
+            if(posting&&radarIntent.generation===sentIntentGeneration){
+              clearTimeout(radarIntent.timer);radarIntent.ready=false;radarIntent.sourceDirty=false;
+            }
+            if(!radarIntent.ready&&radarGesture.state==='idle')radarFollowIntent(x.ack.intent);
+          }else if(x.ack.generation===sentIntentGeneration&&radarIntent.generation===sentIntentGeneration){
+            if(sentRadarSource!==null&&radarIntent.preferredMode===sentRadarSource)radarIntent.sourceDirty=false;
+            if(!radarIntent.sourceDirty)radarIntent.ready=false;
+            if(x.ack.intent.source&&!radarSource.desired&&!radarIntent.sourceDirty)radarIntent.preferredMode=x.ack.intent.source;
+            radarTrace('accepted');
+          }
+        }else {radarIntent.ready=false;radarIntent.owned=false;radarFollowIntent(d.radar?.intent);}
         if(x.smooth==='on'||x.smooth==='off'){var smooth=x.smooth==='on';if(radarSmooth.pending===smooth)radarSmooth.pending=null;if(radarSmooth.pending===null)radarSmooth.value=smooth;}
         else if(radarSmooth.value===null)radarSmooth.value=!!d.radar?.smooth;
         if(x.render==='v1'||x.render==='v2'){radarRender.writable=true;if(radarRender.pending===x.render)radarRender.pending=null;if(radarRender.pending===null)radarRender.value=x.render;}

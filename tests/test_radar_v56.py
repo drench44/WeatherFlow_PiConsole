@@ -78,7 +78,7 @@ def test_all_indices_and_clear_air_alpha(source):
 def test_loopback_only_preference(monkeypatch,tmp_path,address,query,value):
     module = _load_serve(monkeypatch,tmp_path,_payload())
     monkeypatch.setattr(module.http.server.SimpleHTTPRequestHandler,'do_GET',lambda h:None)
-    h=object.__new__(module.Handler);h.client_address=(address,1);h.path='/wx.json?'+query
+    h=object.__new__(module.Handler);h.client_address=(address,1);h.path='/wx.json?radarSession=preference-session-123&'+query
     h.do_GET();marker=tmp_path/'radar_smooth'
     expected=value if address in module.LOOPBACK else None
     assert (marker.read_text().strip() if marker.exists() else None)==expected

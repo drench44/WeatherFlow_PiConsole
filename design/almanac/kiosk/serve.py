@@ -14,8 +14,8 @@
 #
 # Bind stays on 127.0.0.1 by default (chromium is local; no data leaves the box).
 # Set WFP_BIND=0.0.0.0 to expose /health (and the page) to the LAN for remote
-# monitoring — note that also makes wx.json LAN-readable.
-import http.server, socketserver, json, math, os, time, threading, re, io, zlib
+# monitoring and radar control — private-network browsers share the panel view.
+import http.server, socketserver, json, math, os, time, threading, re, io, zlib, ipaddress
 from urllib.parse import parse_qs
 from decimal import Decimal
 from pathlib import Path
@@ -53,22 +53,67 @@ _lan_viewer_at = 0.0
 _lan_viewer_lock = threading.Lock()
 
 
+_CONTROLLER_NETWORKS = tuple(map(ipaddress.ip_network, (
+    '10.0.0.0/8', '172.16.0.0/12', '192.168.0.0/16', 'fc00::/7', 'fe80::/10')))
+
+
+def _client_ip(address):
+    try:
+        ip = ipaddress.ip_address(address)
+        return (ip.ipv4_mapped or ip) if isinstance(ip, ipaddress.IPv6Address) else ip
+    except ValueError:
+        return None
+
+
+def _is_loopback(address):
+    ip = _client_ip(address)
+    return ip is not None and ip.is_loopback
+
+
+def _is_controller(address):
+    ip = _client_ip(address)
+    return ip is not None and (ip.is_loopback or any(ip in net for net in _CONTROLLER_NETWORKS))
+
+
 def _is_private_ipv4(address):
-    parts = address.split(".")
-    if len(parts) != 4 or not all(p.isdigit() and 0 <= int(p) <= 255 for p in parts):
-        return False
-    a, b = int(parts[0]), int(parts[1])
-    return a == 10 or (a == 172 and 16 <= b <= 31) or (a == 192 and b == 168)
+    ip = _client_ip(address)
+    return isinstance(ip, ipaddress.IPv4Address) and any(ip in net for net in _CONTROLLER_NETWORKS)
+
+
+# Per IP (including mapped aliases), under _count_lock. Reads always succeed.
+# A full bucket permits a gesture burst; ordinary polling uses <4 tokens/sec.
+_CONTROL_RATE, _CONTROL_BURST = 20.0, 60.0
+_CONTROL_CLIENTS = 4096
+_control_buckets = {}
+
+
+def _allow_control_write(address):
+    now = time.monotonic()
+    key = str(_client_ip(address))
+    if key not in _control_buckets:
+        for stale, (_, at) in list(_control_buckets.items()):
+            if now - at >= 60:
+                del _control_buckets[stale]
+        if len(_control_buckets) >= _CONTROL_CLIENTS:
+            return False
+    tokens, at = _control_buckets.get(key, (_CONTROL_BURST, now))
+    tokens = min(_CONTROL_BURST, tokens + max(0, now-at)*_CONTROL_RATE)
+    allowed = tokens >= 1
+    _control_buckets[key] = (tokens-1 if allowed else tokens, now)
+    return allowed
+
+
+def _valid_radar_session(params):
+    values = params.get('radarSession', [])
+    return len(values) == 1 and re.fullmatch(r'[A-Za-z0-9-]{16,64}', values[0]) is not None
 
 
 def _note_lan_viewer(address):
     global _lan_viewer_at
-    if address in LOOPBACK or address.startswith("::ffff:"):
-        address = address[7:] if address.startswith("::ffff:") else address
-        if address in LOOPBACK:
-            return
-    if not _is_private_ipv4(address):
+    ip = _client_ip(address)
+    if not isinstance(ip, ipaddress.IPv4Address) or not _is_private_ipv4(address):
         return
+    address = str(ip)
     now = time.time()
     with _lan_viewer_lock:
         if now - _lan_viewer_at < _LAN_VIEWER_INTERVAL:
@@ -99,7 +144,7 @@ _count_lock = threading.Lock()
 RADAR_VIEW_POLL_GAP_SEC = 5
 
 
-# A human touched the kiosk screen (any tab): the page adds `touch` to its next
+# A human touched a controller page (any tab): the page adds `touch` to its next
 # poll. The engine's attention tiers read this marker's age. At most one write
 # every ten seconds; a browser left open never writes it.
 _presence_lock = threading.Lock()
@@ -204,7 +249,7 @@ def _write_radar_source(values):
 
 
 def _write_radar_preference(name, values):
-    """Caller holds _count_lock and has checked loopback. Polling cannot fail here."""
+    """Caller holds _count_lock and has checked controller admission. Polling cannot fail here."""
     if name not in ('radar_zoom', 'radar_source', 'radar_center', 'radar_smooth', 'radar_render') or len(values) != 1:
         return
     value = values[0]
@@ -345,49 +390,48 @@ def _write_radar_intent(params):
 _camera_persist_timer = None
 
 
-# A reload claims ownership with compare-and-swap against the acknowledged owner.
-# Generation zero only reconciles; it never commits a restored camera.
+# Only a settled user commit may claim the acknowledged owner. Polls and reloads
+# reconcile without changing ownership. The handler holds _count_lock across
+# comparison, durable runtime intent replacement and activity publication.
 _radar_owner = None
+
 
 def _camera_transaction(activity, params):
     global _radar_owner
-    session = params.get('radarSession', [''])[0]
-    generation = params.get('radarGeneration', [''])[0]
-    if not re.fullmatch(r'[A-Za-z0-9-]{16,64}', session) or not re.fullmatch(r'[0-9]{1,9}', generation):
+    if not _valid_radar_session(params):
         return False
-    generation = int(generation)
+    if len(params.get('radarGeneration', [])) != 1:
+        return False
+    if any(len(params[k]) != 1 for k in ('radarHeartbeat', 'radarCommit', 'radarPolicy', 'radarSource', 'radarClaim') if k in params):
+        return False
+    session = params['radarSession'][0]
+    generation = params['radarGeneration'][0]
     heartbeat = params.get('radarHeartbeat', ['0'])[0]
-    if not re.fullmatch(r'[0-9]{1,12}', heartbeat):
+    if not re.fullmatch(r'[0-9]{1,9}', generation) or not re.fullmatch(r'[0-9]{1,12}', heartbeat):
         return False
-    heartbeat = int(heartbeat)
+    generation, heartbeat = int(generation), int(heartbeat)
     old = _read_radar_intent()
-    if _radar_owner is None:
-        _radar_owner = dict(session=old.get('session', ''), generation=old.get('generation', 0))
-    if generation == 0:
-        if session != _radar_owner['session'] and params.get('radarClaim') == [_radar_owner['session']]:
-            _radar_owner = dict(session=session, generation=0)
-        if session != _radar_owner['session'] or _radar_owner['generation'] != 0:
+    owner = _radar_owner or dict(session=old.get('session', ''), generation=old.get('generation', 0))
+    claiming = session != owner['session']
+    commit = params.get('radarCommit') == ['1']
+    if claiming:
+        if not commit or generation == 0 or params.get('radarClaim') != [owner['session']]:
             return False
-    elif session != _radar_owner['session'] or generation < _radar_owner['generation']:
+    elif generation < owner['generation'] or heartbeat and heartbeat <= owner.get('heartbeat', 0):
         return False
-    # Reload ownership is read-only for camera intent, but its activity still
-    # needs the same ordinal fence as committed generations. A delayed moving
-    # heartbeat must not overwrite a newer settled view during reconciliation.
-    if heartbeat and heartbeat <= _radar_owner.get('heartbeat', 0):
-        return False
-    if params.get('radarCommit') == ['1']:
-        if generation > _radar_owner['generation']:
-            if activity.get('moving') or 'zoom' not in activity or 'center' not in activity:
-                return False
-            if ('radarSource' in params and params['radarSource'] not in (['auto'], ['site'], ['mosaic'])) or params.get('radarPolicy') not in (['auto'], ['manual']):
-                return False
-            if not _write_settled_camera(activity, params):
-                return False
-            _radar_owner = dict(session=session, generation=generation)
-    elif generation != _radar_owner['generation']:
+    if commit and (claiming or generation > owner['generation']):
+        if activity.get('moving') or 'zoom' not in activity or 'center' not in activity:
+            return False
+        if ('radarSource' in params and params['radarSource'] not in (['auto'], ['site'], ['mosaic'])) or params.get('radarPolicy') not in (['auto'], ['manual']):
+            return False
+        if not _write_settled_camera(activity, params):
+            return False
+        owner = dict(session=session, generation=generation)
+    elif generation != owner['generation']:
         return False
     if heartbeat:
-        _radar_owner['heartbeat'] = heartbeat
+        owner['heartbeat'] = heartbeat
+    _radar_owner = owner
     return True
 
 
@@ -460,7 +504,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
     def do_POST(self):
         # The engine alone owns tile eviction. A page may report corruption or
         # an unexpected 404; bounded hints are validated against its own index.
-        if self.path != '/radar-bad-tile' or self.client_address[0] not in LOOPBACK:
+        if self.path != '/radar-bad-tile' or not _is_loopback(self.client_address[0]):
             self.send_error(403)
             return
         try:
@@ -471,6 +515,9 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             if not re.fullmatch(r'radar/t/[a-f0-9]{12}/(?:iem-mrms-lcref|iem-nexrad-n0b|rainviewer)/(?:-|[A-Z0-9]{4}|M[a-f0-9]{24})/[0-9]{12}/[0-9]{1,2}/[0-9]{1,4}/[0-9]{1,4}\.png',path,re.ASCII):
                 raise ValueError('tile path')
             with _count_lock:
+                if not _allow_control_write(self.client_address[0]):
+                    self.send_error(429, 'Control write rate exceeded')
+                    return
                 marker = os.path.join(os.path.dirname(DATA),'radar_bad_tiles')
                 try:
                     with open(marker) as f: paths = json.load(f)
@@ -491,21 +538,25 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             return self._health()
         if path == "/wx.json":
             global _polls, _renders
-            rendered = "r=1" in query.split("&") and self.client_address[0] in LOOPBACK
-            viewed_radar = "view=radar" in query.split("&") and self.client_address[0] in LOOPBACK
+            address = self.client_address[0]
+            panel, controller = _is_loopback(address), _is_controller(address)
+            params = parse_qs(query, keep_blank_values=True)
+            viewed_radar = params.get('view') == ['radar']
             with _count_lock:
                 _polls += 1
-                if rendered:
-                    _renders += 1
-                if self.client_address[0] in LOOPBACK:
+                # A poll may expire a source or update viewing without a
+                # camera commit. Gate all its side effects, never the read.
+                admitted = controller and _allow_control_write(address)
+                if admitted:
+                    if panel and params.get('r') == ['1']:
+                        _renders += 1
                     _expire_radar_source()
-                    params = parse_qs(query, keep_blank_values=True)
-                    camera_report = viewed_radar and params.get('radarTheme',[''])[0] in ('paper','night')
+                    camera_report = viewed_radar and params.get('radarTheme') in (['paper'], ['night'])
                     ordered = 'radarSession' in params
-                    accepted = _camera_transaction(_radar_activity(params), params) if ordered and camera_report else not ordered and _radar_owner is None
-                    if _view_transaction(params):
+                    accepted = _camera_transaction(_radar_activity(params), params) if ordered and camera_report else not ordered and _radar_owner is None and not _read_radar_intent().get('session')
+                    if panel and _view_transaction(params):
                         _write_radar_viewing(viewed_radar)
-                    if accepted:
+                    if _valid_radar_session(params):
                         _write_radar_preference('radar_smooth', params.get('radarSmooth', []))
                         _write_radar_preference('radar_render', params.get('radarRender', []))
                     if camera_report and accepted:
@@ -522,9 +573,9 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                         _write_radar_zoom(params.get('radarZoom', []))
                         _write_radar_center(params.get('radarCenter', []))
                         _write_radar_source(params.get('radarSource', []))
-                if self.client_address[0] in LOOPBACK and params.get('touch') == ['1']:
+                if admitted and params.get('touch') == ['1']:
                     _note_presence()
-                if viewed_radar and accepted:
+                if admitted and panel and viewed_radar:
                     # Share only a timestamp with the emitter. Serialize writers
                     # and replace atomically so it never reads a partial epoch.
                     marker = os.path.join(os.path.dirname(DATA), "radar_viewed")
@@ -569,7 +620,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         return super().send_head()
 
     def end_headers(self):
-        if self.path.split('?')[0] == '/wx.json' and self.client_address[0] in LOOPBACK:
+        if self.path.split('?')[0] == '/wx.json' and _is_controller(self.client_address[0]):
             with _count_lock:
                 record = _read_radar_intent()
                 owner = _radar_owner or dict(session=record.get('session', ''), generation=record.get('generation', 0))

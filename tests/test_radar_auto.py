@@ -167,10 +167,10 @@ def test_auto_is_valid_durable_intent_and_duplicate_or_moving_cannot_write(tmp_p
     for values in (['bad'], ['auto', 'site'], []):
         server._write_radar_source(values)
         assert target.read_text().strip() == 'auto'
-    params = dict(radarSession=['auto-session-12345'], radarGeneration=['0'], radarHeartbeat=['1'], radarClaim=[''])
+    params = dict(radarSession=['auto-session-12345'], radarGeneration=['1'], radarHeartbeat=['1'], radarClaim=[''], radarCommit=['1'], radarPolicy=['manual'])
     activity = dict(moving=False, zoom=8, center=dict(lat=47, lon=-122))
     assert server._camera_transaction(activity, params)
-    params.update(radarGeneration=['1'], radarHeartbeat=['2'], radarCommit=['1'], radarPolicy=['manual'], radarSource=['site'])
+    params.update(radarGeneration=['2'], radarHeartbeat=['2'], radarCommit=['1'], radarPolicy=['manual'], radarSource=['site'])
     assert not server._camera_transaction(dict(activity, moving=True), params)
     assert server._read_radar_intent()['source'] == 'auto'
     params['radarSource'] = ['auto']
