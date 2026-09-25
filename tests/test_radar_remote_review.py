@@ -339,3 +339,20 @@ def test_site_to_site_handoff_says_switching():
 const p=page();await p.poll();
 p.run("radarView.data={...manifest(),sourceId:'iem-nexrad-n0b',sourceMode:'site',siteId:'KATX',sourcePref:'auto'};radarView.pendingSource={frames:[],data:{...manifest(),sourceId:'iem-nexrad-n0b',sourceMode:'site',siteId:'KRTX'}};assert.match(caption(),/^Switching to /);radarView.pendingSource={frames:[],variantOnly:true,data:{...radarView.data,native:true}};assert.match(caption(),/^Sharpening to v2/)");
 ''')
+
+
+def test_page_that_takes_the_view_arms_its_own_drift_home():
+    """Measured live: a LAN page's takeover gesture settles before it owns the
+    view, so its 90 s drift home was never armed and the view stayed away."""
+    run_remote(r'''
+const a=page(),b=page();await a.poll();a.run('radarZoomChange(1)');await a.poll();await b.poll();
+b.run("assert.equal(radarIntent.owned,false);radarBegin();radarCameraSet({lat:47,lon:-121.5,zoom:9});radarSettle()");
+b.run("clearTimeout(radarGesture.idleTimer);radarGesture.idleTimer=null");   // the settle-time arm (as a non-owner) did nothing
+await b.poll();
+b.run("assert.equal(radarIntent.owned,true);assert.equal(radarIntent.ready,false);assert.equal(delays.get(radarGesture.idleTimer),90000)");
+const armed=b.run('radarGesture.idleTimer');
+for(let i=0;i<5;i++){b.run('now+=2000');await b.poll();}          // ordinary polls must not restart the countdown
+assert.equal(b.run('radarGesture.idleTimer'),armed);
+b.run("timers.get(radarGesture.idleTimer)()");
+await b.poll();assert.equal(server.owner,b.run('radarIntent.session'));assert.equal(server.intent.center.lon,-122);
+''')

@@ -3651,7 +3651,12 @@
         else {radarRender.writable=false;radarRender.pending=null;radarRender.value=d.radar?.renderPref||(d.radar?.native?'v2':'v1');}
         ['v1','v2'].forEach(v=>$('rad-'+v).disabled=radarRender.writable===false);
         render(d);                                /* may throw — book success AFTER it */
-        radarIdleSync(true);
+        // Arm, never restart: a page that just took the view settled before it
+        // owned it, and ownership is only known now. Restarting here on every
+        // 2 s poll kept the owner's 90 s drift home from ever firing (measured
+        // on the Pi 4 with a LAN owner, 2026-09-25). A waiting panel timer
+        // re-judges the newest acknowledgement when it fires.
+        radarIdleSync(false);
 
         lastRenderMs = Date.now();
         /* file age at receipt on the SERVER's clock (falls back to ours), then
