@@ -1482,10 +1482,12 @@
     el("line", { class: "tick", x1: x2, y1: top, x2: x2, y2: bot }, svg);
     /* graduations ACROSS the tube, one per band boundary — the five equal steps
        are V.LIGHT · LIGHT · MODERATE · HEAVY · V.HEAVY, topping out at EXTREME.
-       Drawn over the water so you can read which band the level has reached. */
+       Drawn over the water so you can read which band the level has reached.
+       Inside the walls only: they used to run 6 units past the right wall,
+       unlabelled, and read as lines overflowing the tube. */
     for (var v = 1; v < RAIN_BANDS.length; v++) {
       var y = bot - (v / RAIN_BANDS.length) * (bot - top);
-      el("line", { class: "rain-band", x1: x1, y1: y, x2: x2 + 6, y2: y }, svg);
+      el("line", { class: "rain-band", x1: x1 + 1, y1: y, x2: x2 - 1, y2: y }, svg);
     }
     rainPtr = el("g", { class: "gauge-ptr-g" }, svg);              /* group rides the water level */
     /* sine surface: four 20px wavelengths starting one wavelength left of the
