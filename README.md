@@ -133,11 +133,11 @@ and the caption says "unfiltered". Region and v1 keep their existing pictures. T
 while you're away and the view drifts back to it after a minute and a half
 untouched.
 
-![The Radar tab in Region mode: MRMS reflectivity over the Puget Sound coastline, roads and county lines](design/almanac/screenshots/radar.png)
+![The Radar tab in Region mode: the NOAA MRMS mosaic over Puget Sound on a showery morning, with the Auto, Region and KATX buttons](design/almanac/screenshots/radar.png)
 
-![The Radar tab in high-resolution mode: the nearest NEXRAD site's own scans, with its operating mode in the caption](design/almanac/screenshots/radar-site.png)
+![The Radar tab on Auto at zoom 9: v2 draws the radar's own 250-metre cells, KATX and three neighbours merged pixel by pixel](design/almanac/screenshots/radar-site.png)
 
-![The recent frames looping on the Radar tab](design/almanac/screenshots/radar.gif)
+![Forty minutes of v2 radar looping: showers moving across the Cascade foothills](design/almanac/screenshots/radar.gif)
 
 What it changes:
 
