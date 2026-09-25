@@ -51,7 +51,7 @@ def write(server, data, page=None):
 
 def site_payload(original):
     data=copy.deepcopy(original);r=data['radar'];r.update(sourceId='iem-nexrad-n0b',sourceMode='site',sourcePref='site',siteId='KATX',sitePreferred=True,
-        legend=dict(ae._RADAR_SITE_RAMP,remapped=True),cadenceSec=300,sites=[dict(id='KATX',lat=48.1947,lon=-122.4957,contributing=True,reporting=True)],zoomMin=7,zoomMax=10)
+        legend=dict(ae._RADAR_DISPLAY_RAMP,remapped=True),cadenceSec=300,sites=[dict(id='KATX',lat=48.1947,lon=-122.4957,contributing=True,reporting=True)],zoomMin=7,zoomMax=10)
     r['tiles'].update(source=r['sourceId'],site='KATX')
     for f in r['tiles']['frames']:f['siteScans']=[dict(id='KATX',ts=f['ts'])]
     return data

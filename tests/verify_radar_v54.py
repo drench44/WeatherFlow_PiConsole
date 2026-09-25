@@ -16,7 +16,7 @@ OUT=Path('/private/tmp/radar-v54-headless')
 def check(page,theme):
     # Exact known-dBZ N0B pixels are remapped in Python, then decoded/drawn by
     # the page's real echo painter. Every stripe spans 32px of the plate.
-    mapped=rp.remap(indexed('iem-nexrad-n0b'),'iem-nexrad-n0b',rp._RADAR_SITE_PALETTE)
+    mapped=rp.remap(indexed('iem-nexrad-n0b'),'iem-nexrad-n0b',((5.0,(0x7F,0x82,0x95,180)),)+rp._RADAR_LUT)
     plate=Image.new('RGBA',(956,490))
     for i,(dbz,_) in enumerate(rp._RADAR_LUT):
         plate.paste(mapped.getpixel((int((dbz+33)*2),0)),(i*32,0,(i+1)*32,490))
@@ -34,7 +34,7 @@ def check(page,theme):
     assert pixels['pixels']==[list(c) for _,c in rp._RADAR_LUT],pixels
     metrics=[]
     for site in (False,True):
-        legend=rp._RADAR_SITE_RAMP if site else rp._RADAR_RAMP
+        legend=rp._RADAR_DISPLAY_RAMP if site else rp._RADAR_RAMP
         page.evaluate('''({legend,site})=>{radarView.data.legend=legend;radarView.data.sourceId=site?'iem-nexrad-n0b':'iem-mrms-lcref';radarView.legendKey=null;radarLegendRender();}''',dict(legend=legend,site=site))
         bands=page.locator('#rad-ramp i').evaluate_all('es=>es.map(e=>({width:e.getBoundingClientRect().width,bg:getComputedStyle(e).backgroundImage}))')
         starts=['rgb(118, 163, 138), rgb(80, 149, 108)','rgb(67, 164, 102), rgb(53, 152, 88)','rgb(38, 172, 80), rgb(22, 127, 52)']

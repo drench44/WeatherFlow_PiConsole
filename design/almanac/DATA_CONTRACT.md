@@ -1464,16 +1464,17 @@ is `i/2−32`, N0B's is `i/2−33` with reserved codes 0/1 transparent. RainView
 uses the published Universal Blue table; tiles request scheme 2 with options
 `0_0`. These lookup tables supply intensity only, never precipitation type.
 
-All three sources share the nine rain bands and use the same remapped tiles for both
-themes. MRMS and RainViewer publish the following 10 dBZ legend:
+All sources draw the same bands from the same remapped (or, for v2, rendered)
+tiles on both themes, and every source publishes the same legend: the designed
+ramp clipped at the 15 dBZ display floor.
 
 ```jsonc
 "legend": {
-  "id":"almanac-reflectivity-v2", "floorDbz":10, "remapped":true,
+  "id":"almanac-reflectivity-v3", "floorDbz":15, "remapped":true,
   "bands":[
-    {"lo":10,"hi":20,"start":"#76A38A","end":"#50956C"},
-    {"lo":20,"hi":25,"start":"#43A466","end":"#359858"},
-    {"lo":25,"hi":35,"start":"#26AC50","end":"#167F34"},
+    {"lo":15,"hi":20,"start":"#66A678","end":"#43A05D"},
+    {"lo":20,"hi":25,"start":"#43A05D","end":"#209143"},
+    {"lo":25,"hi":35,"start":"#088A34","end":"#11672D"},
     {"lo":35,"hi":40,"start":"#C79C14","end":"#B0870D"},
     {"lo":40,"hi":45,"start":"#E5871A","end":"#D2700F"},
     {"lo":45,"hi":50,"start":"#DE5C17","end":"#C94C0C"},
@@ -1484,50 +1485,33 @@ themes. MRMS and RainViewer publish the following 10 dBZ legend:
 }
 ```
 
-Only `sourceId:"iem-nexrad-n0b"` (single or multi-site) publishes `floorDbz:5`
-and prepends `{"lo":5,"hi":10,"start":"#7F8295","end":"#7F8295","alpha":180,"kind":"clear-air"}`.
-The rain bands gain neither `alpha` nor `kind`. Site indices 0/1 and 2…75 are
-transparent, 76…85 (5…9.5 dBZ) use this flat step, 86 starts the rain ramp, and
-217…255 retain the open top. The unchanged MRMS formula starts visible output
-at index 84. The B2 zoom-floor fallback serves MRMS, so its legend stays at 10.
-There is no precipitation-type key, inference or secondary ramp. RainViewer's
-caption ends `· reflectivity only`.
+The designed ramp keeps nine bands from 10 dBZ; the 10 to 15 dBZ part is never
+drawn (its LUT stops carry alpha 0). v3 (2026-09-25) changed only the three
+green bands. The greens now descend in lightness without reversing, L* 63 at
+15 dBZ to 41 at 32.5, with a deliberate step at 25 dBZ. v2's greens saw-toothed
+between L* 58 and 62, so at native resolution light and moderate rain read as
+one sheet: the nearest colour pair across 25 dBZ rose from 4.5 to 6.2 CIEDE2000
+and the smallest step between drawn greens from 2.0 to 2.8. The 35+ bands are
+unchanged. There is no precipitation-type key, inference or secondary ramp.
+RainViewer's caption ends `· reflectivity only`.
 
-The 26 rain LUT entries remain sRGB samples every 2.5 dBZ, 10 through 72.5,
-with an open-ended last stop. The site palette prepends one 5 dBZ step without
-extending that LUT. Every rain sample meets ≥2:1 on both page paper `#F2EDE2`
-and tinted plate paper `#EBE6DB`, and ≥3:1 on night `#0B0D11`. Clear air uses
-`#7F8295` at alpha 180/255: composites `#9F9FAA` on plate paper (2.10:1),
-`#A1A1AC` on page paper (2.18:1), and `#5D606E` on night (3.10:1).
-Below the actual source floor is transparent. Stale echo opacity remains .66;
-the canvas has no CSS filter or theme-dependent recolouring. At stale opacity
-the clear-air composite falls to 1.60:1 on plate paper and 1.99:1 on night;
-these floors describe the plate, not the one-pixel basemap hairlines beneath it.
-The first three bands are green; bands 4–9, widths, LUT positions, clear-air
-slate and alpha multiplication are unchanged. Computed minima over all 26 rain
-samples are 2.06 on plate paper, 2.20 on page paper and 3.46 at night.
-Clear air is lighter than the new 10 dBZ green on paper (1.09:1 separation)
-and darker at night (2.19:1). The former low-end tritanope disclosure is retired.
+The 26 LUT entries are sRGB samples every 2.5 dBZ, 10 through 72.5, with an
+open-ended last stop. Every sample, drawn or not, meets ≥2:1 on page paper
+`#F2EDE2` and tinted plate paper `#EBE6DB`, and ≥3:1 on night `#0B0D11`;
+the minima are 2.03 on plate paper, 2.17 on page paper and 3.13 at night.
+Stale echo opacity remains .66; the canvas has no CSS filter or theme-dependent
+recolouring. Site mode's grey 5 to 10 dBZ clear-air band stopped drawing with
+the display floor and was removed with v3, with its legend swatch, note and
+`--rad-clear-air` tokens.
 
 The legend stays 414px wide, right:12px, with 8px left padding, a 34px unit cell
 and a 372px ramp. Band widths are proportional to `(hi−lo)` across that full
 372px; its shared 1px border overlays the segments without consuming scale
-width. Site has ten segments (5 dBZ spans 26.571px, 10 spans 53.143px), mosaic
-nine. Ticks are de-duplicated `[floorDbz,10,20,30,40,50,60,70]`, positioned at
-`(dBZ−floorDbz)/(75−floorDbz)*372`, each with a 1×3px hairline. The 10 tick
-also divides clear air from the rain scale; there is no extra rule.
-The legend rebuild key includes the floor even when source and legend id agree.
-Clear-air swatches use opaque `--rad-clear-air` composites (`#9F9FAA` paper,
-`#5D606E` explicit or system night), because translucent paint over the legend
-scrim would differ from the plate. Other segments keep their payload gradients.
-
-When `legend.floorDbz===5`, `.rad-clear-note` adds one right-aligned line under
-the ticks: `Grey band: clear air, not rain`. It uses 11.5px Source Sans and the
-caption's existing `--ink-soft`, on the legend's existing `--plate-scrim`.
-It is absent at every other floor. Outer legend width stays 414px, unit 34px,
-ramp 372px; the extra line remains within the top y0–72 control zone. The ramp
-has `role="img"` and `aria-label="Reflectivity scale, 5 to 75 dBZ. Below 10 dBZ in grey: clear-air return, not precipitation."`
-in site mode, or `aria-label="Reflectivity scale, 10 to 75 dBZ."` for mosaic.
+width. Ticks are de-duplicated `[floorDbz,10,20,30,40,50,60,70]` at or above
+the floor, positioned at `(dBZ−floorDbz)/(75−floorDbz)*372`, each with a 1×3px
+hairline. The legend rebuild key includes the floor even when source and legend
+id agree. The ramp has `role="img"` and
+`aria-label="Reflectivity scale, 15 to 75 dBZ."`.
 
 IEM XYZ tiles actually arrive as RGBA with antialiased colours. After existing
 PNG/size/placeholder validation, the compositor remaps each distinct colour:

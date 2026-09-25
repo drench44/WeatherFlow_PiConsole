@@ -8,7 +8,7 @@ from urllib.parse import parse_qs, urlsplit
 
 import pytest
 from lib import almanac_emit as ae, radar_palette as rp
-from tests.test_radar_v32 import contrast, luminance, indexed
+from tests.test_radar_v32 import contrast, luminance, indexed, TRANSLUCENT_PALETTE
 from tests.test_radar_hybrid import hybrid, png  # noqa: F401
 
 
@@ -19,16 +19,16 @@ def test_n1_computed_contrast_all_26():
         ratios = [contrast(c[:3], bytes.fromhex(ground)) for _,c in rp._RADAR_LUT]
         assert all(r >= floor for r in ratios)
         minima.append(round(min(ratios),2))
-    assert minima == [2.06,2.20,3.46]
+    assert minima == [2.03,2.17,3.13]
 
 
 def test_n2_n3_ramp_shape_and_greens():
     b = rp._RADAR_RAMP['bands']
-    assert rp._RADAR_RAMP['id'] == 'almanac-reflectivity-v2'
+    assert rp._RADAR_RAMP['id'] == 'almanac-reflectivity-v3'
     assert rp.REMAP_REVISION == 'native-v5.2-1'
     assert len(b)==9 and (b[0]['lo'],b[-1]['hi'])==(10,75)
     assert [v['hi']-v['lo'] for v in b] == [10,5,10,5,5,5,10,10,5]
-    assert [(v['start'],v['end']) for v in b[:3]] == [('#76A38A','#50956C'),('#43A466','#359858'),('#26AC50','#167F34')]
+    assert [(v['start'],v['end']) for v in b[:3]] == [('#89AB92','#43A05D'),('#43A05D','#209143'),('#088A34','#11672D')]
     assert b[3:] == [dict(lo=lo,hi=hi,start=a,end=z) for lo,hi,a,z in [
         (35,40,'#C79C14','#B0870D'),(40,45,'#E5871A','#D2700F'),
         (45,50,'#DE5C17','#C94C0C'),(50,60,'#DD4530','#BC2A1A'),
@@ -38,20 +38,8 @@ def test_n2_n3_ramp_shape_and_greens():
         assert g>b and g>=r and a==255
 
 
-def test_n4_clear_air_ordinal_separation():
-    assert rp._CLEAR_AIR_BAND == dict(lo=5,hi=10,start='#7F8295',end='#7F8295',alpha=180,kind='clear-air')
-    rain = rp._RADAR_LUT[0][1][:3]
-    for hexground in ('EBE6DB','0B0D11'):
-        clear = [round(c*180/255+g*75/255) for c,g in zip((127,130,149),bytes.fromhex(hexground))]
-        ratio = contrast(clear,rain)
-        if hexground=='EBE6DB':
-            assert luminance(clear)>luminance(rain) and 1.05<=ratio<=1.15
-        else:
-            assert luminance(clear)<luminance(rain) and ratio>=2
-
-
 def test_n0b_remap_every_lut_entry():
-    mapped = rp.remap(indexed('iem-nexrad-n0b'),'iem-nexrad-n0b',rp._RADAR_SITE_PALETTE)
+    mapped = rp.remap(indexed('iem-nexrad-n0b'),'iem-nexrad-n0b',TRANSLUCENT_PALETTE)
     for dbz,rgba in rp._RADAR_LUT:
         assert mapped.getpixel((int((dbz+33)*2),0)) == rgba
 

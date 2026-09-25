@@ -47,3 +47,11 @@ def test_lowest_tilt_range(tenths, ok):
     else:
         with pytest.raises(ValueError, match='lowest tilt'):
             l3.decode(raw, expect_site=SITE)
+
+
+
+def test_decoded_scan_cache_holds_a_whole_loop():
+    # A multi-site loop needs every site's scan per frame plus the next per site;
+    # an LRU smaller than that working set misses on every in-order walk (the
+    # LRU mechanics themselves: test_radar_level3_review).
+    assert ae.RADAR_LEVEL3_SCAN_CACHE >= ae.RADAR_SITE_MAX_COUNT * (ae.RADAR_LOOP_FRAMES + 1)

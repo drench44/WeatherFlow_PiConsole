@@ -146,13 +146,17 @@ RADAR_SITE_TILE_TEMPLATE = "https://mesonet.agron.iastate.edu/cache/tile.py/1.0.
 # v2: NOAA's own Level III product, public on AWS (NOAA Open Data Dissemination).
 RADAR_LEVEL3_BUCKET = "https://unidata-nexrad-level3.s3.amazonaws.com/"
 RADAR_LEVEL3_TRANSPORT = 'noaa-level3-n0b'  # independent health/cooldown dependency
-RADAR_LEVEL3_SCAN_CACHE = 24      # decoded scans (~1.3 MB each): 4 sites x 6 frames
+# Decoded scans (~1.3 MB each). One loop is every contributing site's scan for
+# each frame, plus the next scan per site as it lands; a smaller LRU walked in
+# frame order misses on every access, and each zoom step re-downloaded
+# products (measured on the Pi 4 at 24: 1.3 MB per step).
+RADAR_LEVEL3_SCAN_CACHE = RADAR_SITE_MAX_COUNT * (RADAR_LOOP_FRAMES + 1)
 RADAR_LEVEL3_RETRY_SEC = 60       # a scan S3 lacks is not re-requested per tile
 RADAR_RAINVIEWER_COLOR = 2
 RADAR_RAINVIEWER_TILE_OPTS = "0_0"
 RADAR_RAINVIEWER_MANIFEST_URL = "https://api.rainviewer.com/public/weather-maps.json"
 RADAR_DIR = os.environ.get("WFP_RADAR_DIR", os.path.expanduser("~/almanac_web/radar"))
-from lib.radar_palette import _RADAR_RAMP, _RADAR_LUT, _RADAR_SITE_RAMP, _RADAR_DISPLAY_RAMP, REMAP_REVISION, SMOOTH_REVISION, remap, smooth_remap, source_palette
+from lib.radar_palette import _RADAR_RAMP, _RADAR_LUT, _RADAR_DISPLAY_RAMP, REMAP_REVISION, SMOOTH_REVISION, remap, smooth_remap, source_palette
 _RADAR_SOURCES = {
     'iem-nexrad-n0b': dict(provider='iem', attribution='IEM / NOAA',
         attribution_url='https://mesonet.agron.iastate.edu/GIS/ridge.phtml',
@@ -786,7 +790,7 @@ def _radar_revision_digest(remap_revision,basemap_revision,native_revision):
     # per revision, rather than serializing three palettes for every inventory stat.
     pixels=repr([(source,source_palette(source)) for source in sorted(_RADAR_SOURCES)])
     return hashlib.sha256(('tile-wire-visible-v41-1'+remap_revision+repr(_RADAR_RAMP)+
-                          repr(_RADAR_SITE_RAMP)+repr(_RADAR_DISPLAY_RAMP)+pixels+native_revision+basemap_revision).encode()).hexdigest()[:12]
+                          repr(_RADAR_DISPLAY_RAMP)+pixels+native_revision+basemap_revision).encode()).hexdigest()[:12]
 
 
 def _radar_variant_revision(variant):

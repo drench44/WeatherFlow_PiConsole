@@ -241,10 +241,11 @@ def test_invalid_products_and_listings_are_health_failures(scan_engine, monkeypa
 
 def test_scan_cache_is_bounded_and_hits_update_lru(scan_engine, monkeypatch):
     emitter = scan_engine
+    size = ae.RADAR_LEVEL3_SCAN_CACHE
     raw = product(volume_ts=STAMP+24, gates=4)
     def request(source, url, deadline, validate=None, **kwargs):
         if '?' in url:
-            keys = ''.join('<Key>NEA_N0B_' + datetime.fromtimestamp(STAMP+i*60+24, timezone.utc).strftime('%Y_%m_%d_%H_%M_%S') + '</Key>' for i in range(30))
+            keys = ''.join('<Key>NEA_N0B_' + datetime.fromtimestamp(STAMP+i*60+24, timezone.utc).strftime('%Y_%m_%d_%H_%M_%S') + '</Key>' for i in range(size+2))
             payload = ('<ListBucketResult>'+keys+'</ListBucketResult>').encode()
         else:
             ts = l3.s3_key_time(url)
@@ -252,11 +253,11 @@ def test_scan_cache_is_bounded_and_hits_update_lru(scan_engine, monkeypatch):
         validate(payload)
         return payload
     monkeypatch.setattr(emitter, '_radar_request', request)
-    for i in range(24):
+    for i in range(size):
         emitter._radar_level3_scan('KNEA', STAMP+i*60, {}, time.monotonic()+10)
     first = emitter._radar_level3_scan('KNEA', STAMP, {}, time.monotonic()+10)
-    emitter._radar_level3_scan('KNEA', STAMP+24*60, {}, time.monotonic()+10)
-    assert len(emitter._radar_level3_scans) == 24
+    emitter._radar_level3_scan('KNEA', STAMP+size*60, {}, time.monotonic()+10)
+    assert len(emitter._radar_level3_scans) == size
     assert emitter._radar_level3_scans[('KNEA', STAMP)] is first
     assert ('KNEA', STAMP+60) not in emitter._radar_level3_scans
 

@@ -9,6 +9,11 @@ from lib import almanac_emit as ae, radar_palette as rp
 from tests.test_radar_hybrid import hybrid  # noqa: F401
 
 
+# A translucent first stop exercises the remapper's coverage-alpha rule (the
+# grey 5-10 dBZ clear-air band that used to supply one was removed with the v3 ramp).
+TRANSLUCENT_PALETTE = ((5.0, (0x7F, 0x82, 0x95, 180)),) + rp._RADAR_LUT
+
+
 def indexed(source):
     tile = Image.new('P', (256, 1)); tile.putdata(range(256))
     tile.putpalette([v for c in rp._indexed_colors(source) for v in c], rawmode='RGBA')
@@ -20,7 +25,7 @@ def test_k1_source_legends():
     for source, settings in ae._RADAR_SOURCES.items():
         legend = settings['legend']
         assert legend['floorDbz'] == rp.DISPLAY_FLOOR_DBZ == 15
-        assert legend['bands'][0] == dict(lo=15, hi=20, start='#639C7B', end='#50956C')   # the ramp's own colour at 15
+        assert legend['bands'][0] == dict(lo=15, hi=20, start='#66A678', end='#43A05D')   # the ramp's own colour at 15
         assert legend['bands'][1:] == rp._RADAR_RAMP['bands'][1:]
         assert all('kind' not in b and 'alpha' not in b for b in legend['bands'])
     assert len(rp._RADAR_LUT) == 26                                   # the designed ramp is unchanged
@@ -41,8 +46,6 @@ def contrast(a, b):
 def test_k2_computed_contrast():
     for hexground, floor in [('EBE6DB', 2), ('F2EDE2', 2), ('0B0D11', 3)]:
         ground = bytes.fromhex(hexground)
-        composite = [round(c*180/255+g*75/255) for c, g in zip((127,130,149), ground)]
-        assert contrast(composite, ground) >= floor
         for _, color in rp._RADAR_LUT:
             assert contrast(color[:3], ground) >= floor
 
@@ -52,15 +55,15 @@ def test_k3_k4_index_floor_and_coverage():
     site = rp.remap(tile, 'iem-nexrad-n0b', rp.source_palette('iem-nexrad-n0b'))
     # N0B index 96 is 15 dBZ: everything below it, clear air included, is transparent.
     assert all(site.getpixel((i, 0))[3] == 0 for i in range(0, 96))
-    assert site.getpixel((96, 0)) == (99,156,123,255)
+    assert site.getpixel((96, 0)) == (102,166,120,255)
     mrms = rp.remap(indexed('iem-mrms-lcref'), 'iem-mrms-lcref', rp.source_palette('iem-mrms-lcref'))
     assert all(mrms.getpixel((i, 0))[3] == 0 for i in range(0, 94))          # MRMS index 94 is 15 dBZ
-    assert mrms.getpixel((94, 0)) == (99,156,123,255)
+    assert mrms.getpixel((94, 0)) == (102,166,120,255)
     # RGBA coverage is independent of intensity, including fractional edge alpha.
     color = rp._indexed_colors('iem-nexrad-n0b')[76]
     for coverage in (1, 73, 128, 180, 254, 255):
         rgba = Image.new('RGBA', (1, 1), color[:3]+(coverage,))
-        assert rp.remap(rgba, 'iem-nexrad-n0b', rp._RADAR_SITE_PALETTE).getpixel((0, 0)) == (127,130,149,round(coverage*180/255))
+        assert rp.remap(rgba, 'iem-nexrad-n0b', TRANSLUCENT_PALETTE).getpixel((0, 0)) == (127,130,149,round(coverage*180/255))
 
 
 @pytest.mark.parametrize('source', rp._FILES)
@@ -107,7 +110,7 @@ def test_translucent_rgb_fallback_rounds_coverage(monkeypatch):
             return convert(convert(self, 'RGB'), mode, *args, **kwargs)
         return convert(self, mode, *args, **kwargs)
     monkeypatch.setattr(Image.Image, 'convert', lose_alpha)
-    result = rp.remap(tile, 'iem-nexrad-n0b', rp._RADAR_SITE_PALETTE)
+    result = rp.remap(tile, 'iem-nexrad-n0b', TRANSLUCENT_PALETTE)
     assert list(result.getdata()) == [(127,130,149,round(a*180/255)) for a in range(1, 256)]
 
 

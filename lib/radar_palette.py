@@ -16,10 +16,16 @@ _RGB_TOLERANCE = 3  # Euclidean RGB distance; alpha is coverage, not intensity.
 _LOG = logging.getLogger(__name__)
 
 
-_RADAR_RAMP = dict(id='almanac-reflectivity-v2', floorDbz=10, bands=[
+# v3 (2026-09-25): the greens descend in lightness without reversing (L* 63 at
+# 15 dBZ to 41 at 32.5, chroma rising), with a deliberate step at 25 dBZ, so
+# light, moderate and heavier rain separate at a glance (10 dBZ darkened just
+# enough to clear 2:1 on the #EBE6DB paper plate). v2's greens saw-toothed
+# between L* 58 and 62: at native resolution 15, 22.5 and 27.5 dBZ read as one
+# sheet. Every stop still clears 2:1 on paper and 3:1 on night. 35+ unchanged.
+_RADAR_RAMP = dict(id='almanac-reflectivity-v3', floorDbz=10, bands=[
     dict(lo=lo, hi=hi, start=start, end=end) for lo, hi, start, end in (
-        (10,20,'#76A38A','#50956C'), (20,25,'#43A466','#359858'),
-        (25,35,'#26AC50','#167F34'), (35,40,'#C79C14','#B0870D'),
+        (10,20,'#89AB92','#43A05D'), (20,25,'#43A05D','#209143'),
+        (25,35,'#088A34','#11672D'), (35,40,'#C79C14','#B0870D'),
         (40,45,'#E5871A','#D2700F'), (45,50,'#DE5C17','#C94C0C'),
         (50,60,'#DD4530','#BC2A1A'), (60,70,'#CE4E88','#A9389B'),
         (70,75,'#8A46C2','#8A46C2'))])
@@ -35,9 +41,6 @@ def sample_ramp():
     return tuple(result)
 
 _RADAR_LUT = sample_ramp()
-_CLEAR_AIR_BAND = dict(lo=5, hi=10, start='#7F8295', end='#7F8295', alpha=180, kind='clear-air')
-_RADAR_SITE_RAMP = dict(_RADAR_RAMP, floorDbz=5, bands=[_CLEAR_AIR_BAND] + _RADAR_RAMP['bands'])
-_RADAR_SITE_PALETTE = ((5.0, (0x7F, 0x82, 0x95, 180)),) + _RADAR_LUT
 
 
 # What the panel draws. The ramp and its LUT stay the designed 10-75 dBZ scale
@@ -51,7 +54,7 @@ DISPLAY_FLOOR_DBZ = 15
 def _clip_ramp(ramp, floor):
     bands = []
     for band in ramp['bands']:
-        if band['hi'] <= floor or band.get('kind') == 'clear-air':
+        if band['hi'] <= floor:
             continue
         if band['lo'] < floor:
             start, end = (bytes.fromhex(band[k][1:]) for k in ('start', 'end'))
@@ -63,7 +66,8 @@ def _clip_ramp(ramp, floor):
 
 _RADAR_DISPLAY_RAMP = _clip_ramp(_RADAR_RAMP, DISPLAY_FLOOR_DBZ)
 # A stop with alpha 0 explicitly suppresses its bin (see remap); below the first
-# stop is transparent too, so the site clear-air band no longer draws.
+# stop is transparent too. (Site mode's grey 5-10 dBZ clear-air band went with
+# the floor; its palette and legend were removed with the v3 ramp.)
 _RADAR_DISPLAY_LUT = tuple((dbz, rgba if dbz >= DISPLAY_FLOOR_DBZ else rgba[:3] + (0,)) for dbz, rgba in _RADAR_LUT)
 
 

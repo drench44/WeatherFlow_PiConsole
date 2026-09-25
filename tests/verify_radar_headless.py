@@ -301,7 +301,7 @@ def extended(page,server,theme,output):
     page.wait_for_function('radarReady().length===8')
     initial=copy.deepcopy(server.data);site=copy.deepcopy(initial);r=site['radar']
     r.update(sourceId='iem-nexrad-n0b',sourceMode='site',sourcePref='site',siteId='KATX',
-             legend=dict(ae._RADAR_SITE_RAMP,remapped=True),cadenceSec=300,staleSec=1200,
+             legend=dict(ae._RADAR_DISPLAY_RAMP,remapped=True),cadenceSec=300,staleSec=1200,
              sites=[dict(id='KATX',lat=48.194611,lon=-122.49569,primary=True,contributing=True,reason=None)])
     r['tiles'].update(source=r['sourceId'],site='KATX')
     for frame in r['tiles']['frames']:frame['siteScans']=[dict(id='KATX',ts=frame['ts'])]
@@ -453,7 +453,7 @@ def chrome(page,theme,data,output):
     page.evaluate('radarSource.desired=null')
     page.evaluate("d=>{radarSource.refused=false;renderRadar(d)}",data)
     # Site legend keeps exactly the same outer and unit geometry.
-    page.evaluate('r=>{radarView.data={...radarView.data,...r};radarView.current=null;radarLegendRender();radarSourceRender()}',dict(sourceId='iem-nexrad-n0b',sourceMode='site',siteId='KATX',scanCadenceSec=240,scanMode=None,legend=dict(ae._RADAR_SITE_RAMP,remapped=True),sites=[dict(id='KATX',contributing=True)]))
+    page.evaluate('r=>{radarView.data={...radarView.data,...r};radarView.current=null;radarLegendRender();radarSourceRender()}',dict(sourceId='iem-nexrad-n0b',sourceMode='site',siteId='KATX',scanCadenceSec=240,scanMode=None,legend=dict(ae._RADAR_DISPLAY_RAMP,remapped=True),sites=[dict(id='KATX',contributing=True)]))
     widths=page.locator('#rad-ramp i').evaluate_all('es=>es.map(e=>e.getBoundingClientRect().width)')
     assert len(widths)==10 and all(abs(a-b)<1 for a,b in zip(widths,[26.6,53.1,26.6,53.1,26.6,26.6,26.6,53.1,53.1,26.6]))
     swatch=page.locator('#rad-ramp i').first.evaluate('e=>({color:getComputedStyle(e).backgroundColor,image:getComputedStyle(e).backgroundImage})')

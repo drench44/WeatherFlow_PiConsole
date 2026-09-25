@@ -636,10 +636,10 @@
   .rad-zoom[data-state="pending"] .rad-zoom-read { opacity: .45; }
   #rad-asof { font: 17px var(--serif); font-variant-numeric: tabular-nums; }
   #rad-status { font-size: 11.5px; }
-  :root { --plate-scrim: rgba(242,237,226,.82); --rad-clear-air: #9F9FAA; }
-  :root[data-theme="night"] { --plate-scrim: rgba(11,13,17,.78); --rad-clear-air: #5D606E; }
+  :root { --plate-scrim: rgba(242,237,226,.82); }
+  :root[data-theme="night"] { --plate-scrim: rgba(11,13,17,.78); }
   @media (prefers-color-scheme: dark) {
-    :root:not([data-theme="paper"]):not([data-theme="light"]) { --plate-scrim: rgba(11,13,17,.78); --rad-clear-air: #5D606E; }
+    :root:not([data-theme="paper"]):not([data-theme="light"]) { --plate-scrim: rgba(11,13,17,.78); }
   }
   .rad-src { position:absolute; left:12px; top:10px; z-index:4; display:flex;
     height:44px; border:1px solid var(--rule); border-radius:2px; background:var(--plate-scrim); }
@@ -674,8 +674,6 @@
   .rad-ramp { flex:0 0 372px; }
   .rad-ramp i { flex-basis:0; }
   .rad-ticks { position:relative; width:372px; height:14px; margin:1px 0 0 34px; }
-  .rad-clear-note { margin:2px 0 0 34px; text-align:right; white-space:nowrap;
-    font:11.5px/13px var(--sans); letter-spacing:.02em; color:var(--ink-soft); }
   .rad-tick { position:absolute; top:4px; transform:translateX(-50%);
     font:11.5px/13px var(--sans); color:var(--ink-soft); font-variant-numeric:tabular-nums; }
   .rad-tick::before { content:""; position:absolute; left:50%; top:-4px;
@@ -3468,14 +3466,11 @@
       var ramp=document.createElement('div'); ramp.className='rad-ramp'; ramp.id='rad-ramp'; ramps.append(ramp);
       var floorDbz=r.legend.floorDbz || 10;
       ramp.setAttribute('role','img');
-      ramp.setAttribute('aria-label','Reflectivity scale, '+floorDbz+' to 75 dBZ.'+
-        (floorDbz===5 ? ' Below 10 dBZ in grey: clear-air return, not precipitation.' : ''));
+      ramp.setAttribute('aria-label','Reflectivity scale, '+floorDbz+' to 75 dBZ.');
       var ticks=document.createElement('div'); ticks.className='rad-ticks'; ticks.id='rad-ticks'; legend.append(ticks);
-      if(floorDbz===5){var clear=document.createElement('div');clear.className='rad-clear-note';
-        clear.textContent='Grey band: clear air, not rain';legend.append(clear);}
       (r.legend.bands || []).forEach(function(band) {
         var swatch=document.createElement('i'); swatch.style.flex=String(band.hi-band.lo)+' 1 0px';
-        swatch.style.background=band.kind==='clear-air' ? 'var(--rad-clear-air)' : 'linear-gradient(90deg,'+band.start+','+band.end+')'; ramp.append(swatch);
+        swatch.style.background='linear-gradient(90deg,'+band.start+','+band.end+')'; ramp.append(swatch);
       });
       [floorDbz,10,20,30,40,50,60,70].filter((v,i,a)=>v>=floorDbz&&a.indexOf(v)===i).forEach(function(dbz) {
         var tick=document.createElement('span'); tick.className='rad-tick'; tick.textContent=dbz;
