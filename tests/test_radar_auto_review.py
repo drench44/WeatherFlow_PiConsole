@@ -99,6 +99,7 @@ def test_ledger_durable_forward_days_and_write_rate(tmp_path, monkeypatch):
     monkeypatch.setattr(budget.os, 'replace', lambda *args: (writes.append(args), replace(*args))[-1])
     ledger = budget.NativeBudget(path, lambda: clock[0], lambda: mono[0])
     ledger.add(10)
+    ledger.persist()
     saved = ledger.snapshot()
     clock[0] -= 86400  # boot before NTP
     assert budget.NativeBudget(path, lambda: clock[0]).snapshot() == saved
@@ -107,7 +108,9 @@ def test_ledger_durable_forward_days_and_write_rate(tmp_path, monkeypatch):
     mono[0] = 60; ledger.persist()
     assert len(writes) == 2
     ledger.add(budget.NATIVE_NEWEST_ONLY_BYTES)
+    ledger.persist()
     ledger.add(budget.NATIVE_PAUSE_BYTES)
+    ledger.persist()
     assert len(writes) == 4  # each crossing persists immediately
     clock[0] += 2*86400; ledger.persist()
     assert len(writes) == 5 and ledger.snapshot()['bytesToday'] == 0
@@ -131,6 +134,7 @@ def test_accounting_failure_preserves_transport_result_and_metrics(make_emitter,
     else:
         assert request() == b'body'
     assert emitter._radar_request_metrics[-1]['bytes'] == 4
+    emitter._radar_native_budget.persist()
     assert emitter._radar_native_budget.snapshot()['ledgerState'] == 'retrying'
     emitter._radar_native_budget.add(3)
     assert emitter._radar_native_budget.snapshot()['bytesToday'] == 7

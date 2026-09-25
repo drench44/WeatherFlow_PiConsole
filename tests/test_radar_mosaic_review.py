@@ -209,17 +209,17 @@ def test_mosaic_render_concurrency_is_bounded(monkeypatch):
         nonlocal active,peak
         with lock:
             active += 1; peak = max(peak,active)
-            if active == 2: two.set()
+            if active == mosaic.RENDER_SLOT_COUNT: two.set()
         assert release.wait(2)
         with lock: active -= 1
     monkeypatch.setattr(mosaic,'_render_mosaic',render)
     with ThreadPoolExecutor(max_workers=6) as pool:
-        jobs = [pool.submit(mosaic.render_mosaic,[],7,0,0,[]) for _ in range(6)]
+        jobs = [pool.submit(mosaic.render_mosaic,[scan()],7,0,0,[]) for _ in range(6)]
         assert two.wait(2)
-        assert peak == 2
+        assert peak == mosaic.RENDER_SLOT_COUNT
         release.set()
         for job in jobs: job.result()
-    assert peak == 2 and not hasattr(mosaic._geometry,'cache_info')
+    assert peak == mosaic.RENDER_SLOT_COUNT
 
 
 def test_prefetch_classification_budget_refusal_is_control_flow(make_emitter, hybrid, monkeypatch):

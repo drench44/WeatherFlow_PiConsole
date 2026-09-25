@@ -1526,11 +1526,23 @@ the 230 km disc, product gate range and radial coverage qualify. Among valid
 gates in height order, the lowest at or above the 15 dBZ display floor wins.
 If none reaches the floor, the pixel is clear and nothing is drawn. N0B code 1
 and QC no data (GC/RF) fall through. The design rationale is:
-a lower beam's 'nothing' no longer hides a neighbour's echo; echo aloft seen only by a higher beam is drawn.
-Candidates perform gate/bearing lookup only for unresolved pixels. Geometry
-is transient, with no whole-tile LRU, and at most two mosaic renders run at once
-across foreground and prefetch. Slant ranges retain double precision to preserve
-gate boundaries.
+a lower beam's clear return can fall through to a higher **filtered** echo.
+A lower filtered candidate that measured clear or below floor excludes higher
+**unfiltered** candidates at that pixel. Missing bearings, out-of-range gates,
+and code 1 are not clear measurements and do not impose that exclusion. A lower
+unfiltered echo can still own a pixel; any unfiltered site drawing pixels keeps
+the unfiltered caption (contributor metadata conservatively labels the frame).
+
+A process-wide 48 MiB byte-bounded LRU caches each site's tile geometry by site
+position, antenna height, elevation, z/x/y, sample size and range limit. Compact
+int16 bearing bins and gates plus float32 beam heights cost eight bytes/sample.
+Bearing bins are translated through each volume's actual radial table; radial
+rows are never reused across volumes. Gate boundaries are computed in float64
+before integer compaction. The same geometry is reused across the eight-frame
+loop and nearby levels. Render slot count is `min(cpu_count, 4)`, at least one:
+a measured <=20 MB transient peak per cold supersampled render keeps concurrent
+working allocations within approximately 80 MB, separately from the 48 MiB
+retained geometry cache. Waiting for a slot observes the tile deadline.
 z7 uses 2×2 maximum supersampling after selection; z8–10 use one sample.
 The existing source palette code-to-slot table and PNG `weatherPixels` metadata
 are unchanged. Attention consumes the mosaic counts; the sentinel remains MRMS.
@@ -1555,6 +1567,11 @@ stamp, requested contributor stamps, mosaic key, exact per-site volume seconds
 and filtering state. It is atomically replaced and synced under the native
 revision directory. Reads validate its revision, stamps, contributor types and
 recomputed key; only validated, complete tile inventory can bypass acquisition.
+Sidecar paths are indexed during the inventory scan and maintained on writes and
+last-tile pruning; reads never glob mosaic directories. Identical sidecars skip
+replacement and fsync. A cached-path tile evicted before its batch fails closed:
+zero-scan rendering is forbidden, and the incomplete frame/round acquires inputs
+on the next pass instead of storing a blank tile under an existing key.
 A fully cached loop, including adjacent-zoom warming, makes no Level III requests
 after restart. Sidecars survive boot with validated tiles and are removed when
 the last tile of their frame is evicted. Admission prices missing mosaic inputs,
@@ -1579,9 +1596,16 @@ rate admission and byte ledger as N0B. HCA failures retry after 20 s (10 s for
 transport errors), allowing late HCA to publish a new key for any retained loop
 frame within 180 seconds of that site's volume. Negative results are bounded
 per volume and stop being retried after this window; an expired missing HCA
-no longer disables unchanged discovery. Prefetch propagates HCA budget refusals
-and skips unfinished classification rounds instead of recording an unfiltered
-round under a key that the foreground would not use. No HCA requests in
+no longer disables unchanged discovery. Requested reflectivity pairs that did
+not contribute follow the same upgrade-window and negative-memory rules; they
+cannot make a partial sidecar permanently complete. Restarts detect these gaps
+from requestedPairs versus siteScans and upgrades get a new immutable key.
+Each frame owns its HCA worker queue so stalled flights cannot occupy the next
+frame's slots. Timed-out and cancelled flights enter bounded per-volume negative
+memory; late successful products still clear that failure and can upgrade. Prefetch propagates HCA budget refusals
+and skips only the current target when classification is unfinished, continuing
+later targets (including Region). A budget denial may end the round. No unfinished
+round is recorded as successfully prefetched. No HCA requests in
 watch/rest/dormant or paused native, and no native history/prefetch at the
 newest-only ceiling. Optional HCA has its own circuit/cooldown state, published at
 `/health.radar.classification`, so its failures cannot open N0B's circuit.
@@ -1615,7 +1639,7 @@ attention tier `live` or `warm`, and the daily ceiling below its pause state.
 Otherwise it is the Smooth boolean. The variant has its own render revision directory
 (`_radar_render_revision('native')`, advertised in `radar/.native-revision` so
 the server serves it immutable), a disk key suffixed `('native',)`, and PNG
-metadata with `revision` = `level3-n0b-n0h-mosaic-v4` (`radar_level3.NATIVE_REVISION`).
+metadata with `revision` = `level3-n0b-n0h-mosaic-v5` (`radar_level3.NATIVE_REVISION`).
 Gates are measurements, not matched colours, so `unmatchedPixels` and
 `ambiguousPixels` are 0 and `remapped` is true. The manifest adds
 `tiles.variant` (`false`, `true` or `"native"`); `tiles.smooth` stays a boolean,
@@ -1637,10 +1661,17 @@ replacement through the `radar_native_bytes.json` runtime symlink into
 survive engine restarts and reboots. A stored UTC day up to one day ahead is
 retained to tolerate a small backward clock correction. A day more than one day
 ahead is invalid and resets to zero on today's UTC day; normal rollover uses a
-later day. Accounting holds a short memory lock, and SD persistence runs outside the renderer/accounting locks: flush on
-threshold crossings and day changes, otherwise at most once per 60 seconds.
-A crash may lose the unflushed interval. A write failure logs once per failure
-streak and retries on later engine watcher/pass ticks with exponential backoff
+later day. Accounting holds a short memory lock. A single asynchronous writer
+per ledger performs atomic replacement, file fsync and directory fsync outside
+the renderer/accounting locks; request workers never wait for storage. Threshold
+crossings and day changes wake it immediately, bypassing ordinary coalescing.
+Other changes flush at most once per two seconds, including a trailing burst
+with no later request or watcher tick. With healthy storage, SIGTERM/SIGKILL or
+a power loss can lose at most approximately two seconds of counts, plus any
+in-progress filesystem flush; durability never depends on a clean exit or
+atexit. An unavailable/stalled filesystem cannot satisfy that bound.
+A write failure logs once per failure streak and the writer retries autonomously
+(with watcher ticks also able to wake it) with exponential backoff
 (5, 10, 20, 40, 80, 160, then at most 300 seconds). Success clears the failure.
 Native remains allowed while persistence is unavailable, but every body byte
 still counts in memory and both byte ceilings still apply. A restart during an

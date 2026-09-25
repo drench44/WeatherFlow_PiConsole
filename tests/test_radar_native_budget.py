@@ -72,6 +72,7 @@ def test_ledger_boundaries_restart_concurrency_and_utc_rollover(tmp_path):
     assert ledger.snapshot()['ceilingState'] == 'normal'
     ledger.add(1)
     assert ledger.snapshot()['ceilingState'] == 'newest-only'
+    ledger.persist()
     ledger = budget.NativeBudget(path, lambda: clock[0], lambda: mono[0])
     assert ledger.snapshot()['bytesToday'] == budget.NATIVE_NEWEST_ONLY_BYTES+1
     ledger.add(budget.NATIVE_PAUSE_BYTES-ledger.bytes)
@@ -88,6 +89,8 @@ def test_ledger_boundaries_restart_concurrency_and_utc_rollover(tmp_path):
     assert ledger.snapshot()['ceilingState'] == 'normal'
     assert ledger.snapshot()['bytesToday'] == 0
     ledger.add(20)
+    mono[0] += 2
+    ledger.persist()
     assert budget.NativeBudget(path, lambda: clock[0], lambda: mono[0]).snapshot()['bytesToday'] == 20
 
 
@@ -96,6 +99,7 @@ def test_atomic_counter_preserves_durable_symlink(tmp_path):
     path = tmp_path/'radar_native_bytes.json'; path.symlink_to(durable)
     ledger = budget.NativeBudget(path)
     ledger.add(123)
+    ledger.persist()
     assert path.is_symlink() and json.loads(durable.read_text())['bytes'] == 123
 
 
@@ -167,6 +171,7 @@ def test_transport_counts_invalid_and_valid_bodies(make_emitter, monkeypatch, bo
     else:
         emitter._radar_request(ae.RADAR_LEVEL3_TRANSPORT, ae.RADAR_LEVEL3_BUCKET+'object', ae.time.monotonic()+10, validate=validate)
     assert emitter._radar_native_budget.snapshot()['bytesToday'] == len(body)
+    assert emitter._radar_native_budget.flush()
     assert make_emitter()._radar_native_budget.snapshot()['bytesToday'] == len(body)
 
 
@@ -247,6 +252,7 @@ def test_unwritable_ledger_reports_persistence_failure(make_emitter, monkeypatch
     emitter = make_emitter()
     monkeypatch.setattr(budget.os, 'replace', lambda *args: (_ for _ in ()).throw(OSError('read-only ledger')))
     emitter._radar_native_budget.add(20)
+    emitter._radar_native_budget.persist()
     assert emitter._radar_native_budget.snapshot()['ledgerState'] == 'retrying'
 
 

@@ -196,6 +196,7 @@ def test_ledger_retry_backoff_recovers_and_enforces_memory_limits(tmp_path, monk
         attempts.append(mono[0]);raise OSError('temporary read-only filesystem')
     monkeypatch.setattr(budget.os, 'replace', fail)
     ledger.add(10)
+    ledger.persist()
     for tick in range(5):
         mono[0] = tick;ledger.add(1);ledger.persist()
     assert attempts == [0]

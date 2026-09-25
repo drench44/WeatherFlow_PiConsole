@@ -8,6 +8,7 @@ from pathlib import Path
 import os
 import shutil
 import time
+from threading import RLock
 
 
 class TileInventory:
@@ -24,6 +25,7 @@ class TileInventory:
     TYPICAL_TILE_BYTES = 8192
 
     def __init__(self, root=None):
+        self.frame_metadata = FrameMetadataIndex()
         self.records = OrderedDict()
         self.bytes = 0
         self.generation = 0
@@ -104,6 +106,7 @@ class TileInventory:
             if (key[1] or '').startswith('M') and not any(
                     group[:3] == key[:3] for group in self.group_counts):
                 (frame_dir / 'frame.json').unlink(missing_ok=True)
+                self.frame_metadata.discard(frame_dir / 'frame.json')
             while parent != root:
                 try: parent.rmdir()
                 except OSError: break
@@ -187,6 +190,8 @@ class TileInventory:
                                 raise ValueError('oversize cached tile')
                             metadata = validate(path, source)
                             self.add(key, path, length, metadata)
+                            if site.startswith('M'):
+                                self.frame_metadata.add(path.parents[2] / 'frame.json')
                             loaded += 1
                         except (OSError, ValueError, KeyError, TypeError):
                             invalid += 1
@@ -242,3 +247,27 @@ class TileInventory:
         clean(root)
         self.directories = {str(record[0].parent) for record in self.records.values()}
         return purged
+
+
+class FrameMetadataIndex:
+    """Paths indexed by source root and stamp; inventory owns the lifecycle."""
+    def __init__(self):
+        self._paths = {}
+        self._lock = RLock()
+
+    def add(self, path):
+        with self._lock:
+            self._paths.setdefault((path.parents[2], path.parent.name), set()).add(path)
+
+    def discard(self, path):
+        with self._lock:
+            key = (path.parents[2], path.parent.name)
+            paths = self._paths.get(key)
+            if paths is not None:
+                paths.discard(path)
+                if not paths:
+                    del self._paths[key]
+
+    def paths(self, root, stamp):
+        with self._lock:
+            return tuple(self._paths.get((root, stamp), ()))

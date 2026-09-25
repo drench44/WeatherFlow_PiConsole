@@ -685,6 +685,10 @@ class _RadarUnchanged(Exception):
     """A discovery-only pass found the current complete scan."""
 
 
+class _RadarClassificationPending(Exception):
+    """This optional target can be retried without aborting other targets."""
+
+
 class _RadarBudget(Exception):
     """Yield unfinished history to a later pass; never bypass the shared limit."""
 
@@ -1858,7 +1862,7 @@ class AlmanacEmitter:
                 Path(self.output_path).parent, self._radar_read_intent(), time.time()) == 'auto':
             self._radar_restart = True
         if self._radar_native_budget.failed:
-            self._radar_native_budget.persist()  # retry on watcher ticks, subject to ledger backoff
+            self._radar_native_budget.persist(wait=False)  # writer also owns trailing flush and retry
         if self._radar_site_policy() and self._radar_policy_ceiling is not None:
             if self._radar_native_budget.snapshot()['ceilingState'] != self._radar_policy_ceiling:
                 self._radar_restart = True
@@ -2489,7 +2493,8 @@ class AlmanacEmitter:
                 from lib.radar_mosaic import render_mosaic
                 scans = ctx['mosaic_scans']
                 self._radar_checkpoint(ctx)
-                drawn, visible = render_mosaic(scans, ctx['zoom'], tx, ty, source_palette(source), RADAR_SITE_RANGE_METERS)
+                drawn, visible = render_mosaic(scans, ctx['zoom'], tx, ty, source_palette(source),
+                    RADAR_SITE_RANGE_METERS, filtered=ctx.get('mosaic_filtered'), deadline=deadline)
                 with drawn:
                     colours = sum(1 for _, index in drawn.getcolors(256) if index)
                     # Gates are measured values, never matched colours: nothing is unmatched or ambiguous.
@@ -2649,9 +2654,17 @@ class AlmanacEmitter:
                 if max(newest, snap.ts_frame or newest) - RADAR_HISTORY_SEC <= f['ts']}
 
     def _radar_hca_due(self, frame):
-        """Only incomplete classification inside its volume's upgrade window."""
+        """Missing reflectivity or classification inside the bounded upgrade window."""
         now = time.time()
         with self._radar_lock:
+            contributed = {(p['id'], p['ts']) for p in frame.get('siteScans', ())}
+            for site, stamp in frame.get('requestedPairs', ()):
+                if (site, stamp) in contributed or now - stamp > RADAR_N0H_UPGRADE_SEC:
+                    continue
+                key = (site, stamp)
+                failed = self._radar_level3_failed.get(key)
+                if key in self._radar_level3_scans or not failed or time.monotonic() >= failed[0]:
+                    return True
             for p in frame.get('siteScans', ()):
                 if p.get('filtered', True) or now - p['volumeTs'] > RADAR_N0H_UPGRADE_SEC:
                     continue
@@ -2665,8 +2678,9 @@ class AlmanacEmitter:
         from lib.radar_mosaic import read_frame_metadata
         revision = _radar_render_revision('native')
         root = Path(RADAR_DIR) / 't' / revision / 'iem-nexrad-n0b'
-        for metadata in read_frame_metadata(root, _radar_stamp_text(ts), pairs, revision):
-            if all(_radar_present(ctx, 'iem-nexrad-n0b', metadata['mosaicKey'], ts,
+        for metadata in read_frame_metadata(root, _radar_stamp_text(ts), pairs, revision,
+                self._radar_disk_inventory.frame_metadata):
+            if not self._radar_hca_due(metadata) and all(_radar_present(ctx, 'iem-nexrad-n0b', metadata['mosaicKey'], ts,
                                  ctx['zoom'], x, y) for x, y, _, _ in ctx['tiles']):
                 return metadata
         return None
@@ -2675,17 +2689,26 @@ class AlmanacEmitter:
         from lib.radar_mosaic import mosaic_key, quality_control
         scans, contributors, identities = [], [], []
         cancelled = _Event()
+        # A frame owns its classification queue. Old running flights have bounded
+        # transport deadlines and can still cache late successes, but cannot take
+        # worker slots from another frame. Never wait for optional flights here.
+        self._radar_hca_pool.shutdown(wait=False, cancel_futures=True)
+        hca_pool = ThreadPoolExecutor(max_workers=RADAR_SITE_MAX_COUNT,
+                                      thread_name_prefix='radar-hca')
+        self._radar_hca_pool = hca_pool
+        hca_jobs = []
         # Each successful reflectivity immediately starts its independent HCA
         # flight, while the other sites' reflectivity is still being acquired.
         def acquire(site, stamp):
             scan = self._radar_level3_scan(site, stamp, ctx, deadline)
-            if cancelled.is_set():
-                raise _RadarSuperseded('frame inputs cancelled')
-            # A flight may start before the last N0B is ready. Its transport
-            # keeps the source deadline; only the coordinator owns the frame's
-            # classification wait. Late successes still populate the scan cache.
-            future = self._radar_hca_pool.submit(self._radar_level3_scan,
-                site, stamp, ctx, deadline - 2, 'N0H', scan.volume_ts)
+            # Registration and frame cancellation share one short lock, so a
+            # reflectivity completion cannot orphan an untracked HCA flight.
+            with self._radar_lock:
+                if cancelled.is_set():
+                    raise _RadarSuperseded('frame inputs cancelled')
+                future = hca_pool.submit(self._radar_level3_scan,
+                    site, stamp, ctx, deadline - 2, 'N0H', scan.volume_ts)
+                hca_jobs.append((site, scan.volume_ts, future))
             return scan, future
         available = []
         pool = ThreadPoolExecutor(max_workers=RADAR_SITE_MAX_COUNT, thread_name_prefix='radar-input')
@@ -2709,11 +2732,11 @@ class AlmanacEmitter:
                 try:
                     if hca not in arrived:
                         if ctx.get('prefetch'):
-                            raise _RadarBudget('classification unfinished for prefetch')
+                            raise _RadarClassificationPending('classification unfinished for prefetch')
                     else:
                         filtered = quality_control(scan, hca.result())
                         has_hca = True
-                except _RadarSuperseded:
+                except (_RadarSuperseded, _RadarClassificationPending):
                     raise
                 except _RadarBudget:
                     if ctx.get('prefetch'):
@@ -2724,10 +2747,16 @@ class AlmanacEmitter:
                 contributors.append(dict(id=site, ts=stamp, volumeTs=scan.volume_ts, filtered=has_hca))
                 identities.append((site, scan.volume_ts, has_hca))
         finally:
-            cancelled.set()
+            with self._radar_lock:
+                cancelled.set()
+                flights = tuple(hca_jobs)
             pool.shutdown(wait=False, cancel_futures=True)
-            for _, _, _, hca in available:
-                hca.cancel()
+            for site, volume, hca in flights:
+                if not hca.done() or hca.cancelled():
+                    self._radar_remember_level3_failure((site, volume, 'N0H'),
+                        10, 'classification flight timed out or cancelled', TimeoutError)
+                    hca.cancel()
+            hca_pool.shutdown(wait=False, cancel_futures=True)
         return dict(mosaicKey=mosaic_key(identities, _radar_render_revision('native')), siteScans=contributors,
                     requestedPairs=sorted([list(p) for p in pairs]),
                     unfilteredSites=[p['id'] for p in contributors if not p['filtered']]), tuple(scans)
@@ -2776,7 +2805,8 @@ class AlmanacEmitter:
         for site,stamp,url in work:
             try:
                 for tile, raw in self._radar_tile_batch(source,stamp,
-                        dict(ctx, mosaic_scans=scans) if mosaic else ctx,deadline,url,site):
+                        dict(ctx, mosaic_scans=scans, mosaic_filtered=tuple(
+                            p['filtered'] for p in metadata['siteScans'])) if mosaic else ctx,deadline,url,site):
                     present.add((site,stamp))
                     if raw is None:
                         continue
@@ -2845,7 +2875,8 @@ class AlmanacEmitter:
         if mosaic and present:
             from lib.radar_mosaic import write_frame_metadata
             path = _radar_tile_path(source, frame['mosaicKey'], ts, ctx['zoom'], 0, 0, 'native').parents[2] / 'frame.json'
-            write_frame_metadata(path, _radar_stamp_text(ts), pairs, metadata, _radar_render_revision('native'))
+            write_frame_metadata(path, _radar_stamp_text(ts), pairs, metadata, _radar_render_revision('native'),
+                                 self._radar_disk_inventory.frame_metadata)
         return frame
 
     def _radar_known(self, source, ctx, site=None):
@@ -2931,6 +2962,14 @@ class AlmanacEmitter:
                     break
                 return self._radar_history(source, candidate, newest, ctx, build, latest)
         raise ValueError('no fresh complete IEM frame: ' + ctx.get('last_error', 'unavailable'))
+
+    def _radar_remember_level3_failure(self, key, retry, message, error_type):
+        with self._radar_lock:
+            if key in self._radar_level3_scans:
+                return  # a late success already won
+            self._radar_level3_failed[key] = (time.monotonic()+retry, message, error_type)
+            while len(self._radar_level3_failed) > 2 * RADAR_LEVEL3_SCAN_CACHE:
+                self._radar_level3_failed.pop(next(iter(self._radar_level3_failed)))
 
     def _radar_level3_scan(self, site, stamp, ctx, deadline, product="N0B", volume_ts=None):
         """Share a bounded scan acquisition, including its failure, across tiles.
@@ -3050,12 +3089,10 @@ class AlmanacEmitter:
                           else TimeoutError if is_transport_error(error) else ValueError)
             message = type(error).__name__ + ': ' + str(error)
             flight['error'] = (error_type, message)
-            if isinstance(error, Exception) and not control:
+            if isinstance(error, Exception) and (not control or product == 'N0H' and isinstance(error, _RadarSuperseded)):
                 retry = (20 if product == 'N0H' else RADAR_LEVEL3_RETRY_SEC) if isinstance(error, (ValueError, urllib.error.HTTPError)) else 10
-                with self._radar_lock:
-                    self._radar_level3_failed[key] = (time.monotonic()+retry, message, error_type)
-                    while len(self._radar_level3_failed) > 2 * RADAR_LEVEL3_SCAN_CACHE:
-                        self._radar_level3_failed.pop(next(iter(self._radar_level3_failed)))
+                self._radar_remember_level3_failure(key, retry, message,
+                    TimeoutError if isinstance(error, _RadarSuperseded) else error_type)
             raise
         finally:
             with self._radar_lock:
@@ -3280,8 +3317,11 @@ class AlmanacEmitter:
             self._radar_checkpoint(ctx)
             # A retained frame can first become unfiltered during backfill,
             # even when the newest was fully classified before history began.
-            if any(not p.get('filtered', True) and time.time() - p['volumeTs'] <= RADAR_N0H_UPGRADE_SEC
-                   for f in frames.values() for p in f.get('siteScans', ())):
+            if any(any(not p.get('filtered', True) and time.time()-p['volumeTs'] <= RADAR_N0H_UPGRADE_SEC
+                       for p in f.get('siteScans', ())) or
+                   any(time.time()-stamp <= RADAR_N0H_UPGRADE_SEC and
+                       not any(p['id'] == site and p['ts'] == stamp for p in f.get('siteScans', ()))
+                       for site, stamp in f.get('requestedPairs', ())) for f in frames.values()):
                 self._schedule_retry('radar', self._check_radar, 20)
             if source == 'iem-mrms-lcref' and time.time() - newest > settings['stale_sec']:
                 return False
@@ -3633,6 +3673,7 @@ class AlmanacEmitter:
                         if not metadata['siteScans']:
                             continue
                         warm['mosaic_scans'] = scans
+                        warm['mosaic_filtered'] = tuple(p['filtered'] for p in metadata['siteScans'])
                         pairs = ((metadata['mosaicKey'], frame_ts),)
                         signature = pairs
                     key = (target, zoom, ctx['center']['lat'], ctx['center']['lon'])
@@ -3665,12 +3706,15 @@ class AlmanacEmitter:
                         except Exception:
                             self._radar_forget(target, site)
                             raise
+                    if not all(_radar_present(warm, target, site, stamp, zoom, x, y)
+                               for site, stamp in pairs for x, y, _, _ in _radar_site_tiles(warm, site)):
+                        continue
                     if _radar_variant(warm, target) == 'native':
                         from lib.radar_mosaic import write_frame_metadata
                         path = _radar_tile_path(target, metadata['mosaicKey'], frame_ts,
                             zoom, 0, 0, 'native').parents[2] / 'frame.json'
                         write_frame_metadata(path, _radar_stamp_text(frame_ts), input_pairs,
-                                             metadata, _radar_render_revision('native'))
+                                             metadata, _radar_render_revision('native'), self._radar_disk_inventory.frame_metadata)
                     self._radar_prefetched[key] = signature
                 except (_RadarBudget, _RadarSuperseded):
                     raise
@@ -3711,6 +3755,7 @@ class AlmanacEmitter:
                 if (key[1] or '').startswith('M') and not any(
                         group[:3] == key[:3] for group in self._radar_disk_inventory.group_counts):
                     (record[0].parents[2] / 'frame.json').unlink(missing_ok=True)
+                    self._radar_disk_inventory.frame_metadata.discard(record[0].parents[2] / 'frame.json')
                 self._radar_disk_files=len(self._radar_disk_inventory)
                 self._radar_disk_bytes=self._radar_disk_inventory.bytes
                 self._radar_pending.update(newest=True, four=True, eight=True)

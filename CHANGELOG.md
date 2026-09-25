@@ -10,20 +10,26 @@ to shared upstream code that the classic console benefits from too.
 - **v2 combines nearby radars by their lowest visible echo and filters clutter.**
   Each pixel takes the lowest beam within 230 km that has an echo at or above
   the display floor. A lower beam's clear or blocked return no longer hides a
-  neighbour's echo, including echo aloft seen only by a higher beam. NOAA's N0H
+  neighbour's filtered echo, including echo aloft seen only by a higher beam.
+  A filtered clear measurement excludes higher unfiltered echoes at that pixel,
+  keeping missing classification from painting clutter over measured clear sky. NOAA's N0H
   classification removes ground clutter and range folding. Birds and insects
   clear unless more than half of their 5-by-9 classification neighbourhood is
   precipitation, preserving biological labels embedded in rain. Missing
   classification leaves a site unfiltered. Sites fetch concurrently and the
   frame gives classification one 2.5-second wait after reflectivity is ready.
-  Late classification upgrades every eligible retained frame within 180 seconds
+  Late classification and missing reflectivity upgrade eligible retained frames within 180 seconds
   of its volume; expired missing products stop triggering discovery rebuilds.
   Neighbours may be up to 8 minutes older or 60 seconds newer than the primary
   frame. Durable frame metadata lets restarts and warming reuse cached tiles
   without downloading their inputs again. Admission prices missing mosaic
-  inputs, and prefetch skips classification budget refusals. Hourly listings
-  have headroom at hour boundaries and retain current hours first. Geometry
-  is no longer cached across tile walks; two concurrent renders bound memory.
+  inputs; a tile evicted during cached reuse fails safely instead of rendering
+  with empty inputs. Prefetch continues other targets while classification is
+  pending. Each frame owns its HCA queue, with bounded failure memory for cancelled
+  and timed-out flights. Indexed sidecars skip unchanged writes. Hourly listings
+  have headroom at hour boundaries and retain current hours first. A 48 MiB
+  geometry cache reuses projections across the loop; CPU-sized render concurrency
+  keeps transient memory near 80 MB and slot waits honor deadlines.
   Changed inputs receive a new tile identity; cached frames keep their meaning.
   The page draws one layer for v2, including a single radar, while v1 and Region
   keep their existing rendering.
@@ -42,8 +48,11 @@ to shared upstream code that the classic console benefits from too.
   only while the Radar tab is open or the panel was touched in the last 45
   minutes; an unattended rainy day uses v1 tiles and no Level III at all. Past
   150 MB in a UTC day v2 keeps only its newest frame, past 250 MB it pauses until
-  midnight UTC, and the panel says so. The count survives reboots and shows in
-  `/health`.
+  midnight UTC, and the panel says so. The count shows in `/health`. A single
+  asynchronous writer flushes changed counts within two seconds, coalescing
+  bursts; thresholds and UTC day changes flush immediately. With healthy storage,
+  an abrupt restart loses at most about two seconds of counts plus a filesystem
+  flush in progress, without relying on exit handlers.
 - **v2 is the default on the Pi 4.** Boards with the Pi 3's chip (Pi 3, Compute
   Module 3, Zero 2) default to v1. A choice made on the v1 | v2 switch always wins.
   Switching renderer shows the new picture as soon as its newest frame is ready

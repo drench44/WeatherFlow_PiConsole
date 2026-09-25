@@ -367,6 +367,7 @@ def test_n0h_body_bytes_share_durable_ledger(make_emitter, monkeypatch, invalid)
         with pytest.raises(ValueError): acquire()
     else: acquire()
     assert emitter._radar_native_budget.snapshot()['bytesToday']==len(raw)
+    assert emitter._radar_native_budget.flush()
     assert make_emitter()._radar_native_budget.snapshot()['bytesToday']==len(raw)
 
 

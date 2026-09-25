@@ -1,12 +1,15 @@
 """Immutable native frame inputs and lowest-beam, categorical-QC mosaics.
 
-Blockage occurs along each beam path. A low beam's below-floor return must
-not hide an echo observed along a neighbouring radar's higher, clear path.
+Blockage occurs along each beam path. Below-floor returns fall through to
+higher filtered echoes; filtered clear excludes higher unfiltered clutter.
 """
 import hashlib
 import json
 import math
-from threading import BoundedSemaphore
+import os
+import time
+from collections import OrderedDict
+from threading import BoundedSemaphore, RLock
 
 import numpy as np
 
@@ -14,8 +17,28 @@ from lib.radar_level3 import (Scan, NATIVE_REVISION, EARTH_RADIUS_M,
     EFFECTIVE_RADIUS_M, GATE_METERS, _tile_lonlat, colour_table, floor_code)
 from lib.radar_palette import DISPLAY_FLOOR_DBZ
 
-# Bound transient geometry allocations across foreground and warming workers.
-_RENDER_SLOTS = BoundedSemaphore(2)
+# Peak cold supersampled render working set is <=20 MB (benchmark --memory).
+# The independent retained geometry budget is 48 MiB.
+RENDER_PEAK_BYTES = 20_000_000
+RENDER_SLOT_COUNT = max(1, min(os.cpu_count() or 1, 80_000_000 // RENDER_PEAK_BYTES))
+_RENDER_SLOTS = BoundedSemaphore(RENDER_SLOT_COUNT)
+GEOMETRY_MAX_BYTES = 48 * 1024 * 1024
+_GEOMETRY = OrderedDict()
+_GEOMETRY_LOCK = RLock()
+_GEOMETRY_BYTES = _GEOMETRY_HITS = _GEOMETRY_MISSES = 0
+
+
+def clear_geometry_cache():
+    global _GEOMETRY_BYTES, _GEOMETRY_HITS, _GEOMETRY_MISSES
+    with _GEOMETRY_LOCK:
+        _GEOMETRY.clear()
+        _GEOMETRY_BYTES = _GEOMETRY_HITS = _GEOMETRY_MISSES = 0
+
+
+def geometry_cache_info():
+    with _GEOMETRY_LOCK:
+        return dict(bytes=_GEOMETRY_BYTES, hits=_GEOMETRY_HITS,
+                    misses=_GEOMETRY_MISSES, entries=len(_GEOMETRY))
 
 
 def mosaic_key(pairs, revision=NATIVE_REVISION):
@@ -66,66 +89,100 @@ def quality_control(scan, classification):
                 scan.volume_ts, codes, scan.bearing_index)
 
 
-def _geometry(sites, z, x, y, size, radius):
-    """Transient geometry; a viewport walk does not reuse whole-tile grids."""
+def _geometry(site, z, x, y, size, radius):
+    """Volume-independent bearing bin, gate and beam height, byte-bounded LRU.
+
+    Cache bearing bins, not radial rows: azimuth tables can differ by volume.
+    Compute gate boundaries in float64 before compacting the integer result.
+    """
+    global _GEOMETRY_BYTES, _GEOMETRY_HITS, _GEOMETRY_MISSES
+    key = (*site, z, x, y, size, radius)
+    with _GEOMETRY_LOCK:
+        cached = _GEOMETRY.get(key)
+        if cached is not None:
+            _GEOMETRY.move_to_end(key)
+            _GEOMETRY_HITS += 1
+            return cached
+        _GEOMETRY_MISSES += 1
     lat, lon = _tile_lonlat(z, x, y, size)
     la, lo = np.radians(lat)[:, None], np.radians(lon)[None, :]
-    ranges, heights = [], []
-    for a, b, height, elevation in sites:
-        a, b, elevation = map(math.radians, (a, b, elevation))
-        hav = np.sin((la-a)/2)**2 + math.cos(a)*np.cos(la)*np.sin((lo-b)/2)**2
-        ground = 2*EARTH_RADIUS_M*np.arcsin(np.minimum(1, np.sqrt(hav)))
-        central = ground/EFFECTIVE_RADIUS_M
-        slant = EFFECTIVE_RADIUS_M*np.sin(central)/np.cos(elevation+central)
-        altitude = height + (EFFECTIVE_RADIUS_M + slant*np.sin(elevation))/np.cos(central)-EFFECTIVE_RADIUS_M
-        altitude[ground > radius] = np.inf
-        ranges.append(slant.ravel())
-        heights.append(altitude.ravel())
-    order = np.argsort(np.asarray(heights), axis=0, kind='stable').astype(np.uint8)
-    covered = np.isfinite(heights)
-    return np.asarray(ranges), order, covered
+    a, b, height, elevation = site
+    a, b, elevation = map(math.radians, (a, b, elevation))
+    dl = lo-b
+    hav = np.sin((la-a)/2)**2 + math.cos(a)*np.cos(la)*np.sin(dl/2)**2
+    ground = 2*EARTH_RADIUS_M*np.arcsin(np.minimum(1, np.sqrt(hav)))
+    central = ground/EFFECTIVE_RADIUS_M
+    slant = EFFECTIVE_RADIUS_M*np.sin(central)/np.cos(elevation+central)
+    altitude = height + (EFFECTIVE_RADIUS_M + slant*np.sin(elevation))/np.cos(central)-EFFECTIVE_RADIUS_M
+    altitude[ground > radius] = np.inf
+    bearing = np.degrees(np.arctan2(np.sin(dl)*np.cos(la),
+        math.cos(a)*np.sin(la)-math.sin(a)*np.cos(la)*np.cos(dl))) % 360
+    gates = np.clip(slant/GATE_METERS, 0, 32767).astype(np.int16).ravel()
+    bins = ((bearing*10).astype(np.int16) % 3600).ravel()
+    cached = (bins, gates, altitude.astype(np.float32).ravel())
+    for array in cached:
+        array.flags.writeable = False
+    length = sum(array.nbytes for array in cached)
+    with _GEOMETRY_LOCK:
+        if key not in _GEOMETRY and length <= GEOMETRY_MAX_BYTES:
+            while _GEOMETRY and _GEOMETRY_BYTES + length > GEOMETRY_MAX_BYTES:
+                _, victim = _GEOMETRY.popitem(last=False)
+                _GEOMETRY_BYTES -= sum(array.nbytes for array in victim)
+            _GEOMETRY[key] = cached
+            _GEOMETRY_BYTES += length
+    return cached
 
 
-def mosaic_codes(scans, z, x, y, size=256, radius=230000):
-    """Select the lowest valid echo at the display floor; otherwise leave clear."""
+def mosaic_codes(scans, z, x, y, size=256, radius=230000, filtered=None):
+    """Lowest echo wins; lower filtered clear excludes higher unfiltered echo."""
     result = np.zeros(size*size, np.uint8)
     if not scans:
         return result.reshape(size, size)
-    sites = tuple((s.lat, s.lon, s.height_m, s.elevation_deg) for s in scans)
-    ranges, order, covered = _geometry(sites, z, x, y, size, radius)
-    lat, lon = _tile_lonlat(z, x, y, size)
-    lat, lon = np.radians(lat), np.radians(lon)
-    unresolved = np.ones(size*size, bool)
-    for rank in range(len(scans)):
-        for index, scan in enumerate(scans):
-            pixels = np.flatnonzero(unresolved & (order[rank] == index) & covered[index])
-            if not pixels.size:
-                continue
-            gates = (ranges[index, pixels]/GATE_METERS).astype(np.int32)
-            inside = gates < scan.gates
-            pixels, gates = pixels[inside], gates[inside]
-            la, dl, a = lat[pixels//size], lon[pixels % size]-math.radians(scan.lon), math.radians(scan.lat)
-            bearing = np.degrees(np.arctan2(np.sin(dl)*np.cos(la),
-                math.cos(a)*np.sin(la)-math.sin(a)*np.cos(la)*np.cos(dl))) % 360
-            rows = scan.bearing_index[(bearing*10).astype(np.int32) % 3600]
-            values = scan.codes[np.maximum(rows, 0), gates]
-            good = (rows >= 0) & (values >= floor_code(DISPLAY_FLOOR_DBZ))
-            result[pixels[good]] = values[good]
-            unresolved[pixels[good]] = False
-        if not unresolved.any():
-            break
+    filtered = tuple(filtered) if filtered is not None else (True,) * len(scans)
+    if len(filtered) != len(scans):
+        raise ValueError('classification flags must match scans')
+    values, heights = [], []
+    for scan in scans:
+        bins, gates, altitude = _geometry((scan.lat, scan.lon, scan.height_m,
+            scan.elevation_deg), z, x, y, size, radius)
+        rows = scan.bearing_index[bins]
+        valid = (rows >= 0) & (gates < scan.gates) & np.isfinite(altitude)
+        codes = np.ones(size*size, np.uint8)
+        codes[valid] = scan.codes[rows[valid], gates[valid]]
+        values.append(codes)
+        heights.append(altitude)
+    values = np.asarray(values)
+    order = np.argsort(heights, axis=0, kind='stable').astype(np.uint8)
+    blocked = np.zeros(size*size, bool)
+    indices = np.arange(size*size)
+    flags = np.asarray(filtered)
+    floor = floor_code(DISPLAY_FLOOR_DBZ)
+    for owners in order:
+        codes, classified = values[owners, indices], flags[owners]
+        good = (result == 0) & (codes >= floor) & (classified | ~blocked)
+        result[good] = codes[good]
+        blocked |= classified & (codes != 1) & (codes < floor)
     return result.reshape(size, size)
 
 
-def render_mosaic(scans, z, x, y, palette, radius=230000):
-    with _RENDER_SLOTS:
-        return _render_mosaic(scans, z, x, y, palette, radius)
+def render_mosaic(scans, z, x, y, palette, radius=230000, *, filtered=None, deadline=None):
+    if not scans:
+        raise ValueError('mosaic render requires scan inputs')
+    remaining = None if deadline is None else max(0, deadline-time.monotonic())
+    if not _RENDER_SLOTS.acquire(timeout=remaining):
+        raise TimeoutError('mosaic render slot deadline')
+    try:
+        if deadline is not None and time.monotonic() >= deadline:
+            raise TimeoutError('mosaic render deadline')
+        return _render_mosaic(scans, z, x, y, palette, radius, filtered)
+    finally:
+        _RENDER_SLOTS.release()
 
 
-def _render_mosaic(scans, z, x, y, palette, radius):
+def _render_mosaic(scans, z, x, y, palette, radius, filtered=None):
     from PIL import Image
     factor = 2 if z < 8 else 1
-    codes = mosaic_codes(scans, z, x, y, 256*factor, radius)
+    codes = mosaic_codes(scans, z, x, y, 256*factor, radius, filtered)
     if factor > 1:
         codes = codes.reshape(256, factor, 256, factor).max(axis=(1, 3))
     slots, colours = colour_table(palette)
@@ -137,11 +194,11 @@ def _render_mosaic(scans, z, x, y, palette, radius):
     return image, int(np.count_nonzero(pixels))
 
 
-def read_frame_metadata(root, stamp, pairs, revision):
+def read_frame_metadata(root, stamp, pairs, revision, index):
     """Recover immutable input identity, without opening or acquiring a scan."""
     candidates = []
     expected = sorted([list(p) for p in pairs])
-    for path in root.glob('M*/%s/frame.json' % stamp):
+    for path in index.paths(root, stamp):
         try:
             if path.is_symlink() or path.stat().st_size > 8192:
                 continue
@@ -173,21 +230,31 @@ def read_frame_metadata(root, stamp, pairs, revision):
                                            len(v['siteScans'])), reverse=True)
 
 
-def write_frame_metadata(path, stamp, pairs, metadata, revision):
+def write_frame_metadata(path, stamp, pairs, metadata, revision, index=None):
     """Commit a small sidecar only after tiles exist, beside that frame's tiles."""
     import os
     import tempfile
     value = dict(metadata, stamp=stamp, revision=revision,
                  requestedPairs=sorted([list(p) for p in pairs]))
+    wire = json.dumps(value, sort_keys=True, separators=(',', ':'), allow_nan=False)
+    try:
+        if path.read_text() == wire:
+            if index is not None:
+                index.add(path)
+            return
+    except OSError:
+        pass
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = None
     try:
         with tempfile.NamedTemporaryFile(mode='w', dir=path.parent, suffix='.tmp', delete=False) as output:
             temporary = output.name
-            json.dump(value, output, separators=(',', ':'), allow_nan=False)
+            output.write(wire)
             output.flush()
             os.fsync(output.fileno())
         os.replace(temporary, path)
+        if index is not None:
+            index.add(path)
         directory = os.open(path.parent, os.O_RDONLY)
         try:
             os.fsync(directory)
