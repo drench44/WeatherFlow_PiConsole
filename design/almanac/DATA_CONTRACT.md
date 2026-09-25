@@ -386,14 +386,15 @@ separate increasing `radarHeartbeat` ordinal and never invent a new intent.
 
 A reload follows the accepted runtime intent without claiming. Only a user
 commit with a positive page-local generation may carry
-`radarClaim=<acknowledged owner>` (empty before the first owner). The server
+`radarClaim=<acknowledged owner>` (empty before the first owner) and
+`radarClaimEpoch=<acknowledged epoch>` (zero before the first owner). The server
 compares and swaps ownership and writes the camera atomically under its writer
 lock. Old sessions, generations and reordered heartbeats are rejected before
-intent **or activity** changes. A page whose acknowledgement names another
-session demotes itself, discards its rejected commit and follows the accepted
+camera intent changes. Panel activity uses independent view ordering. A page
+whose acknowledgement names another session demotes itself, discards its rejected commit and follows the accepted
 camera, zoom policy and source. Reconciliation never creates a commit.
-`X-Radar-Intent` returns `{intent, session, generation, acceptedGeneration}`.
-Runtime records include session, generation, resolved numeric zoom, zoomPolicy,
+`X-Radar-Intent` returns `{intent, session, epoch, generation, acceptedGeneration}`.
+Runtime records include session, epoch, generation, resolved numeric zoom, zoomPolicy,
 source, center, acceptedAt and the existing worker sequence. A 250ms debounce
 persists `auto` as policy, not its resolved number. Payload/displayed source is
 never implicitly sent back as preference after a failed attempt.
@@ -406,41 +407,73 @@ rapid zoom presses accumulate from the pending animation target.
 
 ### Remote control
 
-There is one engine view. Any browser on the home network can steer zoom, pan,
+There is one engine view. Browsers on the home network can steer zoom, pan,
 Auto/Region/site, Smooth and v1/v2; the panel follows. Controllers are loopback
 and explicit private ranges: IPv4 `10/8`, `172.16/12`, `192.168/16`; IPv6
 `fc00::/7`, `fe80::/10`; IPv4-mapped IPv6 addresses use their IPv4 classification.
 The peer address is classified with `ipaddress`, not forwarded headers or the
-broader `is_private` category. Other addresses remain read-only and receive no
-control acknowledgement headers. The listener still requires a LAN bind
-(`WFP_BIND=0.0.0.0` for IPv4); the default is loopback.
+broader `is_private` category. IPv4 default gateways are excluded: this network's
+router rewrites forwarded internet requests to its own LAN address. At startup,
+`/proc/net/route` supplies all active default gateways (little-endian IPv4).
+Missing/unreadable route tables yield an empty exclusion set off Linux; tests
+inject route files or the gateway set. Other addresses remain read-only and
+receive no control acknowledgement headers. The listener still requires a LAN
+bind (`WFP_BIND=0.0.0.0` for IPv4); the default is loopback.
 
-Ownership is **last user action wins**, using the compare-and-swap transaction
-above. Passive polls, opening Radar and reloading never claim. A rejected claim
-follows the winning view until another user action. Generation and heartbeat
-fences belong to the owner; delayed old-owner requests cannot overwrite the
-new owner's view. Smooth and renderer writes are explicit pending taps with a
-valid `radarSession`, independent of camera ownership, with the same value
-validation for every controller. Controllers receive `X-Radar-Intent`,
-`X-Radar-Smooth`, `X-Radar-Render` and `X-View-Session` acknowledgements.
+Ownership is **last accepted user action wins**, using the compare-and-swap
+transaction above. Every transfer increments a server ownership `epoch`, also
+stored in the runtime intent and returned in `X-Radar-Intent`. A takeover must
+echo both `radarClaim` (owner session) and `radarClaimEpoch`; an old A→B claim
+cannot succeed after A→B→A. Per-session accepted generation and heartbeat high
+water marks survive ownership changes. A generation at or below its accepted
+high water can never recommit a camera, even with a refreshed claim. Same-owner
+retries may acknowledge the same generation without rewriting it. The table is
+bounded at 4096 accepted sessions for the server lifetime: it never evicts a
+fence, and rejects new sessions at capacity while existing sessions continue.
+After a server restart, the runtime record restores the current owner's epoch
+and generation fence.
 
-`_view_transaction`, `radar_viewing`, `radar_viewed`, and `r=1` render counts
-remain **panel-only (loopback)**, regardless of camera ownership. A LAN page
-cannot flap the live-view marker or vouch for a panel render. Its `touch=1`
-does write presence: attention becomes warm and native v2 is eligible. Source
-expiry runs before recording that touch, so expired manual source choices are
-not revived by presence. Merely leaving a remote browser open is weak evidence.
+Passive polls, opening Radar and reloading never claim. A rejected claim follows
+the winning view until another user action. Smooth and renderer writes are
+explicit pending taps with a valid `radarSession`, independent of camera
+ownership. Controllers receive `X-Radar-Intent`, `X-Radar-Smooth`,
+`X-Radar-Render`, `X-View-Session` and `X-Radar-Panel: 1|0`; only loopback gets
+panel value `1`.
+
+The panel alone may recenter an away camera after the accepted intent is 90
+seconds old, regardless of camera ownership. It must be visible on Radar with
+no active local gesture or pending commit. The timer uses accepted intent age,
+not the age of the last follower poll. It rechecks eligibility before firing
+and posts a normal settled commit, including the epoch claim when taking over.
+Reloaded panels recover this timer; LAN pages never auto-recenter.
+
+`_view_transaction`, `radar_viewing`, `radar_viewed`, `radar_activity` and `r=1`
+render counts are **panel-only (loopback)**. An admitted panel report updates
+activity (including viewport and theme) whenever its view-ordering transaction
+accepts, regardless of camera ownership. The same acceptance gates
+`radar_viewed`, so a delayed radar poll cannot refresh the 15-minute hint after
+the panel left Radar. LAN themes never select the panel's geography prebuild.
+All no-session legacy camera paths (settled camera, ordered legacy intent and
+individual durable preferences) are loopback-only, and stop once a session owns
+the camera. LAN pointer and keyboard input set `touch=1` presence; an unattended
+browser does not. Source expiry runs before recording touch, so expired manual
+choices are not revived by presence.
 
 A per-peer token bucket admits 20 controller polls/second with a burst of 60.
-All write side effects of a controller poll share this admission check, including
-activity, presence, expiry, preferences and panel viewing/render reports.
-Panel-only bad-tile POST reports share the bucket and return 429 when exhausted.
-IPv4 and mapped aliases share a bucket. Buckets use monotonic time, reclaim
-clients idle for 60 seconds and cap storage at 4096 clients (new clients cannot
-write while the table is full). Excess writes are discarded; the `wx.json`
-read and current acknowledgement headers still succeed. Normal polling and
-gestures fit within the limit. Followers never label background acquisition
-as their own “Updating view” or “Switching” operation.
+Activity, presence, expiry, preferences and panel viewing writes share this
+admission check. Panel render counts are never throttled: the watchdog must
+still see successful paints. Panel-only `/radar-bad-tile` reports use a separate
+bucket and return 429 when exhausted. IPv4 and mapped aliases share buckets.
+Buckets use monotonic time, reclaim clients idle for 60 seconds and cap storage
+at 4096 clients (new clients cannot write while the table is full).
+
+Throttled `wx.json` responses still serve data and current acknowledgements,
+with `X-Radar-Throttled: 1`. The page keeps pending camera commits, preference
+taps and presence, renders the data, and retries on the next poll. A throttle
+acknowledgement is not a rejection of ownership. Followers never label camera
+changes they did not make as “Updating view”. Engine-initiated Auto source
+switches do show “Switching to <target> · showing <drawn source>” on every page
+when the refresh target differs from the drawn source.
 
 ### One worker and fixed work order
 
@@ -1218,13 +1251,12 @@ retains progress and idles when complete; station or basemap revision changes
 rebuild it, reusing any existing immutable tiles. An engine restart checks the
 same disk set and does not rerender existing tiles.
 
-Accepted controller `radar_activity` atomically carries `{at, theme, moving, center, zoom}`.
-The displayed camera (`radarGeoCenter`, `radarGeoZoom` on the ordinary poll) is
-the only live zoom/centre intent. Each valid settled report updates the canonical
-runtime intent; moving reports affect geography priority only. The radar worker
-watches that canonical record, so an activity-only camera change supersedes a
-pass exactly like a stepper or pinch. Durable zoom follows; it never overrides
-a settled runtime camera.
+Accepted ordered panel `radar_activity` atomically carries
+`{at, theme, moving, center, zoom}`, independently of camera ownership. The
+displayed camera (`radarGeoCenter`, `radarGeoZoom` on the ordinary poll) becomes
+live zoom/centre intent only through an accepted settled camera commit. Moving
+reports affect geography priority only. The radar worker watches the canonical
+runtime intent; durable zoom follows and never overrides it.
 With a viewed marker and activity age **0–5s**, missing tiles for that settled
 viewport and its margin precede the remaining home queue, in the reported theme.
 The freshness check applies only to viewport priority. Missing, malformed or
@@ -1339,7 +1371,7 @@ has no inertia. Pinch preserves the geographic point under a translating midpoin
 Release snaps to the nearest integer in 160ms about the final focal point;
 reduced motion snaps immediately. The zoom read shows the eventual integer.
 Wheel/double tap use ±1/+1 about the input point; steppers zoom about the centre.
-Recenter and 90-second idle recenter ease to the station over 280ms. Only the
+Recenter and panel-only 90-second idle recenter ease to the station over 280ms. Only the
 plate uses touch-action:none; controls remain target-gated, with ≥44px hits.
 
 The only motion is 160ms zoom, 280ms recenter, inertia, 120ms note opacity,

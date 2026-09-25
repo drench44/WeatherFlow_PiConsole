@@ -251,7 +251,7 @@ const assert=require('node:assert/strict');
 let presenceDirty=false,pollTimer=null,pollController=null,polling=false,pollStart=0,FETCH_MS=4000,failCount=0,pollGen=0,reportRender=false;
 const schedulePoll=()=>{},updateFreshness=()=>{},$=()=>({classList:{contains:()=>true}}),document={hidden:false},clamp=(v,a,b)=>Math.max(a,Math.min(b,v));
 const radarIntent={generation:1,ready:false,owned:true,owner:null,session:'review2-session',heartbeat:0,preferredMode:'mosaic'},radarGesture={state:'idle'},radarZoom={auto:false},radarSmooth={pending:null},radarRender={pending:null},radarBaseStyle={theme:'paper'},radarSource={desired:null};
-const validPayload=()=>true,radarTrace=()=>{};
+const validPayload=()=>true,radarTrace=()=>{},isNum=v=>typeof v==='number'&&Number.isFinite(v);
 let radarCamera={lat:47,lon:-122,zoom:9},requests=[];
 const fetch=url=>{const handlers=[],chain={then(fn){handlers.push(fn);return chain},catch(){return chain}};requests.push({url,handlers});return chain};
 POLL

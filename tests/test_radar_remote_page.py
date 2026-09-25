@@ -13,46 +13,49 @@ def run_remote(body):
     progress = html[html.index('  setInterval(()=>{if(radarView.active)'):html.index('  setInterval(updateFreshness')]
     setup = r'''
 const assert=require('node:assert/strict'),vm=require('node:vm');
-const server={owner:'',generation:0,heartbeat:0,seq:1,smooth:'off',render:'v1',public:false,hold:false,waiting:[],requests:[],
+const server={owner:'',epoch:0,high:new Map(),generation:0,heartbeat:0,throttled:false,seq:1,smooth:'off',render:'v1',public:false,hold:false,waiting:[],requests:[],
  intent:{seq:1,zoom:8,zoomPolicy:'auto',source:'auto',center:{lat:47,lon:-122}},
- handle(q){
+ handle(q,panel=false){
    const session=q.get('radarSession'),generation=Number(q.get('radarGeneration')),heartbeat=Number(q.get('radarHeartbeat'));
    const commit=q.get('radarCommit')==='1',claim=q.get('radarClaim'),own=session===this.owner;
-   if(!this.public&&commit&&generation>0&&(own?generation>this.generation&&heartbeat>this.heartbeat:claim===this.owner)){
+   const high=this.high.get(session)||{generation:0,heartbeat:0};
+   if(!this.public&&!this.throttled&&commit&&generation>high.generation&&heartbeat>high.heartbeat&&(own||claim===this.owner&&q.get('radarClaimEpoch')===String(this.epoch))){
+     if(!own)this.epoch++;
+     this.high.set(session,{generation,heartbeat});
      this.owner=session;this.generation=generation;this.heartbeat=heartbeat;
      const center=q.get('radarGeoCenter').split(',').map(Number);
-     this.intent={seq:++this.seq,session,generation,zoom:Number(q.get('radarGeoZoom')),center:{lat:center[0],lon:center[1]},zoomPolicy:q.get('radarPolicy'),source:q.get('radarSource')||this.intent.source};
+     this.intent={seq:++this.seq,session,generation,epoch:this.epoch,acceptedAt:1000,zoom:Number(q.get('radarGeoZoom')),center:{lat:center[0],lon:center[1]},zoomPolicy:q.get('radarPolicy'),source:q.get('radarSource')||this.intent.source};
    }
-   if(!this.public){if(q.has('radarSmooth'))this.smooth=q.get('radarSmooth');if(q.has('radarRender'))this.render=q.get('radarRender');}
-   const headers=this.public?{}:{'X-Radar-Intent':JSON.stringify({session:this.owner,generation:this.generation,intent:this.intent}),
-     'X-Radar-Smooth':this.smooth,'X-Radar-Render':this.render,'X-View-Session':''};
+   if(!this.public&&!this.throttled){if(q.has('radarSmooth'))this.smooth=q.get('radarSmooth');if(q.has('radarRender'))this.render=q.get('radarRender');}
+   const headers=this.public?{}:{'X-Radar-Intent':JSON.stringify({session:this.owner,epoch:this.epoch,generation:this.generation,intent:this.intent}),
+     'X-Radar-Smooth':this.smooth,'X-Radar-Render':this.render,'X-View-Session':'','X-Radar-Panel':panel?'1':'0','X-Radar-Throttled':this.throttled?'1':null};
    return {ok:true,headers:{get:k=>headers[k]??null},json:()=>Promise.resolve({ts:1000000,radar:{...manifest(),intent:structuredClone(this.intent),sourcePref:this.intent.source}})};
  },
- fetch(url){const q=new URL(url,'http://offline.invalid/').searchParams;this.requests.push(q);
-   if(this.hold){this.hold=false;return new Promise(resolve=>this.waiting.push(()=>resolve(this.handle(q))));}
-   return Promise.resolve(this.handle(q));
+ fetch(url,panel){const q=new URL(url,'http://offline.invalid/').searchParams;this.requests.push(q);
+   if(this.hold){this.hold=false;return new Promise(resolve=>this.waiting.push(()=>resolve(this.handle(q,panel))));}
+   return Promise.resolve(this.handle(q,panel));
  }};
 function manifest(){return {available:true,center:{lat:47,lon:-122},zoomMin:4,zoomMax:10,zoomAutoLevel:8,zoomDesired:8,zoomAuto:true,
  sourceId:'iem-mrms-lcref',sourceMode:'mosaic',sourcePref:'auto',refresh:{state:'idle'},frameCount:0,
  sources:[{mode:'site',available:true,siteId:'KATX'}],nexrad:{id:'KATX',name:'Camano'},tiles:{frames:[]}};}
-function page(){
- const context=vm.createContext({require,server,manifest,assert,URL,structuredClone});
+function page(panel=false){
+ const context=vm.createContext({require,server,manifest,assert,URL,structuredClone,panel});
  vm.runInContext(`
- const timers=new Map(),intervals=[],nodes=new Map();let ordinal=0;
- const performance={now:()=>10000},Date={now:()=>1000000,parse:()=>NaN};
- const setTimeout=fn=>{timers.set(++ordinal,fn);return ordinal},clearTimeout=id=>timers.delete(id),setInterval=fn=>intervals.push(fn);
+ const timers=new Map(),delays=new Map(),intervals=[],nodes=new Map(),events={};let ordinal=0,now=1000000;
+ const performance={now:()=>now},Date={now:()=>now,parse:()=>NaN};
+ const setTimeout=(fn,delay)=>{timers.set(++ordinal,fn);delays.set(ordinal,delay);return ordinal},clearTimeout=id=>timers.delete(id),setInterval=fn=>intervals.push(fn);
  function $(id){if(!nodes.has(id))nodes.set(id,{hidden:false,disabled:false,style:{},dataset:{},textContent:'',children:[],listeners:{},
  classList:{contains:()=>true},addEventListener(k,fn){this.listeners[k]=fn},setAttribute(){},getAttribute(){},removeAttribute(){},
  replaceChildren(...items){this.children=items;this.textContent=items.join('')},append(item){this.children.push(item)},
  hasPointerCapture:()=>false});return nodes.get(id)}
- const document={hidden:false,documentElement:{dataset:{}},querySelector:$,addEventListener(){},createTextNode:s=>s,createElement:()=>$('element')};
+ const document={hidden:false,documentElement:{dataset:{}},querySelector:$,addEventListener(k,fn){(events[k]??=[]).push(fn)},createTextNode:s=>s,createElement:()=>$('element')};
  const window={crypto:require('node:crypto').webcrypto,matchMedia:()=>({matches:true,addEventListener(){}})};
  const OffscreenCanvas=class {constructor(w,h){this.width=w;this.height=h}getContext(){return {clearRect(){},drawImage(){}}}};
  const MutationObserver=class {observe(){}};
  const sessionStorage={getItem:()=>null,setItem(){},removeItem(){}};
  const clamp=(v,a,b)=>Math.max(a,Math.min(b,v)),isNum=v=>typeof v==='number'&&Number.isFinite(v);
  const requestAnimationFrame=()=>1,cancelAnimationFrame=()=>{},activate=()=>{},updateFreshness=()=>{};
- const fetch=url=>server.fetch(url);
+ const fetch=url=>server.fetch(url,panel);
  ` + RADAR + POLL + PROGRESS + `
  radarWake=radarGeoRequest=radarQueueTiles=radarOverlayBuild=radarOverlayPaint=radarMemory=()=>{};
  radarBaseStyle.theme='paper';radarView.active=true;radarView.data=manifest();radarView.refresh={state:'idle'};
@@ -124,10 +127,10 @@ viewer.run("assert.equal($('rad-v1').disabled,true);assert.equal($('rad-v2').dis
 ''')
 
 
-def test_follower_buffering_and_engine_auto_switch_never_claim_to_be_user_updates():
+def test_follower_auto_switch_reports_source_without_claiming_camera():
     run_remote(r'''
 const p=page();await p.poll();
-p.run("intervals[0]();radarView.refresh={state:'newest',targetMode:'site'};assert.doesNotMatch(caption(),/Updating view|Switching/);radarView.pendingSource={data:{sourceMode:'site'},frames:[]};assert.doesNotMatch(caption(),/Updating view|Switching/)");
+p.run("intervals[0]();radarView.refresh={state:'newest',targetMode:'site'};assert.match(caption(),/^Switching to Camano radar · showing Region/);radarView.pendingSource={data:{sourceMode:'site'},frames:[]};assert.match(caption(),/^Switching to Camano radar · showing Region/)");
 await p.poll();assert.ok(server.requests.every(q=>!q.has('radarClaim')&&!q.has('radarCommit')));
 ''')
 

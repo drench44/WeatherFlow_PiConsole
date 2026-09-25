@@ -2721,7 +2721,7 @@
   var radarCamera=null, radarSource={desired:null}, radarZoom={auto:true}, radarSmooth={value:null,pending:null}, radarRender={value:null,pending:null};
   /* crypto.randomUUID exists only in a secure context (https or localhost); a LAN viewer on plain http would throw here and stop the whole board. */
   function radarSessionId(){var c=window.crypto;if(c&&typeof c.randomUUID==='function')return c.randomUUID();return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g,function(ch){var r=(c&&typeof c.getRandomValues==='function'?c.getRandomValues(new Uint8Array(1))[0]:Math.random()*256)&15;return (ch==='x'?r:(r&3|8)).toString(16);});}
-  var radarIntent={session:radarSessionId(),generation:0,owner:null,owned:false,heartbeat:0,preferredMode:null,localSeq:0,ready:false,timer:null,postedAt:0};
+  var radarIntent={session:radarSessionId(),generation:0,owner:null,epoch:null,panel:false,owned:false,heartbeat:0,preferredMode:null,localSeq:0,ready:false,timer:null,postedAt:0};
   var radarSwitch=null, RAD_SWITCH_MS=20000, RAD_TILE_MS=2500, radarJobs=new Set();
   function radarTrace(phase,extra={}){var row={phase,at:performance.now(),generation:radarIntent.generation,...extra};(radarMetrics.path||(radarMetrics.path=[])).push(row);if(radarMetrics.path.length>256)radarMetrics.path.shift();}
   function radarSwitchStart(requiresIntent=true){clearTimeout(radarSwitch?.timer);radarSwitch={start:performance.now(),generation:radarIntent.generation,requiresIntent,overdue:false,advanced:false};var owner=radarSwitch;owner.timer=setTimeout(()=>{if(radarSwitch===owner&&!owner.advanced){owner.overdue=true;radarTrace('switchDeadline');radarSourceRender();radarLoopSync();radarNoteRender();}},RAD_SWITCH_MS);radarTrace('tap');}
@@ -3179,7 +3179,19 @@
   function radarEase(target,duration,focal){radarBegin();if(radarReduced()){radarCameraSet(target);radarSettle();return;}radarGesture.animation={from:{...radarCamera},target,duration,start:performance.now(),focal};radarWake();}
   function radarZoomChange(step,focal={x:478,y:245}){if(radarIntent.writable===false||!radarView.active||!radarCamera)return;radarSwitchStart();radarSourceRender();var r=radarView.data,z=step===0?clamp(r.zoomAutoLevel,r.zoomMin,10):clamp(Math.round(radarGesture.animation?.target.zoom??radarCamera.zoom)+step,r.zoomMin,10);radarZoom.auto=step===0;radarEase(radarFocal(radarCamera,z,focal),160,focal);}
   function radarRecenter(){if(radarIntent.writable!==false&&radarView.active&&radarCamera)radarEase({...radarView.data.center,zoom:radarCamera.zoom},280);}
-  function radarIdleSync(reset){if(reset){clearTimeout(radarGesture.idleTimer);radarGesture.idleTimer=null;}if(!radarView.active||document.hidden||!radarCamera)return;var home=radarView.data.center,away=Math.hypot(radarCamera.lat-home.lat,radarCamera.lon-home.lon)>1e-8;$('rad-recenter').hidden=!away;if(radarIntent.owned&&away&&radarGesture.state==='idle'&&!radarGesture.idleTimer)radarGesture.idleTimer=setTimeout(radarRecenter,90000);}
+  function radarIdleSync(reset){
+    if(reset){clearTimeout(radarGesture.idleTimer);radarGesture.idleTimer=null;}
+    if(!radarView.active||document.hidden||!radarCamera||!radarView.data?.center)return;
+    var home=radarView.data.center,away=Math.hypot(radarCamera.lat-home.lat,radarCamera.lon-home.lon)>1e-8;
+    $('rad-recenter').hidden=!away;
+    var clock=radarIntent.acceptedClock;
+    if(!radarIntent.panel||radarIntent.writable===false||!away||radarGesture.state!=='idle'||radarIntent.ready||!clock)return;
+    var remaining=Math.max(0,90000-clock.age-(performance.now()-clock.at));
+    if(!radarGesture.idleTimer)radarGesture.idleTimer=setTimeout(()=>{
+      radarGesture.idleTimer=null;
+      if(radarIntent.panel&&radarIntent.writable!==false&&radarView.active&&!document.hidden&&radarGesture.state==='idle'&&!radarIntent.ready&&radarCamera&&radarView.data?.center&&radarIntent.acceptedClock===clock)radarRecenter();
+    },remaining);
+  }
   function radarGestureCancel(){
     var moved=radarGesture.state!=='idle',ids=[...radarGesture.pointers.keys()];radarGesture.pointers.clear();
     for(var id of ids)if($('rad-plate').hasPointerCapture(id))$('rad-plate').releasePointerCapture(id);
@@ -3206,7 +3218,7 @@
   $('rad-plate').addEventListener('wheel',e=>{if(!radarView.active||e.target.closest(RAD_CONTROLS)||!e.deltaY)return;e.preventDefault();radarZoomChange(e.deltaY<0?1:-1,radarPointer(e));},{passive:false});
   $('rad-plate').addEventListener('dblclick',e=>{if(!e.target.closest(RAD_CONTROLS))radarZoomChange(1,radarPointer(e));});
   $('rad-recenter').addEventListener('click',radarRecenter);$('rad-zoom-in').addEventListener('click',()=>radarZoomChange(1));$('rad-zoom-out').addEventListener('click',()=>radarZoomChange(-1));$('rad-zoom-reset').addEventListener('click',()=>radarZoomChange(0));
-  document.addEventListener('keydown',e=>{if(!radarView.active||e.ctrlKey||e.metaKey||e.altKey||e.target.isContentEditable||/^(INPUT|TEXTAREA|SELECT)$/.test(e.target.tagName))return;var step={'+':1,'=':1,'-':-1,'−':-1,'_':-1,'0':0}[e.key];if(step!==undefined){e.preventDefault();radarZoomChange(step);}});
+  document.addEventListener('keydown',e=>{if(!radarView.active||e.ctrlKey||e.metaKey||e.altKey||e.target.isContentEditable||/^(INPUT|TEXTAREA|SELECT)$/.test(e.target.tagName))return;var step={'+':1,'=':1,'-':-1,'−':-1,'_':-1,'0':0}[e.key];if(step!==undefined&&radarIntent.writable!==false){e.preventDefault();presenceDirty=true;radarZoomChange(step);}});
   document.addEventListener('visibilitychange',()=>{if(document.hidden){radarGestureCancel();radarRelease();}else if(radarView.active)radarActivate();poll(true);});
   window.matchMedia('(prefers-reduced-motion: reduce)').addEventListener('change',()=>{radarView.blend=null;radarView.singleSweep=false;radarView.current=radarView.good;radarEchoDirty=true;if(radarGesture.inertia)radarSettle();radarLoopSync();});
   function radarFollowIntent(intent){
@@ -3223,7 +3235,7 @@
       radarCameraSet({...c,zoom:z});radarSettle(false);
     }else {radarIntent.policy=radarZoom.auto?'auto':'manual';radarZoomRender();}
   }
-  function radarPostIntent(immediate=false){if(radarIntent.writable===false)return;radarIntent.claim=radarIntent.owner;clearTimeout(radarIntent.timer);radarIntent.postedAt=Date.now();radarIntent.generation++;radarIntent.ready=true;
+  function radarPostIntent(immediate=false){if(radarIntent.writable===false)return;radarIntent.claim=radarIntent.owner;radarIntent.claimEpoch=radarIntent.epoch;clearTimeout(radarIntent.timer);radarIntent.postedAt=Date.now();radarIntent.generation++;radarIntent.ready=true;
     if(!radarIntent.preferredMode)radarIntent.preferredMode=radarView.data?.sourcePref||'auto';
     if(radarSwitch){radarSwitch.generation=radarIntent.generation;radarSwitch.requiresIntent=true;radarSwitch.committed=true;}
     radarIntent.timer=setTimeout(()=>{poll(immediate);},immediate?0:120);}
@@ -3468,7 +3480,7 @@
     if (r.sourceFallback==='site-zoom-floor' && site && radarSource.desired!=='mosaic') exceptions.push('wider than '+site.siteId+' reaches');
     var switching=radarSource.desired,retry=radarPendingRetry();
     var target=radarView.pendingSource?.data?.sourceMode||radarView.refresh?.targetMode;
-    if((radarSource.desired||radarSwitch?.requiresIntent)&&(radarView.pendingSource||pref==='auto'&&target&&target!==mode))switching=target;
+    if(target&&target!==mode&&(radarView.pendingSource||pref==='auto'))switching=target;
     if(radarView.pendingSource?.variantOnly){cap.replaceChildren(document.createTextNode('Sharpening to '+(radarView.pendingSource.data.native?'v2':'v1')+' · showing '+(r.native?'v2':'v1')+' · '));var credit=document.createElement('a');credit.id='rad-attrib';credit.className='rad-attrib';credit.textContent=rainviewer?'RainViewer':r.native?'NOAA Level III':'IEM / NOAA';cap.append(credit);radarNoteRender();return;}
     if(switching){cap.replaceChildren(document.createTextNode((retry?'Retrying ':'Switching to ')+(switching==='site'?choice.subject:switching==='auto'?'Auto':'Region')+(retry?' · '+retry.reason:'')+' · showing '+(mode==='site'?info.subject:'Region')+' · '));var credit=document.createElement('a');credit.id='rad-attrib';credit.className='rad-attrib';credit.textContent=rainviewer?'RainViewer':r.native?'NOAA Level III':'IEM / NOAA';cap.append(credit);radarNoteRender();return;}
     if(radarSwitch?.requiresIntent||retry){cap.replaceChildren(document.createTextNode((retry?'Retrying view · '+retry.reason:'Updating view')+' · showing '+(mode==='site'?info.subject:'Region')+' · '));var credit=document.createElement('a');credit.id='rad-attrib';credit.className='rad-attrib';credit.textContent=rainviewer?'RainViewer':r.native?'NOAA Level III':'IEM / NOAA';cap.append(credit);radarNoteRender();return;}
@@ -3527,9 +3539,10 @@
 
   /* A human touched the screen, on any tab: the next poll tells the engine
      (its attention tiers warm the radar before the Radar tab is even tapped).
-     Pointer events only; a browser left open never counts as a person. */
+     Pointer and keyboard input count; a browser left open never counts as a person. */
   var presenceDirty = false;
   document.addEventListener("pointerdown", function () { presenceDirty = true; }, { passive: true, capture: true });
+  document.addEventListener("keydown", function () { presenceDirty = true; }, { passive: true, capture: true });
   var POLL_MS      = 2000;
   var pollTimer = null, pollController = null;
   function schedulePoll() {
@@ -3574,7 +3587,7 @@
     var radarActive = $("s-radar").classList.contains("active") && !document.hidden;
     var sentIntentGeneration=radarIntent.generation,zoomQuery = "", posting=radarIntent.writable!==false && radarIntent.ready && (radarIntent.owned||radarIntent.owner!==null) && radarActive && radarGesture.state==='idle' && radarCamera;
     zoomQuery=radarActive&&radarCamera?'&radarSession='+radarIntent.session+'&radarHeartbeat='+(++radarIntent.heartbeat)+'&radarGeneration='+(radarIntent.owned||posting?radarIntent.generation:0):'';
-    if(posting&&!radarIntent.owned)zoomQuery+='&radarClaim='+encodeURIComponent(radarIntent.claim??radarIntent.owner);
+    if(posting&&!radarIntent.owned)zoomQuery+='&radarClaim='+encodeURIComponent(radarIntent.claim??radarIntent.owner)+'&radarClaimEpoch='+encodeURIComponent(radarIntent.claimEpoch??radarIntent.epoch);
     var sentRadarSource=posting&&radarIntent.sourceDirty?radarIntent.preferredMode:null;
     if(posting){zoomQuery+='&radarCommit=1&radarPolicy='+(radarZoom.auto?'auto':'manual');if(sentRadarSource!==null)zoomQuery+='&radarSource='+sentRadarSource;}
     var geoQuery=radarActive&&radarCamera?'&radarGeoZoom='+clamp(Math.round(radarCamera.zoom),4,10)+'&radarGeoCenter='+encodeURIComponent(radarCamera.lat.toFixed(10)+','+(((radarCamera.lon+180)%360+360)%360-180).toFixed(10)):'';
@@ -3584,37 +3597,40 @@
       .then(function (r) {
         if (!r.ok) throw new Error("HTTP " + r.status);
         var srv = Date.parse(r.headers.get("Date") || "");   /* the producer's clock, 1 s resolution */
-        return r.json().then(function (d) { return { d: d, srvMs: srv, ack:JSON.parse(r.headers.get('X-Radar-Intent')||'null'), smooth:r.headers.get('X-Radar-Smooth'), render:r.headers.get('X-Radar-Render'), viewOwner:r.headers.get('X-View-Session') }; });
+        return r.json().then(function (d) { return { d: d, srvMs: srv, ack:JSON.parse(r.headers.get('X-Radar-Intent')||'null'), smooth:r.headers.get('X-Radar-Smooth'), render:r.headers.get('X-Radar-Render'), viewOwner:r.headers.get('X-View-Session'), panel:r.headers.get('X-Radar-Panel')==='1', throttled:r.headers.get('X-Radar-Throttled')==='1' }; });
       })
       .then(function (x) {
+        if(x.throttled&&touched)presenceDirty=true;
         if (gen !== pollGen) return;              /* superseded; this one was abandoned */
         if(x.viewOwner!=null)radarIntent.viewOwner=x.viewOwner;
         var d = x.d;
         if (!validPayload(d)) throw new Error("bad payload");
-        radarIntent.writable=!!x.ack;
+        radarIntent.writable=!!x.ack;radarIntent.panel=x.panel;
         if(x.ack){
-          radarIntent.owner=x.ack.session;radarIntent.owned=x.ack.session===radarIntent.session;
+          radarIntent.owner=x.ack.session;radarIntent.epoch=x.ack.epoch;radarIntent.owned=x.ack.session===radarIntent.session;
           radarIntent.accepted=x.ack.intent;
+          radarIntent.acceptedClock=isNum(x.ack.intent.acceptedAt)?{age:Math.max(0,(isFinite(x.srvMs)?x.srvMs:Date.now())-x.ack.intent.acceptedAt*1000),at:performance.now()}:null;
           if(!radarIntent.owned){
             // Only discard the rejected request's generation. A gesture begun
             // during this request remains a user action of its own.
-            if(posting&&radarIntent.generation===sentIntentGeneration){
+            if(!x.throttled&&posting&&radarIntent.generation===sentIntentGeneration){
               clearTimeout(radarIntent.timer);radarIntent.ready=false;radarIntent.sourceDirty=false;
             }
             if(!radarIntent.ready&&radarGesture.state==='idle')radarFollowIntent(x.ack.intent);
-          }else if(x.ack.generation===sentIntentGeneration&&radarIntent.generation===sentIntentGeneration){
+          }else if(!x.throttled&&x.ack.generation===sentIntentGeneration&&radarIntent.generation===sentIntentGeneration){
             if(sentRadarSource!==null&&radarIntent.preferredMode===sentRadarSource)radarIntent.sourceDirty=false;
             if(!radarIntent.sourceDirty)radarIntent.ready=false;
             if(x.ack.intent.source&&!radarSource.desired&&!radarIntent.sourceDirty)radarIntent.preferredMode=x.ack.intent.source;
             radarTrace('accepted');
           }
         }else {radarIntent.ready=false;radarIntent.owned=false;radarFollowIntent(d.radar?.intent);}
-        if(x.smooth==='on'||x.smooth==='off'){var smooth=x.smooth==='on';if(radarSmooth.pending===smooth)radarSmooth.pending=null;if(radarSmooth.pending===null)radarSmooth.value=smooth;}
+        if(x.smooth==='on'||x.smooth==='off'){var smooth=x.smooth==='on';if(!x.throttled&&radarSmooth.pending===smooth)radarSmooth.pending=null;if(radarSmooth.pending===null)radarSmooth.value=smooth;}
         else if(radarSmooth.value===null)radarSmooth.value=!!d.radar?.smooth;
-        if(x.render==='v1'||x.render==='v2'){radarRender.writable=true;if(radarRender.pending===x.render)radarRender.pending=null;if(radarRender.pending===null)radarRender.value=x.render;}
+        if(x.render==='v1'||x.render==='v2'){radarRender.writable=true;if(!x.throttled&&radarRender.pending===x.render)radarRender.pending=null;if(radarRender.pending===null)radarRender.value=x.render;}
         else {radarRender.writable=false;radarRender.pending=null;radarRender.value=d.radar?.renderPref||(d.radar?.native?'v2':'v1');}
         ['v1','v2'].forEach(v=>$('rad-'+v).disabled=radarRender.writable===false);
         render(d);                                /* may throw — book success AFTER it */
+        radarIdleSync(true);
 
         lastRenderMs = Date.now();
         /* file age at receipt on the SERVER's clock (falls back to ours), then

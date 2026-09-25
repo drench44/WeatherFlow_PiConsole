@@ -18,7 +18,7 @@ def server(tmp_path, monkeypatch):
 @pytest.mark.parametrize('generation', [1, 2])
 def test_reordered_motion_is_rejected_after_user_claim(server, generation):
     session = 'buffer-session-12345'
-    params = dict(radarSession=[session], radarGeneration=['1'], radarHeartbeat=['1'], radarClaim=[''], radarCommit=['1'], radarPolicy=['manual'])
+    params = dict(radarSession=[session], radarGeneration=['1'], radarHeartbeat=['1'], radarClaim=[''], radarClaimEpoch=['0'], radarCommit=['1'], radarPolicy=['manual'])
     activity = dict(moving=False, zoom=8, center=dict(lat=47, lon=-122))
     assert server._camera_transaction(activity, params)
     params.update(radarGeneration=[str(generation)], radarCommit=['1'], radarPolicy=['manual'], radarSource=['site'])

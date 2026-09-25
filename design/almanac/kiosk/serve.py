@@ -70,9 +70,32 @@ def _is_loopback(address):
     return ip is not None and ip.is_loopback
 
 
+def _default_gateways(route_path='/proc/net/route'):
+    """Read Linux's little-endian IPv4 routes; injectable/off-Linux safe."""
+    gateways = set()
+    try:
+        lines = Path(route_path).read_text().splitlines()[1:]
+    except (OSError, UnicodeError):
+        return gateways
+    for line in lines:
+        fields = line.split()
+        try:
+            if (fields[1] == '00000000' and fields[7] == '00000000'
+                    and int(fields[3], 16) & 3 == 3):
+                ip = ipaddress.IPv4Address(int(fields[2], 16).to_bytes(4, 'little'))
+                if not ip.is_unspecified:
+                    gateways.add(ip)
+        except (IndexError, ValueError, OverflowError):
+            continue
+    return gateways
+
+
+_DEFAULT_GATEWAYS = _default_gateways()
+
+
 def _is_controller(address):
     ip = _client_ip(address)
-    return ip is not None and (ip.is_loopback or any(ip in net for net in _CONTROLLER_NETWORKS))
+    return ip is not None and ip not in _DEFAULT_GATEWAYS and (ip.is_loopback or any(ip in net for net in _CONTROLLER_NETWORKS))
 
 
 def _is_private_ipv4(address):
@@ -85,21 +108,24 @@ def _is_private_ipv4(address):
 _CONTROL_RATE, _CONTROL_BURST = 20.0, 60.0
 _CONTROL_CLIENTS = 4096
 _control_buckets = {}
+_bad_tile_buckets = {}
 
 
-def _allow_control_write(address):
+def _allow_control_write(address, buckets=None):
+    if buckets is None:
+        buckets = _control_buckets
     now = time.monotonic()
     key = str(_client_ip(address))
-    if key not in _control_buckets:
-        for stale, (_, at) in list(_control_buckets.items()):
+    if key not in buckets:
+        for stale, (_, at) in list(buckets.items()):
             if now - at >= 60:
-                del _control_buckets[stale]
-        if len(_control_buckets) >= _CONTROL_CLIENTS:
+                del buckets[stale]
+        if len(buckets) >= _CONTROL_CLIENTS:
             return False
-    tokens, at = _control_buckets.get(key, (_CONTROL_BURST, now))
+    tokens, at = buckets.get(key, (_CONTROL_BURST, now))
     tokens = min(_CONTROL_BURST, tokens + max(0, now-at)*_CONTROL_RATE)
     allowed = tokens >= 1
-    _control_buckets[key] = (tokens-1 if allowed else tokens, now)
+    buckets[key] = (tokens-1 if allowed else tokens, now)
     return allowed
 
 
@@ -394,6 +420,34 @@ _camera_persist_timer = None
 # reconcile without changing ownership. The handler holds _count_lock across
 # comparison, durable runtime intent replacement and activity publication.
 _radar_owner = None
+# Per-session fences for requests that arrive late. Stale takeovers are already
+# refused by the ownership epoch (every transfer advances it, and a claim must
+# echo the current one), and the owner's own fences live in _radar_owner, so an
+# idle non-owner entry only guards the short window in which its requests can
+# still be in flight. Entries idle longer than that age out; at capacity the
+# least recently seen non-owner goes. Every page load is a new session, so a
+# table that never evicted would eventually lock every new page out of control.
+_RADAR_SESSIONS = 4096
+_RADAR_SESSION_IDLE_SEC = 600
+_radar_high_water = {}
+
+
+def _prune_high_water(owner_session, incoming):
+    now = time.monotonic()
+    for key in [k for k, v in _radar_high_water.items()
+                if k != owner_session and now - v.get('seen', now) > _RADAR_SESSION_IDLE_SEC]:
+        del _radar_high_water[key]
+    while incoming not in _radar_high_water and len(_radar_high_water) >= _RADAR_SESSIONS:
+        victims = [k for k in _radar_high_water if k != owner_session]
+        if not victims:
+            return
+        del _radar_high_water[min(victims, key=lambda k: _radar_high_water[k].get('seen', 0))]
+
+
+def _camera_owner(record):
+    return _radar_owner or dict(session=record.get('session', ''),
+                               generation=record.get('generation', 0),
+                               epoch=record.get('epoch', 0))
 
 
 def _camera_transaction(activity, params):
@@ -402,7 +456,7 @@ def _camera_transaction(activity, params):
         return False
     if len(params.get('radarGeneration', [])) != 1:
         return False
-    if any(len(params[k]) != 1 for k in ('radarHeartbeat', 'radarCommit', 'radarPolicy', 'radarSource', 'radarClaim') if k in params):
+    if any(len(params[k]) != 1 for k in ('radarHeartbeat', 'radarCommit', 'radarPolicy', 'radarSource', 'radarClaim', 'radarClaimEpoch') if k in params):
         return False
     session = params['radarSession'][0]
     generation = params['radarGeneration'][0]
@@ -411,31 +465,43 @@ def _camera_transaction(activity, params):
         return False
     generation, heartbeat = int(generation), int(heartbeat)
     old = _read_radar_intent()
-    owner = _radar_owner or dict(session=old.get('session', ''), generation=old.get('generation', 0))
+    owner = _camera_owner(old)
+    if owner['session'] and owner['session'] not in _radar_high_water:
+        _prune_high_water(owner['session'], owner['session'])
+        _radar_high_water[owner['session']] = dict(generation=owner['generation'], heartbeat=owner.get('heartbeat', 0),
+                                                   seen=time.monotonic())
+    high = _radar_high_water.get(session, {})
+    floor = max(high.get('generation', 0), owner['generation'] if session == owner['session'] else 0)
+    last_heartbeat = max(high.get('heartbeat', 0), owner.get('heartbeat', 0) if session == owner['session'] else 0)
     claiming = session != owner['session']
     commit = params.get('radarCommit') == ['1']
     if claiming:
-        if not commit or generation == 0 or params.get('radarClaim') != [owner['session']]:
+        if (not commit or generation <= floor or heartbeat <= last_heartbeat
+                or params.get('radarClaim') != [owner['session']]
+                or params.get('radarClaimEpoch') != [str(owner.get('epoch', 0))]):
             return False
-    elif generation < owner['generation'] or heartbeat and heartbeat <= owner.get('heartbeat', 0):
+    elif generation < floor or heartbeat <= last_heartbeat:
         return False
-    if commit and (claiming or generation > owner['generation']):
+    _prune_high_water(owner['session'], session)
+    if commit and (claiming or generation > floor):
         if activity.get('moving') or 'zoom' not in activity or 'center' not in activity:
             return False
         if ('radarSource' in params and params['radarSource'] not in (['auto'], ['site'], ['mosaic'])) or params.get('radarPolicy') not in (['auto'], ['manual']):
             return False
-        if not _write_settled_camera(activity, params):
+        epoch = owner.get('epoch', 0) + int(claiming)
+        if not _write_settled_camera(activity, params, epoch):
             return False
-        owner = dict(session=session, generation=generation)
+        owner = dict(session=session, generation=generation, epoch=epoch)
     elif generation != owner['generation']:
         return False
     if heartbeat:
         owner['heartbeat'] = heartbeat
     _radar_owner = owner
+    _radar_high_water[session] = dict(generation=generation, heartbeat=heartbeat, seen=time.monotonic())
     return True
 
 
-def _write_settled_camera(activity, params):
+def _write_settled_camera(activity, params, epoch=None):
     """Activity is the only live camera input; durable zoom is an output."""
     global _camera_persist_timer
     if activity.get('moving') or 'zoom' not in activity or 'center' not in activity:
@@ -457,7 +523,7 @@ def _write_settled_camera(activity, params):
         record['sourceAcceptedAt'] = old.get('sourceAcceptedAt', old.get('acceptedAt'))
     if 'radarSession' in params:
         record.update(session=params['radarSession'][0], generation=int(params['radarGeneration'][0]),
-                      zoomPolicy=params['radarPolicy'][0], acceptedAt=time.time())
+                      zoomPolicy=params['radarPolicy'][0], acceptedAt=time.time(), epoch=epoch)
     if all(old.get(k) == v for k, v in record.items()):
         return True
     record['seq'] = min(999999999999, max(old['seq']+1, int(time.time()*100)))
@@ -515,7 +581,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             if not re.fullmatch(r'radar/t/[a-f0-9]{12}/(?:iem-mrms-lcref|iem-nexrad-n0b|rainviewer)/(?:-|[A-Z0-9]{4}|M[a-f0-9]{24})/[0-9]{12}/[0-9]{1,2}/[0-9]{1,4}/[0-9]{1,4}\.png',path,re.ASCII):
                 raise ValueError('tile path')
             with _count_lock:
-                if not _allow_control_write(self.client_address[0]):
+                if not _allow_control_write(self.client_address[0], _bad_tile_buckets):
                     self.send_error(429, 'Control write rate exceeded')
                     return
                 marker = os.path.join(os.path.dirname(DATA),'radar_bad_tiles')
@@ -532,6 +598,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
 
     def do_GET(self):
         self._immutable_radar = False
+        self._radar_throttled = False
         path, _, query = self.path.partition("?")
         _note_lan_viewer(self.client_address[0])
         if path == "/health":
@@ -547,19 +614,22 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 # A poll may expire a source or update viewing without a
                 # camera commit. Gate all its side effects, never the read.
                 admitted = controller and _allow_control_write(address)
+                self._radar_throttled = controller and not admitted
+                view_accepted = False
+                if panel and params.get('r') == ['1']:
+                    _renders += 1
                 if admitted:
-                    if panel and params.get('r') == ['1']:
-                        _renders += 1
                     _expire_radar_source()
                     camera_report = viewed_radar and params.get('radarTheme') in (['paper'], ['night'])
                     ordered = 'radarSession' in params
-                    accepted = _camera_transaction(_radar_activity(params), params) if ordered and camera_report else not ordered and _radar_owner is None and not _read_radar_intent().get('session')
-                    if panel and _view_transaction(params):
+                    accepted = _camera_transaction(_radar_activity(params), params) if ordered and camera_report else panel and not ordered and _radar_owner is None and not _read_radar_intent().get('session')
+                    view_accepted = panel and _view_transaction(params)
+                    if view_accepted:
                         _write_radar_viewing(viewed_radar)
                     if _valid_radar_session(params):
                         _write_radar_preference('radar_smooth', params.get('radarSmooth', []))
                         _write_radar_preference('radar_render', params.get('radarRender', []))
-                    if camera_report and accepted:
+                    if camera_report and view_accepted:
                         marker=os.path.join(os.path.dirname(DATA),'radar_activity');tmp=marker+'.tmp'
                         try:
                             with open(tmp,'w') as f:json.dump(_radar_activity(params),f)
@@ -575,7 +645,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                         _write_radar_source(params.get('radarSource', []))
                 if admitted and params.get('touch') == ['1']:
                     _note_presence()
-                if admitted and panel and viewed_radar:
+                if view_accepted and viewed_radar:
                     # Share only a timestamp with the emitter. Serialize writers
                     # and replace atomically so it never reads a partial epoch.
                     marker = os.path.join(os.path.dirname(DATA), "radar_viewed")
@@ -623,12 +693,15 @@ class Handler(http.server.SimpleHTTPRequestHandler):
         if self.path.split('?')[0] == '/wx.json' and _is_controller(self.client_address[0]):
             with _count_lock:
                 record = _read_radar_intent()
-                owner = _radar_owner or dict(session=record.get('session', ''), generation=record.get('generation', 0))
+                owner = _camera_owner(record)
                 try:
                     with open(os.path.join(os.path.dirname(DATA), 'radar_smooth')) as stream:
                         smooth = stream.read(128).strip() == 'on'
                 except (OSError, UnicodeError):
                     smooth = False
+                if getattr(self, '_radar_throttled', False):
+                    self.send_header('X-Radar-Throttled', '1')
+                self.send_header('X-Radar-Panel', '1' if _is_loopback(self.client_address[0]) else '0')
                 self.send_header('X-Radar-Smooth', 'on' if smooth else 'off')
                 render = render_preference(Path(DATA).with_name('radar_render'))
                 self.send_header('X-Radar-Render', render)

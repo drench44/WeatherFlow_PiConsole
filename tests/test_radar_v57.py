@@ -17,8 +17,10 @@ from tests.test_freshness_health import serve_at, _get  # noqa: F401
 
 def transaction(module, session, gen, source='site', zoom=8, claim=None, commit=True, policy='manual'):
     params = dict(radarSession=[session], radarGeneration=[str(gen)], radarSource=[source],
-                  radarPolicy=[policy], radarCommit=['1'] if commit else ['0'])
-    if claim is not None: params['radarClaim'] = [claim]
+                  radarHeartbeat=[str(gen)], radarPolicy=[policy], radarCommit=['1'] if commit else ['0'])
+    if claim is not None:
+        params['radarClaim'] = [claim]
+        params['radarClaimEpoch'] = [str(module._camera_owner(module._read_radar_intent())['epoch'])]
     activity = dict(at=time.time(), theme='paper', moving=False, zoom=zoom, center=dict(lat=47.61, lon=-122.33))
     with module._count_lock:
         return module._camera_transaction(activity, params)
@@ -46,12 +48,12 @@ def test_motion_heartbeat_cannot_reorder_same_generation_activity(serve_at, tmp_
     module, url = serve_at({})
     session='heartbeat-owner-12345'
     assert transaction(module,session,1,claim='')
-    base=url+'/wx.json?view=radar&radarSession='+session+'&radarGeneration=1&radarTheme=paper&radarGeoZoom=8&radarGeoCenter=47.61,-122.33'
-    _get(base+'&radarHeartbeat=3&radarMoving=0')
+    base=url+'/wx.json?view=radar&radarSession='+session+'&viewSession='+session+'&radarGeneration=1&radarTheme=paper&radarGeoZoom=8&radarGeoCenter=47.61,-122.33'
+    _get(base+'&viewSeq=3&radarHeartbeat=3&radarMoving=0')
     before=(tmp_path/'radar_activity').read_text()
-    _get(base+'&radarHeartbeat=2&radarMoving=1')
+    _get(base+'&viewSeq=2&radarHeartbeat=2&radarMoving=1')
     assert (tmp_path/'radar_activity').read_text()==before
-    _get(base+'&radarHeartbeat=4&radarMoving=1')
+    _get(base+'&viewSeq=4&radarHeartbeat=4&radarMoving=1')
     assert json.loads((tmp_path/'radar_activity').read_text())['moving']
     assert module._read_radar_intent()['generation']==1
 

@@ -14,6 +14,7 @@ def server(tmp_path, monkeypatch):
     spec = importlib.util.spec_from_file_location('remote_serve', Path('design/almanac/kiosk/serve.py'))
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
+    monkeypatch.setattr(module, '_DEFAULT_GATEWAYS', set())
     module.DATA = str(tmp_path / 'wx.json')
     (tmp_path / 'wx.json').write_text('{"ts":1}')
     # Persistence is checked explicitly; no timer outlives its fixture.
@@ -39,9 +40,9 @@ def request(server, address='192.168.1.20', **params):
     return h.headers_sent
 
 
-def camera(session=A, generation=1, claim='', **extra):
+def camera(session=A, generation=1, claim='', epoch=0, **extra):
     return dict(radarSession=session, radarGeneration=generation, radarHeartbeat=generation,
-                radarClaim=claim, radarCommit=1, radarPolicy='manual', radarSource='auto',
+                radarClaim=claim, radarClaimEpoch=epoch, radarCommit=1, radarPolicy='manual', radarSource='auto',
                 view='radar', radarTheme='paper', radarGeoZoom=8,
                 radarGeoCenter='47,-122', radarMoving=0, **extra)
 
@@ -55,10 +56,13 @@ def camera(session=A, generation=1, claim='', **extra):
 def test_controllers_can_commit_and_receive_all_acknowledgements(server, tmp_path, address):
     assert server._is_controller(address)
     headers = request(server, address, **camera())
-    assert set(headers) == {'X-Radar-Intent', 'X-Radar-Smooth', 'X-Radar-Render', 'X-View-Session'}
+    assert set(headers) == {'X-Radar-Intent', 'X-Radar-Smooth', 'X-Radar-Render', 'X-View-Session', 'X-Radar-Panel'}
     assert json.loads(headers['X-Radar-Intent'])['session'] == A
     assert server._read_radar_intent()['zoom'] == 8
-    assert json.loads((tmp_path/'radar_activity').read_text())['zoom'] == 8
+    if server._is_loopback(address):
+        assert json.loads((tmp_path/'radar_activity').read_text())['zoom'] == 8
+    else:
+        assert not (tmp_path/'radar_activity').exists()
     server._camera_persist_timer.function()
     assert (tmp_path/'radar_zoom').read_text().strip() == '8'
 
@@ -80,27 +84,28 @@ def test_last_user_commit_wins_and_old_owner_cannot_write(server):
     request(server, **camera())
     before = server._read_radar_intent()
     # Reload/poll claims, even with the right owner, are inert.
-    request(server, **dict(camera(B, 0, A), radarCommit=0))
+    request(server, **dict(camera(B, 0, A, epoch=1), radarCommit=0))
     assert server._read_radar_intent() == before
-    request(server, **dict(camera(B, 1, A), radarGeoZoom=6, radarSource='mosaic'))
+    request(server, **dict(camera(B, 1, A, epoch=1), radarGeoZoom=6, radarSource='mosaic'))
     accepted = server._read_radar_intent()
     assert accepted['session'] == B and accepted['zoom'] == 6
     request(server, **camera(A, 99, ''))
     assert server._read_radar_intent() == accepted
     # A's next explicit action acknowledges B and starts its own next generation.
-    request(server, **camera(A, 2, B))
+    request(server, **camera(A, 2, B, epoch=2))
     assert server._read_radar_intent()['session'] == A
 
 
 def test_invalid_claim_never_transfers_owner_or_activity(server, tmp_path):
     request(server, **camera())
-    before = server._read_radar_intent(), (tmp_path/'radar_activity').read_text()
+    before = server._read_radar_intent()
     for changes in ({'radarClaim': ''}, {'radarMoving': 1}, {'radarGeoZoom': 11},
                     {'radarGeoCenter': '91,0'}, {'radarPolicy': 'bogus'},
                     {'radarSource': ['auto', 'site']}, {'radarSession': [B, A]},
                     {'radarGeneration': ['1', '2']}, {'radarHeartbeat': 'bad'}):
-        request(server, **dict(camera(B, 1, A), **changes))
-        assert (server._read_radar_intent(), (tmp_path/'radar_activity').read_text()) == before
+        request(server, **dict(camera(B, 1, A, epoch=1), **changes))
+        assert server._read_radar_intent() == before
+        assert not (tmp_path/'radar_activity').exists()
         assert server._radar_owner['session'] == A
 
 
@@ -172,24 +177,25 @@ def test_failed_commit_cannot_claim_and_two_claimants_compare_the_same_owner(ser
     before = server._read_radar_intent()
     writer = server._write_settled_camera
     monkeypatch.setattr(server, '_write_settled_camera', lambda *args: False)
-    request(server, **camera(B, 1, A))
+    request(server, **camera(B, 1, A, epoch=1))
     assert server._read_radar_intent() == before and server._radar_owner['session'] == A
     monkeypatch.setattr(server, '_write_settled_camera', writer)
-    request(server, **camera(B, 1, A))
-    request(server, **camera('remote-session-c-123', 1, A))
+    request(server, **camera(B, 1, A, epoch=1))
+    request(server, **camera('remote-session-c-123', 1, A, epoch=1))
     assert server._read_radar_intent()['session'] == B
 
 
-def test_owner_generation_and_heartbeat_fences_also_protect_activity(server, tmp_path):
+def test_owner_generation_and_heartbeat_fences_protect_camera(server, tmp_path):
     request(server, **camera())
     request(server, **camera(A, 2))
-    before = server._read_radar_intent(), (tmp_path/'radar_activity').read_text()
+    before = server._read_radar_intent()
     for generation, heartbeat in ((1, 99), (2, 1), (2, 2)):
         request(server, **dict(camera(A, generation), radarHeartbeat=heartbeat, radarMoving=1, radarCommit=0))
-        assert (server._read_radar_intent(), (tmp_path/'radar_activity').read_text()) == before
+        assert server._read_radar_intent() == before
     request(server, **dict(camera(A, 2), radarHeartbeat=3, radarMoving=1, radarCommit=0))
-    assert json.loads((tmp_path/'radar_activity').read_text())['moving']
-    assert server._read_radar_intent() == before[0]
+    assert server._radar_owner['heartbeat'] == 3
+    assert not (tmp_path/'radar_activity').exists()
+    assert server._read_radar_intent() == before
 
 
 def test_restart_does_not_let_a_legacy_poll_overwrite_ordered_owner(server):
@@ -213,7 +219,7 @@ def test_rate_limiter_bounds_memory_and_reclaims_idle_clients(server, monkeypatc
     assert len(server._control_buckets) == 1
 
 
-def test_bad_tile_reports_share_the_panel_write_bucket(server, tmp_path, monkeypatch):
+def test_bad_tile_reports_have_a_separate_write_bucket(server, tmp_path, monkeypatch):
     import io
     monkeypatch.setattr(server.time, 'monotonic', lambda: 100.0)
     for _ in range(int(server._CONTROL_BURST)):
@@ -224,5 +230,8 @@ def test_bad_tile_reports_share_the_panel_write_bucket(server, tmp_path, monkeyp
     h.rfile, h.headers = io.BytesIO(body), {'Content-Length': str(len(body))}
     errors = []
     h.send_error = lambda code, *args: errors.append(code)
+    h.send_response = lambda code: errors.append(code)
+    h.send_header = lambda *args: None
+    h.end_headers = lambda: None
     h.do_POST()
-    assert errors == [429] and not (tmp_path/'radar_bad_tiles').exists()
+    assert errors == [204] and (tmp_path/'radar_bad_tiles').exists()
