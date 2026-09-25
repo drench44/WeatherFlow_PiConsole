@@ -195,3 +195,42 @@ def test_a_per_site_level3_failure_is_counted_and_logged_at_a_bounded_rate(
     assert len([message for message in warnings if 'KMID Level III scan unavailable' in message]) == 1
 
 
+@pytest.mark.parametrize('failed_source,url,streak', [
+    (ae.RADAR_LEVEL3_TRANSPORT, ae.RADAR_LEVEL3_BUCKET, 0),
+    ('iem-nexrad-n0b', ae.RADAR_SITE_LIST_URL, 1),
+])
+def test_local_backoff_counts_only_the_failed_sources_hosts(
+        make_emitter, hybrid, failed_source, url, streak):
+    emitter = make_emitter()
+    source = 'iem-nexrad-n0b'
+    emitter._radar_health.record(failed_source, url, False, socket.gaierror(-3, 'resolver unavailable'))
+    emitter._radar_failed_pass(source, TimeoutError('visible newest incomplete'),
+                               dict(local_failure_start=0, ambiguous_failure_start=0))
+    assert emitter._radar_local_failure_streak == streak
+    assert emitter._radar_transport_failures.get(source, 0) == (0 if streak else 1)
+
+
+def test_qc_logs_each_reason_once_and_removes_cached_classification(make_emitter, hybrid, warnings):
+    emitter = make_emitter()
+    volume = hybrid.now
+    key = ('KNEA', volume, 'N0H')
+    emitter._radar_level3_scans[key] = object()
+    for reason in ('volume mismatch', 'volume mismatch', 'invalid geometry'):
+        emitter._radar_qc_failed('KNEA', volume, ValueError(reason))
+    frame = dict(siteScans=[dict(id='KNEA', volumeTs=volume, filtered=False)])
+    assert not emitter._radar_hca_due(frame)
+    assert key not in emitter._radar_level3_scans
+    assert emitter._radar_health_payload()['classification']['qcFailures'] == 3
+    assert len([message for message in warnings if 'QC failed' in message]) == 2
+
+
+def test_site_failure_log_reports_suppressed_count_after_the_interval(make_emitter, hybrid, warnings):
+    emitter = make_emitter()
+    failed = [('KNEA', TimeoutError('scan unavailable'))]
+    emitter._radar_level3_site_failures(failed)
+    emitter._radar_level3_site_failures(failed)
+    hybrid.mono += ae.RADAR_FAILURE_LOG_SEC
+    emitter._radar_level3_site_failures(failed)
+    entry = emitter._radar_health_payload()['mosaic']['siteFailures']['KNEA']
+    assert entry['count'] == 3 and entry['suppressed'] == 0
+    assert len(warnings) == 2 and '1 not logged' in warnings[-1]

@@ -1737,7 +1737,7 @@ class AlmanacEmitter:
             self._radar_retained_refresh('idle')
             return
         self._radar_quiet_at = now
-        local_failures = self._radar_health.local_failures
+        local_failures = self._radar_health.failure_counts('iem-nexrad-n0b')['local']
         try:
             if self._radar_session is None or self._radar_provider != 'iem':
                 if self._radar_session is not None:
@@ -1754,14 +1754,14 @@ class AlmanacEmitter:
                     pass
             sentinel_every = knobs['sentinel']
             due = sentinel_every and (self._radar_sentinel is None or now - self._radar_sentinel['at'] >= sentinel_every)
-            if (due and self._radar_health.local_failures == local_failures
+            if (due and self._radar_health.failure_counts('iem-nexrad-n0b')['local'] == local_failures
                     and _radar_iem_eligible(ctx['station'][0], ctx['station'][1])):
                 self._radar_sentinel_pass(ctx)
         except (_RadarBudget, CircuitOpen, TimeoutError, OSError, ValueError) as error:
             self._radar_note_yield(error)
         finally:
             self._radar_local_failure_streak = (self._radar_local_failure_streak + 1
-                if self._radar_health.local_failures > local_failures else 0)
+                if self._radar_health.failure_counts('iem-nexrad-n0b')['local'] > local_failures else 0)
             with self._radar_lock:
                 if self._radar_pass['outcome'] not in ('failed',):
                     self._radar_pass['outcome'] = 'quiet'
@@ -4016,13 +4016,14 @@ class AlmanacEmitter:
             self._radar_budget_retry(source, 1, min_delay=2, reason='provider')
             return False
         outcome, health = failure_class(error), self._radar_health
+        failures = health.failure_counts(source)
         # The pass error is often a synthetic TimeoutError ("visible newest
         # incomplete"); the tile loop's per-class flags and the health counters
         # say what actually failed underneath it.
         truly_local = (outcome == 'local' or ctx.get('local_failure')
-                       or health.local_failures > ctx.get('local_failure_start', health.local_failures))
+                       or failures['local'] > ctx.get('local_failure_start', failures['local']))
         ambiguous = (outcome == 'ambiguous' or ctx.get('ambiguous_failure')
-                     or health.ambiguous_failures > ctx.get('ambiguous_failure_start', health.ambiguous_failures))
+                     or failures['ambiguous'] > ctx.get('ambiguous_failure_start', failures['ambiguous']))
         local = truly_local or ambiguous  # neither may advance the fallback chain
         if local:
             self._radar_transport_failures.pop(source, None)
@@ -4337,9 +4338,10 @@ class AlmanacEmitter:
             for source, adapter in adapters:
                 ctx['target_source'] = self._radar_target_source = source
                 self._radar_pass.update(source=source, site=site["id"] if source == "iem-nexrad-n0b" and site else None)
-                for kind in ('local', 'ambiguous'):
+                ctx.pop('level3_failed', None)
+                for kind, count in self._radar_health.failure_counts(source).items():
                     ctx.pop(kind+'_failure', None)
-                    ctx[kind+'_failure_start'] = getattr(self._radar_health, kind+'_failures')
+                    ctx[kind+'_failure_start'] = count
                 ctx.pop('staging_source', None)
                 ctx['switch_reason'] = 'user source/zoom selection' if not same_mode else 'initial source selection'
                 if errors:
