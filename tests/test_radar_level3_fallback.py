@@ -217,7 +217,7 @@ def test_qc_logs_each_reason_once_and_removes_cached_classification(make_emitter
     emitter._radar_level3_scans[key] = object()
     for reason in ('volume mismatch', 'volume mismatch', 'invalid geometry'):
         emitter._radar_qc_failed('KNEA', volume, ValueError(reason))
-    frame = dict(siteScans=[dict(id='KNEA', volumeTs=volume, filtered=False)])
+    frame = dict(siteScans=[dict(id='KNEA', ts=volume, volumeTs=volume, filtered=False)])
     assert not emitter._radar_hca_due(frame)
     assert key not in emitter._radar_level3_scans
     assert emitter._radar_health_payload()['classification']['qcFailures'] == 3
