@@ -94,13 +94,13 @@ so insects and clear-air clutter never film the map, and no guessing at rain ver
 Recent frames play as a smooth loop, five a second with a short crossfade and
 a hold on the newest, whose scan time is printed beside the clock and is never
 dressed up as "live"; opening the tab brings the loop up from cache in
-milliseconds, and play means play even while frames are still arriving. The
-source picker is **Auto | Region | <site>**. Auto is the default. It chooses Site
-at settled zoom 8 or higher and Region at zoom 6 or lower. Zoom 7 keeps the
-current source; a cold start uses Region. Site requires a reporting closest
-radar and 85% viewport coverage. Reverse switches wait 10 seconds unless zoom
-moves at least 2 levels. The old map stays visible during acquisition. Manual
-choices return to Auto after 45 minutes without a touch. **Region** blends
+milliseconds, and play means play even while frames are still arriving. Three
+buttons choose the picture. **Auto**, the default, follows the zoom: close in
+(zoom 8 and up) it shows the nearest radar's own scans, wide (6 and out) the
+Region mosaic, and at 7 it keeps whatever is showing, so pinching back and forth
+never flips it. It only moves to the site when reporting radars cover the view,
+and the old picture stays up until the new one has frames. Tap Region or the
+site to hold that choice; it returns to Auto after 45 minutes untouched. **Region** blends
 many radars with a new image every two minutes. The nearest **NEXRAD** site
 keeps its callsign and nearby-site count on the button. It shows its own
 scans at their real times, every neighbouring radar whose range reaches the
@@ -119,12 +119,12 @@ so every pixel is still a legend colour. Beside it, **v1 | v2** picks how the
 site radar is drawn: v1 from IEM's tiles, gridded to about a kilometre; v2
 from NOAA's Level III product, the radar's own half-degree by 250-metre cells,
 so zoom 9 and 10 look like a phone radar app instead of a mosaic of squares.
-v2 is the default unless the device is a Raspberry Pi 3; explicit choices win.
-It fetches native data only in the live and warm attention tiers. Above 150 MB
-per UTC day it fetches newest scans only. Above 250 MB it uses v1 until the next
-UTC day and shows “v2 paused · daily data limit”. The byte count survives engine
-restarts and appears in `/health`. Neighbouring radars are layered rather than merged cell
-by cell yet, and a cold switch takes about a minute to fill the loop. The station glyph shows where home is
+v2 is the default on the Pi 4 (a Pi 3 starts on v1) and works for every US
+radar, Alaska, Hawaii, Puerto Rico and Guam included. It downloads only while
+someone is looking, the Radar tab open or the screen touched in the last 45
+minutes, and a daily cap (newest frame only past 150 MB, v1 past 250 MB, reset
+at midnight UTC) keeps a forgotten tab bounded; the count shows in `/health`.
+Neighbouring radars are still layered rather than merged cell by cell. The station glyph shows where home is
 while you're away and the view drifts back to it after a minute and a half
 untouched.
 

@@ -7,29 +7,39 @@ to shared upstream code that the classic console benefits from too.
 ## 2026-09-25
 
 ### Radar
-- Added Auto beside Region and the nearest site's callsign. Auto is the default.
-  It selects Site at settled zoom 8 and Region at zoom 6. Zoom 7 retains the
-  displayed source using the zoom-8 coverage footprint. Site needs a reporting
-  closest radar and 85% coverage to enter, 70% to stay. Unknown discovery results
-  keep the displayed source and bounded last-good evidence. Reverse switches
-  wait 10 seconds unless zoom moves 2 levels; confirmed outages may leave Site
-  immediately. The complete old loop stays visible until min(4, n) frames of a
-  new source or renderer variant are decoded.
-- Manual source choices expire after 45 minutes without a touch. Auto uses the
-  existing validated, durable camera transaction and acknowledges the preference
-  separately from the source on screen. Camera-only commits preserve the source
-  and its lease clock; future lease timestamps are clamped.
-- With active attention policy, native v2 acquisition runs only in live and warm
-  tiers; shadow tiers do not gate acquisition. Above 150 MB per UTC day it builds
-  one native frame, allowing two older-scan fallbacks. Region keeps its loop.
-  Above 250 MB it uses v1 for the rest of that day. A durable, debounced ledger
-  survives reboots and ignores backwards UTC day changes. Accounting failures
-  pause native without masking request results. Counts appear in the payload
-  and `/health`. The page says “v2 paused · daily data limit”.
-- Defaulted to v2 except on BCM2837-class devices (Pi 3, Compute Module 3,
-  and Zero 2). Explicit renderer choices
-  remain authoritative. Tier and budget transitions preserve cache identity and
-  retained frames, including when the latest scan timestamp is unchanged.
+- **Auto picks the radar by zoom.** A new **Auto** button, the default, sits
+  beside Region and the nearest site. Zoom in to 8 or closer and it switches to
+  the site radar; zoom out to 6 or wider and it returns to Region; at 7 it keeps
+  whatever is showing, so a pinch back and forth never flips the source. It only
+  goes to the site when reporting radars cover at least 85 % of the view (70 % to
+  stay), waits 10 s before reversing unless the zoom moved two levels, and keeps
+  the old loop on screen until the new one has frames to show. A failed listing
+  or a busy moment no longer drops it to Region; a radar that is really off the
+  air, or whose picture has gone stale, still does.
+- **Manual choices time out.** Tapping Region or the site holds that choice until
+  you tap Auto or nobody touches the screen for 45 minutes.
+- **v2 only when someone is looking, with a daily cap.** Level III is downloaded
+  only while the Radar tab is open or the panel was touched in the last 45
+  minutes; an unattended rainy day uses v1 tiles and no Level III at all. Past
+  150 MB in a UTC day v2 keeps only its newest frame, past 250 MB it pauses until
+  midnight UTC, and the panel says so. The count survives reboots and shows in
+  `/health`.
+- **v2 is the default on the Pi 4.** Boards with the Pi 3's chip (Pi 3, Compute
+  Module 3, Zero 2) default to v1. A choice made on the v1 | v2 switch always wins.
+  Switching renderer shows the new picture as soon as its newest frame is ready
+  ("Sharpening to v2") instead of dropping the loop to one frame.
+- **Every US radar.** Swept all 160 sites from the Pi 4: 157 decode cleanly
+  (KGGW was off the air; the Azores and Okinawa radars are not in NOAA's
+  bucket). Site mode no longer requires the continental-US mask, which only
+  bounds MRMS, so stations in Alaska, Hawaii, Puerto Rico and Guam use their own
+  radar.
+- **More contrast in the greens.** Light, moderate and heavier rain now separate
+  at a glance: the greens get darker steadily from 15 to 35 dBZ instead of
+  jumping back and forth, with a clear step at 25 dBZ. Every colour still clears
+  2:1 contrast on the paper theme and 3:1 at night; yellows and above are
+  unchanged. The grey clear-air band, unused since the 15 dBZ floor, is gone.
+- **Zooming v2 stops re-downloading.** The decoded-scan cache held 24 scans; a
+  loop across four radars needs 36, so every zoom step fetched products again.
 
 ## 2026-09-24
 

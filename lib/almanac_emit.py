@@ -1770,10 +1770,18 @@ class AlmanacEmitter:
         if snap.source_id == 'rainviewer':
             sources.add('iem-mrms-lcref')
         zoom = snap.zoom_desired if snap.zoom_desired is not None else snap.zoom_auto_level
-        if (snap.source_pref == 'auto' and (snap.source_mode == 'site' or (zoom or 0) >= radar_auto.UP_ZOOM)
+        site_in_play = snap.source_mode == 'site' or self._radar_target_source == 'iem-nexrad-n0b'
+        if (snap.source_pref == 'auto' and (site_in_play or (zoom or 0) >= radar_auto.UP_ZOOM)
                 or snap.source_pref == 'site' and not snap.source_fallback):
             sources.add('iem-nexrad-n0b')
         sources = {dependency for source in sources for dependency in self._radar_transport_sources(source)}
+        if not site_in_play:
+            # Auto on Region at zoom >= 8 recovers Site through the closest-site
+            # listing, which Region discovery sends and which clears IEM's
+            # breaker. Only the site adapter ever contacts Level III, so its
+            # breaker cannot clear from Region: counting it here would pin the
+            # probe delay at 0 and wake discovery every second.
+            sources.discard(RADAR_LEVEL3_TRANSPORT)
         probe = self._radar_health.probe_delay(sources)
         now = time.monotonic()
         delays = [until-now for source, until in self._radar_cooldowns.items()

@@ -327,3 +327,24 @@ def test_region_admission_and_watcher_do_not_read_native_policy(make_emitter, mo
     assert emitter._radar_headroom_delay('iem-mrms-lcref', 1) == 0
     assert emitter._radar_transport_sources('iem-mrms-lcref') == ('iem-mrms-lcref',)
     emitter._check_radar_zoom()
+
+
+def test_auto_region_at_zoom_nine_ignores_unused_level3_breaker(make_emitter, hybrid, multisite, tmp_path, monkeypatch):
+    """Opus final review: Auto on Region at zoom >= 8 (coverage too low) with an
+    opened Level III breaker kept the probe delay at 0 -> discovery every second.
+    Region never contacts Level III, so that breaker cannot clear from there."""
+    monkeypatch.setattr(auto, 'coverage_fraction', lambda *a, **k: .5)
+    (tmp_path/'radar_source').unlink(missing_ok=True)
+    (tmp_path/'radar_render').write_text('v2\n')
+    (tmp_path/'radar_intent').write_text(json.dumps(dict(seq=1, zoom=9, source='auto', center='station')))
+    e = make_emitter(); e._do_radar()
+    assert e._radar_result.source_mode == 'mosaic'
+    url = ae.RADAR_LEVEL3_BUCKET + 'x'
+    for _ in range(8):
+        e._radar_health.record(ae.RADAR_LEVEL3_TRANSPORT, url, False, TimeoutError('t'))
+    hybrid.mono += 10000
+    for _ in range(3):
+        e._do_radar(discovery=True, intent_triggered=False)
+    assert e._radar_result.source_mode == 'mosaic'
+    delay = e._radar_probe_delay()
+    assert delay is None or delay > 1
