@@ -276,7 +276,7 @@ def test_a_missing_scan_is_not_requested_per_tile(make_emitter, hybrid, multisit
 def test_render_preference_is_loopback_and_validated(monkeypatch, tmp_path, address, query, value):
     module = _load_serve(monkeypatch, tmp_path, _payload())
     monkeypatch.setattr(module.http.server.SimpleHTTPRequestHandler, 'do_GET', lambda h: None)
-    h = object.__new__(module.Handler); h.client_address = (address, 1); h.path = '/wx.json?' + query
+    h = object.__new__(module.Handler); h.client_address = (address, 1); h.path = '/wx.json?radarSession=preference-session-123&' + query
     h.do_GET(); marker = tmp_path / 'radar_render'
     assert (marker.read_text().strip() if marker.exists() else None) == (value if address in module.LOOPBACK else None)
 

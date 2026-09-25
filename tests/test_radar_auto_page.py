@@ -52,9 +52,11 @@ assert.ok(!caption().startsWith('Auto · '));
 '''.replace('MODE', json.dumps(mode)))
 
 
-def test_auto_switching_uses_existing_copy_and_keeps_old_caption_subject():
+def test_auto_switching_copy_requires_a_local_user_operation():
     controls(r'''
 radarView.refresh={state:'newest',targetMode:'site'};radarSourceRender();
+assert.match(caption(),/^Auto · Region/);
+radarSwitchStart();radarSourceRender();
 assert.match(caption(),/^Switching to KATX radar · showing Region/);
 assert.equal($('rad-src-auto').attrs['aria-pressed'],'true');
 ''')

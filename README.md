@@ -78,7 +78,8 @@ The classic six-panel console (the upstream default) for comparison:
 
 A **Radar** tab puts a live reflectivity view under the same discipline, and
 it behaves like a map you already know: drag, flick, pinch, and the picture just
-moves. The panel owns the map. Geography — coastline and water, state and county
+moves. Any browser on your home network can steer the radar; the panel follows.
+Geography — coastline and water, state and county
 lines, major roads, from bundled public-domain data — is rendered once by the
 engine into small tiles for every zoom and both themes, cached, and drawn by the
 page at any zoom in a few milliseconds; radar arrives as tiles the page places

@@ -19,9 +19,9 @@ def test_presence_failed_write_does_not_consume_throttle(server, monkeypatch, tm
 @pytest.mark.parametrize('ip,query,present,viewed', [
     ('127.0.0.1', 'touch=1', True, False), ('127.0.0.1', 'touch=0', False, False),
     ('127.0.0.1', 'touch', False, False), ('127.0.0.1', 'touch=1&touch=0', False, False),
-    ('192.168.1.2', 'touch=1&view=radar', False, False),
+    ('192.168.1.2', 'touch=1&view=radar', True, False),
     ('127.0.0.1', 'view=radar', False, True)])
-def test_presence_and_viewing_trust_only_exact_loopback_signals(server, monkeypatch, tmp_path, ip, query, present, viewed):
+def test_presence_trusts_controllers_but_viewing_only_panel(server, monkeypatch, tmp_path, ip, query, present, viewed):
     # Invoke the handler without binding a socket or contacting any address.
     handler_class = next(c for c in vars(server).values() if isinstance(c, type)
         and c.__module__ == server.__name__ and hasattr(c, 'do_GET'))
