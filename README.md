@@ -124,11 +124,12 @@ radar, Alaska, Hawaii, Puerto Rico and Guam included. It downloads only while
 someone is looking, the Radar tab open or the screen touched in the last 45
 minutes, and a daily cap (newest frame only past 150 MB, v1 past 250 MB, reset
 at midnight UTC) keeps a forgotten tab bounded; the count shows in `/health`.
-v2 combines nearby radars cell by cell, choosing the lowest beam within 230 km.
-A clear reading keeps a higher beam's rain from showing through. NOAA's own
-classification removes ground clutter and birds for about 25 KB more per scan;
-if that classification is late, rain still draws and the caption says
-"unfiltered". Region and v1 keep their existing pictures. The station glyph shows where home is
+v2 merges nearby radars pixel by pixel: each pixel shows the echo from the
+lowest beam within 230 km that sees one, so a radar blocked by mountains never
+hides its neighbour's rain, and there are no seams where one radar's coverage
+ends. NOAA's own classification removes ground clutter, and birds and insects
+outside rain, for about 25 KB more per scan; if it is late, rain still draws
+and the caption says "unfiltered". Region and v1 keep their existing pictures. The station glyph shows where home is
 while you're away and the view drifts back to it after a minute and a half
 untouched.
 
