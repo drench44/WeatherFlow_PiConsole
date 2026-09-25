@@ -175,6 +175,10 @@ def test_match_key_uses_the_iem_minute():
 @pytest.fixture
 def native(hybrid, multisite, monkeypatch, tmp_path):
     """S3 routes beside the IEM fixture: listings and products for each scan."""
+    # Native acquisition now requires a person looking at the radar.
+    monkeypatch.setattr(ae, 'RADAR_ATTENTION_MODE', 'active')
+    hybrid.view()
+    (tmp_path / 'radar_viewing').write_text(json.dumps(dict(since=hybrid.now, last=hybrid.now)))
     state = type('S3', (), {})()
     state.calls, state.missing, state.bad = [], set(), set()
     codes = np.zeros((720, 1840), np.uint8)
@@ -277,11 +281,14 @@ def test_render_preference_is_loopback_and_validated(monkeypatch, tmp_path, addr
 
 def test_render_header_and_native_tiles_are_immutable(monkeypatch, tmp_path):
     module = _load_serve(monkeypatch, tmp_path, _payload())
+    from lib.radar_native_budget import render_preference
+    reader = lambda: 'Raspberry Pi 4 Model B'
+    monkeypatch.setattr(module, 'render_preference', lambda path: render_preference(path, reader))
     headers = {}
     h = object.__new__(module.Handler); h.client_address = ('127.0.0.1', 1); h.path = '/wx.json'
     h.send_header = lambda k, v: headers.__setitem__(k, v)
     monkeypatch.setattr(module.http.server.SimpleHTTPRequestHandler, 'end_headers', lambda self: None)
-    h.end_headers(); assert headers['X-Radar-Render'] == 'v1'
+    h.end_headers(); assert headers['X-Radar-Render'] == 'v2'
     (tmp_path / 'radar_render').write_text('v2\n'); h.end_headers()
     assert headers['X-Radar-Render'] == 'v2'
     source = Path('design/almanac/kiosk/serve.py').read_text()
@@ -295,4 +302,4 @@ def test_page_switch_posts_once_and_follows_the_server():
     assert re.search(r'id="rad-v1"[^>]*aria-pressed="true"', html) and 'id="rad-v2"' in html
     assert '"&radarRender="+radarRender.pending' in html
     assert "x.render==='v1'||x.render==='v2'" in html
-    assert "radarRender.value==='v2'&&radarView.data?.sourceMode==='site'" in html
+    assert "function radarNativeActive(){return radarView.data?.native===true;}" in html

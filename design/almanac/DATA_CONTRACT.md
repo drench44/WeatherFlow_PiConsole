@@ -574,6 +574,51 @@ that a radar sees every point inside that circle. `nexrad` still reports the
 nearest site within 285 miles; `distanceMeters` provides the unrounded value
 used to decide eligibility.
 
+### Auto source (2026-09-25)
+
+The source picker is **Auto | Region | <site>**. The site keeps its callsign and
+contributor count, such as `KATX +3`. Auto is the default without a preference.
+`radar_source` and the camera transaction accept `auto`, `mosaic` and `site`.
+The same loopback check, single-value validation, camera owner/generation fence,
+atomic durable write and `X-Radar-Intent` acknowledgement apply to all three.
+Moving camera reports cannot commit a source choice.
+
+`radar.sourcePref` is the requested policy. `radar.sourceMode` is the displayed
+source (`mosaic` or `site`). Auto stays pressed while either source is drawn.
+Its normal caption starts with `Auto · `, for example `Auto · Region` or
+`Auto · KATX radar`. `refresh.targetMode` names a staged source. The page uses
+`Switching to … · showing …` during that transition and retains the old image.
+The v1/v2 preference chooses the site renderer in Auto too.
+
+`lib/radar_auto.py:choose` uses only the accepted, settled camera zoom:
+
+- At zoom 8 or higher, choose Site.
+- At zoom 6 or lower, choose Region.
+- At zoom 7, retain the displayed source. A cold start uses Region.
+- Require a fresh reporting closest site and at least 85% viewport coverage by
+  the reporting sites selected for the view. Unknown, dark, stale or refused
+  closest-site evidence keeps Region. Coverage is the union of the existing
+  230 km spherical range discs, integrated over 512 Web Mercator screen rows.
+  Overlaps count once. Tile margins do not count as viewport area.
+- Hold against a reverse automatic switch for 10 seconds after publication,
+  unless settled zoom moved at least 2 levels since that switch. Loss of valid
+  reporting or coverage takes precedence over this hold. The existing intent
+  watcher retries when the hold ends. Failed candidates never reset the clock.
+
+Selection does not publish a candidate. The existing frame staging path retains
+the old source until the candidate newest frame is publishable. The page keeps
+its decoded frame staging. Region still has a native zoom ceiling of 9; Auto
+can select Site at camera zoom 10 when the guards permit it.
+
+A manual Region or Site choice holds until Auto is tapped or 45 minutes pass
+without a touch. The lease reads the existing `presence` marker used by radar
+attention; view polling does not renew it. Without a touch marker, the source
+preference's timestamp starts the hold. Camera moves alone do not renew it.
+The engine checks expiry without needing a browser. The server persists Auto
+before recording a subsequent touch, so an expired choice cannot revive on the
+next poll or restart. Manual Site retains the zoom-7 floor and
+`site-zoom-floor` fallback.
+
 ### Closest-site evidence and refusal (v6.0)
 
 The closest-site identity stays independent of the drawn timeline. When `nexrad`
@@ -1263,7 +1308,7 @@ or `aria-busy` write on the interactive plate.
 
 `#rad-src` and the requested segment carry `data-state="pending"`; the group
 carries `aria-busy="true"`. The requested segment has a static dotted underline,
-while `aria-pressed` continues to identify the displayed source. The caption
+while `aria-pressed` identifies Auto when requested, otherwise the displayed source. The caption
 synchronously names the requested choice and retained displayed source in the
 input frame. Only the corner note has a 600ms grace. A matching inventory starts
 acquisition; four decoded target frames replace pending. Failed attempts retain
@@ -1400,13 +1445,17 @@ are Smooth's exactly: one value, loopback and accepted camera transactions only,
 atomic replace only on change, durable at
 `$XDG_STATE_HOME/wfpiconsole/radar_render`, acknowledged by
 `X-Radar-Render: v1|v2`, and watched by the emitter even under an ordered intent.
-Default is v1. v2 applies only while the site source is on screen: Region has no
-single radar and stays v1 (the note says so), and Smooth is disabled while v2
-draws, since gates have no colour edges to soften.
+Default is v2, except when `/proc/device-tree/model` contains `Raspberry Pi 3`,
+which defaults to v1. The shared device reader is cached once per process and
+injectable in tests. An explicit preference always wins. Region stays v1.
+Smooth is disabled while native frames are drawn. A paused v2 preference can
+show v1 with Smooth enabled; the requested renderer and the drawn variant are
+separate facts.
 
 **Render variant.** v2 is a third tile variant beside plain and Smooth:
 `_radar_variant(ctx, source)` is `'native'` for `iem-nexrad-n0b` with v2 selected,
-otherwise the Smooth boolean. The variant has its own render revision directory
+attention tier `live` or `warm`, and the daily ceiling below its pause state.
+Otherwise it is the Smooth boolean. The variant has its own render revision directory
 (`_radar_render_revision('native')`, advertised in `radar/.native-revision` so
 the server serves it immutable), a disk key suffixed `('native',)`, and PNG
 metadata with `revision` = `level3-n0b-polar-v2` (`radar_level3.NATIVE_REVISION`).
@@ -1414,7 +1463,32 @@ Gates are measurements, not matched colours, so `unmatchedPixels` and
 `ambiguousPixels` are 0 and `remapped` is true. The manifest adds
 `tiles.variant` (`false`, `true` or `"native"`); `tiles.smooth` stays a boolean,
 true only for Smooth, so the page never interpolates v2 pixels. The payload adds
-`radar.native`, and its attribution reads `NOAA NEXRAD Level III`.
+`radar.native` (the drawn variant) and `radar.renderPref` (`v1` or `v2`, the
+requested renderer). Native attribution reads `NOAA NEXRAD Level III`.
+
+**Attention and daily bytes.** Watch, rest and dormant never fetch Level III.
+Site acquisition in those tiers uses IEM v1 tiles; rest and dormant keep their
+existing no-tile policy. Already displayed frames remain during the transition.
+Promotion to warm/live stages native frames under their own cache revision,
+even if the scan timestamp has not changed.
+
+`lib/radar_native_budget.py` counts received Level III response-body bytes,
+including listings, products, invalid bodies and partial reads. Cache hits and
+304 responses add no body bytes. Counts use UTC days and persist by atomic
+replacement of `radar_native_bytes.json` beside the other runtime markers.
+An engine restart keeps the count. This is a response-body budget, not an ISP
+traffic counter. A request already in flight may cross a threshold.
+
+Above 150,000,000 bytes in a UTC day, native acquisition is newest-only, with no
+native history backfill or optional warming. Above 250,000,000 bytes, Site uses
+v1 for the rest of the UTC day. Preferences are retained. Policy changes
+supersede an acquisition as a whole, so a tile key never changes renderer.
+The intent watcher also detects UTC rollover and resumes the eligible variant.
+
+`/health.radar.native` and `radar.nativeBudget` contain `day` (UTC `YYYY-MM-DD`),
+`bytesToday`, and `ceilingState` (`normal`, `newest-only`, or `paused`). The page
+shows `v2 paused · daily data limit` when v2 is selected and the ceiling is
+paused. Per-pixel multi-site merging and N0H quality control remain out of scope.
 
 **Scan identity.** IEM names a scan by its volume start floored to the minute;
 the S3 key carries the seconds (`ATX_N0B_2026_09_25_03_42_24` is IEM's 03:42).

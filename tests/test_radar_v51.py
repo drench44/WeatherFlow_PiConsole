@@ -16,11 +16,11 @@ const nodes=new Map(),$=id=>{if(!nodes.has(id))nodes.set(id,{
   get scrollWidth(){return this.textContent.length}
 });return nodes.get(id)};
 const document={createTextNode:s=>s,createElement:()=>$('credit')};
-const radarNoteRender=()=>{},radarSource={desired:null},radarIntent={postedAt:0},radarSwitch=null;
+const radarNoteRender=()=>{},radarSource={desired:null},radarIntent={postedAt:0},radarSwitch=null,radarRender={value:'v1'};
 const radarSiteTable=[{id:'KATX',name:'Camano Island'},{id:'KLGX',name:'Langley Hill'}];
 const sites=['KATX','KLGX','KRTX','KOTX'].map(id=>({id,contributing:true}));
 if(DARK)Object.assign(sites[0],{contributing:false,reason:'not reporting'});
-const radarView={data:{sourceId:'iem-nexrad-n0b',sourceMode:'site',siteId:DARK?'KLGX':'KATX',
+const radarView={data:{sourceId:'iem-nexrad-n0b',sourceMode:'site',sourcePref:'site',siteId:DARK?'KLGX':'KATX',
   scanCadenceSec:240,scanMode:null,sources:[{mode:'site',siteId:'KLGX',available:true}],sites,
   nexrad:NEAREST?{id:'KATX',name:'Fallback',distanceDisp:'39 mi',bearing:'NE'}:null}};
 if(CURRENT)radarView.current={drawnSites:[{id:'KLGX'},{id:'KRTX'}]};

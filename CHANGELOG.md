@@ -4,6 +4,25 @@ Changes in Weather Almanac, newest first. The upstream WeatherFlow
 PiConsole keeps its own release notes; entries under **Core** below are fixes
 to shared upstream code that the classic console benefits from too.
 
+## 2026-09-25
+
+### Radar
+- Added Auto beside Region and the nearest site's callsign. Auto is the default.
+  It selects Site at settled zoom 8 and Region at zoom 6. Zoom 7 retains the
+  displayed source. Site needs a reporting closest radar and 85% viewport
+  coverage. Reverse switches wait 10 seconds unless zoom moves 2 levels.
+  The old map stays visible while the new source loads.
+- Manual source choices expire after 45 minutes without a touch. Auto uses the
+  existing validated, durable camera transaction and acknowledges the preference
+  separately from the source on screen.
+- Native v2 acquisition runs only in live and warm attention tiers. Above
+  150 MB per UTC day it fetches newest scans only. Above 250 MB it uses v1 for
+  the rest of that day. Counts survive engine restarts and appear in the payload
+  and `/health`. The page says “v2 paused · daily data limit”.
+- Defaulted to v2 except on Raspberry Pi 3 devices. Explicit renderer choices
+  remain authoritative. Tier and budget transitions preserve cache identity and
+  retained frames, including when the latest scan timestamp is unchanged.
+
 ## 2026-09-24
 
 ### Kiosk

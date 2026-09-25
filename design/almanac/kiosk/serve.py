@@ -18,6 +18,14 @@
 import http.server, socketserver, json, math, os, time, threading, re, io, zlib
 from urllib.parse import parse_qs
 from decimal import Decimal
+from pathlib import Path
+import sys
+# The kiosk launches this script from its web directory, outside the repo root.
+REPO_ROOT = str(Path(__file__).resolve().parents[3])
+if REPO_ROOT not in sys.path:
+    sys.path.insert(0, REPO_ROOT)
+from lib.radar_native_budget import render_preference
+from lib.radar_auto import source_preference
 
 PORT      = int(os.environ.get("WFP_PORT", "8137"))
 WEB       = os.environ.get("WFP_WEB", ".")
@@ -216,7 +224,7 @@ def _write_radar_preference(name, values):
         if value not in ('v1', 'v2'):
             return
     elif name == 'radar_source':
-        if value not in ('mosaic', 'site'):
+        if value not in ('auto', 'mosaic', 'site'):
             return
     elif value != 'auto':
         if not re.fullmatch(r'[0-9]{1,2}', value):
@@ -269,6 +277,37 @@ def _read_radar_intent():
         return {'seq': 0}
 
 
+def _expire_radar_source():
+    """Expire before processing a new touch, under the server's writer lock.
+
+    Keep camera ownership/generation intact; advance only the worker sequence.
+    An older debounce callback cannot restore the expired manual preference.
+    """
+    record = _read_radar_intent()
+    intent = record if 'source' in record else None
+    root = Path(DATA).parent
+    try:
+        requested = intent['source'] if intent else (root/'radar_source').read_text()[:128].strip()
+    except (OSError, UnicodeError):
+        return
+    if requested not in ('mosaic', 'site'):
+        return
+    if source_preference(root, intent, time.time()) != 'auto':
+        return
+    if intent and intent['source'] != 'auto':
+        record = dict(record, source='auto', seq=min(999999999999, record['seq']+1))
+        marker = root / 'radar_intent'
+        temporary = marker.with_name(marker.name+'.tmp')
+        try:
+            temporary.write_text(json.dumps(record))
+            os.replace(temporary, marker)
+        except OSError:
+            return
+        finally:
+            temporary.unlink(missing_ok=True)
+    _write_radar_source(['auto'])
+
+
 def _write_radar_intent(params):
     """One validated transaction; duplicate generations never mutate preferences."""
     keys = ('radarSeq','radarZoom','radarSource','radarCenter')
@@ -281,7 +320,7 @@ def _write_radar_intent(params):
         if not re.fullmatch(r'[0-9]{1,2}', zoom, re.ASCII): return
         zoom = int(zoom)
         if not RADAR_MIN_ZOOM <= zoom <= RADAR_MAX_DESIRED_ZOOM: return
-    if source not in ('site','mosaic'): return
+    if source not in ('auto','site','mosaic'): return
     if center != 'station':
         if not re.fullmatch(r'-?\d{1,3}(\.\d+)?,-?\d{1,3}(\.\d+)?', center, re.ASCII): return
         lat, lon = map(float, center.split(','))
@@ -340,7 +379,7 @@ def _camera_transaction(activity, params):
         if generation > _radar_owner['generation']:
             if activity.get('moving') or 'zoom' not in activity or 'center' not in activity:
                 return False
-            if params.get('radarSource') not in (['site'], ['mosaic']) or params.get('radarPolicy') not in (['auto'], ['manual']):
+            if params.get('radarSource') not in (['auto'], ['site'], ['mosaic']) or params.get('radarPolicy') not in (['auto'], ['manual']):
                 return False
             if not _write_settled_camera(activity, params):
                 return False
@@ -359,14 +398,14 @@ def _write_settled_camera(activity, params):
         return
     old = _read_radar_intent()
     sources = params.get('radarSource', [])
-    source = sources[0] if len(sources) == 1 and sources[0] in ('site', 'mosaic') else old.get('source')
+    source = sources[0] if len(sources) == 1 and sources[0] in ('auto', 'site', 'mosaic') else old.get('source')
     if source is None:
         try:
             source = open(os.path.join(os.path.dirname(DATA), 'radar_source')).read().strip()
         except OSError:
-            source = 'mosaic'
-    if source not in ('site', 'mosaic'):
-        source = 'mosaic'
+            source = 'auto'
+    if source not in ('auto', 'site', 'mosaic'):
+        source = 'auto'
     record = dict(zoom=activity['zoom'], center=activity['center'], source=source, camera=True)
     if 'radarSession' in params:
         record.update(session=params['radarSession'][0], generation=int(params['radarGeneration'][0]),
@@ -455,6 +494,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 if rendered:
                     _renders += 1
                 if self.client_address[0] in LOOPBACK:
+                    _expire_radar_source()
                     params = parse_qs(query, keep_blank_values=True)
                     camera_report = viewed_radar and params.get('radarTheme',[''])[0] in ('paper','night')
                     ordered = 'radarSession' in params
@@ -535,11 +575,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
                 except (OSError, UnicodeError):
                     smooth = False
                 self.send_header('X-Radar-Smooth', 'on' if smooth else 'off')
-                try:
-                    with open(os.path.join(os.path.dirname(DATA), 'radar_render')) as stream:
-                        render = 'v2' if stream.read(128).strip() == 'v2' else 'v1'
-                except (OSError, UnicodeError):
-                    render = 'v1'
+                render = render_preference(Path(DATA).with_name('radar_render'))
                 self.send_header('X-Radar-Render', render)
                 self.send_header('X-View-Session', _view_owner['session'] if _view_owner else '')
                 self.send_header('X-Radar-Intent', json.dumps(dict(intent=record, acceptedGeneration=owner['generation'], **owner), separators=(',', ':')))

@@ -1,0 +1,263 @@
+"""Native acquisition is attention- and byte-bounded; no real networking."""
+import io
+import json
+from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
+
+import pytest
+
+from lib import almanac_emit as ae
+from lib import radar_native_budget as budget
+from tests.test_radar_hybrid import hybrid  # noqa: F401
+from tests.test_radar_v3 import multisite  # noqa: F401
+from tests.test_radar_level3 import native  # noqa: F401
+from tests.test_freshness_health import _load_serve
+
+SOURCE = 'iem-nexrad-n0b'
+
+
+@pytest.mark.parametrize('tier,expected', [('live', 'native'), ('warm', 'native'), ('watch', False), ('rest', False), ('dormant', False)])
+@pytest.mark.parametrize('state', ['normal', 'newest-only', 'paused'])
+def test_variant_is_exact_for_tier_and_ceiling(tier, expected, state):
+    ctx = dict(native=True, attention=tier, native_ceiling=state)
+    if state == 'paused': expected = False
+    assert ae._radar_variant(ctx, SOURCE) == expected
+    assert ae._radar_variant(ctx, 'iem-mrms-lcref') is False
+    ctx['smooth'] = True
+    assert ae._radar_variant(ctx, SOURCE) == ('native' if expected == 'native' else True)
+    assert ae._radar_render_revision('native') != ae._radar_render_revision(True)
+
+
+@pytest.mark.parametrize('model,expected', [('Raspberry Pi 3 Model B Rev 1.2', 'v1'), ('Raspberry Pi 3 Model B Plus Rev 1.3', 'v1'), ('Raspberry Pi 4 Model B', 'v2'), ('Raspberry Pi 5', 'v2'), ('', 'v2')])
+def test_default_model_is_read_once_and_explicit_always_wins(tmp_path, model, expected):
+    reads = []
+    def read():
+        reads.append(True)
+        return model
+    path = tmp_path/'radar_render'
+    assert budget.render_preference(path, read) == expected
+    assert budget.render_preference(path, read) == expected
+    assert len(reads) == 1
+    for value in ('v1', 'v2'):
+        path.write_text(value)
+        assert budget.render_preference(path, read) == value
+    assert len(reads) == 1
+
+
+@pytest.mark.parametrize('model,expected', [('Raspberry Pi 3 Model B', 'v1'), ('Raspberry Pi 4 Model B', 'v2')])
+def test_server_and_engine_share_missing_preference_default(make_emitter, hybrid, multisite, native, tmp_path, monkeypatch, model, expected):
+    reader = lambda: model
+    preference = lambda path: budget.render_preference(path, reader)
+    monkeypatch.setattr(ae, 'render_preference', preference)
+    (tmp_path/'radar_render').unlink()
+    emitter = make_emitter(); emitter._do_radar()
+    assert emitter._radar_result.tiles['variant'] == ('native' if expected == 'v2' else False)
+    server = _load_serve(monkeypatch, tmp_path, {})
+    monkeypatch.setattr(server, 'render_preference', preference)
+    headers = {}
+    handler = server.Handler.__new__(server.Handler)
+    handler.path, handler.client_address = '/wx.json', ('127.0.0.1', 1)
+    handler.send_header = lambda key, value: headers.update({key: value})
+    monkeypatch.setattr(server.http.server.SimpleHTTPRequestHandler, 'end_headers', lambda self: None)
+    handler.end_headers()
+    assert headers['X-Radar-Render'] == expected
+
+
+def test_ledger_boundaries_restart_concurrency_and_utc_rollover(tmp_path):
+    clock = [1789257599.]
+    path = tmp_path/'radar_native_bytes.json'
+    ledger = budget.NativeBudget(path, lambda: clock[0])
+    ledger.add(budget.NATIVE_NEWEST_ONLY_BYTES)
+    assert ledger.snapshot()['ceilingState'] == 'normal'
+    ledger.add(1)
+    assert ledger.snapshot()['ceilingState'] == 'newest-only'
+    ledger = budget.NativeBudget(path, lambda: clock[0])
+    assert ledger.snapshot()['bytesToday'] == budget.NATIVE_NEWEST_ONLY_BYTES+1
+    ledger.add(budget.NATIVE_PAUSE_BYTES-ledger.bytes)
+    assert ledger.snapshot()['ceilingState'] == 'newest-only'
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        list(pool.map(ledger.add, [100]*20))
+    assert ledger.snapshot()['bytesToday'] == budget.NATIVE_PAUSE_BYTES+2000
+    assert ledger.snapshot()['ceilingState'] == 'paused'
+    assert json.loads(path.read_text())['bytes'] == ledger.bytes
+    assert not list(tmp_path.glob('*.tmp'))
+    clock[0] += 1  # midnight UTC, independent of the station's timezone
+    assert ledger.snapshot()['ceilingState'] == 'normal'
+    assert ledger.snapshot()['bytesToday'] == 0
+    ledger.add(20)
+    assert budget.NativeBudget(path, lambda: clock[0]).snapshot()['bytesToday'] == 20
+
+
+def test_atomic_counter_preserves_durable_symlink(tmp_path):
+    durable = tmp_path/'durable'; durable.write_text('{}')
+    path = tmp_path/'radar_native_bytes.json'; path.symlink_to(durable)
+    ledger = budget.NativeBudget(path)
+    ledger.add(123)
+    assert path.is_symlink() and json.loads(durable.read_text())['bytes'] == 123
+
+
+@pytest.mark.parametrize('tier', ['watch', 'rest', 'dormant'])
+def test_unattended_tiers_never_acquire_level3(make_emitter, hybrid, multisite, native, monkeypatch, tier):
+    monkeypatch.setattr(ae, 'RADAR_ATTENTION_MODE', 'active')
+    emitter = make_emitter(); emitter._radar_attention.forced = tier; emitter._radar_attention.tier = tier
+    emitter._do_radar()
+    assert native.calls == []
+    if tier == 'watch':
+        assert emitter._radar_result.tiles['variant'] is False
+        assert any(c[0] == 'tile' for c in multisite.calls)
+
+
+def test_promotion_builds_native_even_when_listing_is_unchanged(make_emitter, hybrid, multisite, native, monkeypatch):
+    monkeypatch.setattr(ae, 'RADAR_ATTENTION_MODE', 'active')
+    emitter = make_emitter(); emitter._radar_attention.forced = 'watch'; emitter._radar_attention.tier = 'watch'
+    emitter._do_radar()
+    before = emitter._radar_result
+    assert before.tiles['variant'] is False
+    emitter._radar_attention.forced = 'warm'; emitter._radar_attention.tier = 'warm'
+    emitter._do_radar(discovery=True, intent_triggered=False)
+    assert native.calls
+    assert emitter._radar_result.tiles['variant'] == 'native'
+    assert emitter._radar_result.ts_frame == before.ts_frame
+    assert emitter._radar_result.tiles['revision'] != before.tiles['revision']
+
+
+def test_newest_only_has_no_native_history_or_prefetch(make_emitter, hybrid, multisite, native):
+    hybrid.view()
+    emitter = make_emitter()
+    emitter._radar_native_budget.add(budget.NATIVE_NEWEST_ONLY_BYTES+1)
+    emitter._do_radar()
+    assert emitter._radar_result.tiles['variant'] == 'native'
+    assert len(emitter._radar_result.frames) == 1
+    products = [key for kind, key in native.calls if kind == 'get']
+    assert products
+    from lib.radar_level3 import s3_key_time
+    assert all(s3_key_time(key) >= hybrid.latest-60 for key in products)
+    assert emitter._radar_native_budget.snapshot()['bytesToday'] > budget.NATIVE_NEWEST_ONLY_BYTES+1
+
+
+def test_hard_ceiling_uses_v1_until_next_utc_day(make_emitter, hybrid, multisite, native):
+    emitter = make_emitter()
+    emitter._radar_native_budget.add(budget.NATIVE_PAUSE_BYTES+1)
+    emitter._do_radar()
+    assert not native.calls
+    assert emitter._radar_result.tiles['variant'] is False
+    wire = emitter._build_payload()['radar']
+    assert wire['nativeBudget']['ceilingState'] == 'paused'
+    assert wire['health']['native'] == wire['nativeBudget']
+    assert wire['renderPref'] == 'v2' and not wire['native']
+    with pytest.raises(ae._RadarSuperseded):
+        emitter._radar_request(ae.RADAR_LEVEL3_TRANSPORT, ae.RADAR_LEVEL3_BUCKET+'blocked', 10)
+    hybrid.now += 86400
+    assert emitter._radar_native_budget.snapshot()['ceilingState'] == 'normal'
+
+
+@pytest.mark.parametrize('body,invalid', [(b'<bad-listing/>', True), (b'product-bytes', True), (b'valid', False)])
+def test_transport_counts_invalid_and_valid_bodies(make_emitter, monkeypatch, body, invalid):
+    emitter = make_emitter(); emitter._radar_begin_log_pass()
+    emitter._radar_session = ae.RadarSession()
+    monkeypatch.setattr(emitter._radar_session, 'open', lambda *args, **kwargs: io.BytesIO(body))
+    def validate(raw):
+        if invalid: raise ValueError('invalid product or listing')
+    if invalid:
+        with pytest.raises(ValueError):
+            emitter._radar_request(ae.RADAR_LEVEL3_TRANSPORT, ae.RADAR_LEVEL3_BUCKET+'object', ae.time.monotonic()+10, validate=validate)
+    else:
+        emitter._radar_request(ae.RADAR_LEVEL3_TRANSPORT, ae.RADAR_LEVEL3_BUCKET+'object', ae.time.monotonic()+10, validate=validate)
+    assert emitter._radar_native_budget.snapshot()['bytesToday'] == len(body)
+    assert make_emitter()._radar_native_budget.snapshot()['bytesToday'] == len(body)
+
+
+def test_threshold_crossing_supersedes_whole_variant_not_individual_tiles(make_emitter):
+    emitter = make_emitter()
+    emitter._radar_native_budget.add(budget.NATIVE_PAUSE_BYTES)
+    ctx = dict(native=True, native_ceiling='newest-only')
+    emitter._radar_native_budget.add(1)
+    with pytest.raises(ae._RadarSuperseded, match='native daily budget'):
+        emitter._radar_checkpoint(ctx)
+
+
+def test_unknown_attention_never_grants_native():
+    assert ae._radar_variant(dict(native=True), SOURCE) is False
+
+
+def test_promotion_wakes_even_when_target_frame_count_falls(make_emitter, monkeypatch):
+    monkeypatch.setattr(ae, 'RADAR_ATTENTION_MODE', 'active')
+    emitter = make_emitter(); emitter._running = True; emitter._radar_native_requested = True
+    emitter._radar_attention.tier = 'watch'
+    before = emitter._radar_attention_knobs()
+    emitter._radar_attention.tier = 'warm'
+    wakes, discovery = [], []
+    monkeypatch.setattr(emitter, '_schedule', lambda work, delay: wakes.append(delay))
+    monkeypatch.setattr(emitter, '_radar_arm_discovery', lambda **kwargs: discovery.append(kwargs))
+    emitter._radar_attention_changed(before, ae.time.time())
+    assert wakes == [.1] and discovery == [dict(prompt=True)]
+
+
+def test_native_ceiling_rollover_wakes_existing_watcher(make_emitter, monkeypatch):
+    emitter = make_emitter(); emitter._running = True
+    emitter._radar_zoom_stamp = emitter._radar_preference_stamp()
+    emitter._radar_policy_ceiling = 'paused'
+    wakes = []
+    monkeypatch.setattr(emitter, '_spawn', lambda key, work: wakes.append(key))
+    emitter._check_radar_zoom()
+    assert wakes == ['radar']
+
+
+def test_partial_body_is_counted_on_read_failure(make_emitter, monkeypatch):
+    from http.client import IncompleteRead
+    class Partial(io.BytesIO):
+        def read(self, count=-1):
+            chunk = super().read(count)
+            if chunk: return chunk
+            raise IncompleteRead(b'partial', 100)
+    emitter = make_emitter(); emitter._radar_begin_log_pass(); emitter._radar_session = ae.RadarSession()
+    monkeypatch.setattr(emitter._radar_session, 'open', lambda *args, **kwargs: Partial(b'first'))
+    with pytest.raises(IncompleteRead):
+        emitter._radar_request(ae.RADAR_LEVEL3_TRANSPORT, ae.RADAR_LEVEL3_BUCKET+'partial', ae.time.monotonic()+10)
+    assert emitter._radar_native_budget.snapshot()['bytesToday'] == len(b'firstpartial')
+
+
+def test_304_reuse_does_not_recount_cached_listing(make_emitter, monkeypatch):
+    from urllib.error import HTTPError
+    emitter = make_emitter(); emitter._radar_begin_log_pass(); emitter._radar_session = ae.RadarSession()
+    url = ae.RADAR_LEVEL3_BUCKET+'?list-type=2'
+    emitter._radar_metadata[url] = (b'cached-listing', {})
+    def unchanged(*args, **kwargs): raise HTTPError(url, 304, 'unchanged', {}, None)
+    monkeypatch.setattr(emitter._radar_session, 'open', unchanged)
+    assert emitter._radar_request(ae.RADAR_LEVEL3_TRANSPORT, url, ae.time.monotonic()+10, metadata=True) == b'cached-listing'
+    assert emitter._radar_native_budget.snapshot()['bytesToday'] == 0
+
+
+def test_newest_failure_above_soft_ceiling_does_not_fetch_older_native(make_emitter, hybrid, multisite, native):
+    emitter = make_emitter(); emitter._radar_native_budget.add(budget.NATIVE_NEWEST_ONLY_BYTES+1)
+    # Every newest aligned site scan is corrupt. History is not an escape hatch.
+    native.bad.update({hybrid.latest+24, hybrid.latest-60+24})
+    emitter._do_radar()
+    from lib.radar_level3 import s3_key_time
+    assert all(s3_key_time(key) >= hybrid.latest-60 for kind, key in native.calls if kind == 'get')
+
+
+def test_unwritable_ledger_pauses_further_native(make_emitter, monkeypatch):
+    emitter = make_emitter()
+    monkeypatch.setattr(budget.os, 'replace', lambda *args: (_ for _ in ()).throw(OSError('read-only ledger')))
+    with pytest.raises(OSError):
+        emitter._radar_native_budget.add(20)
+    assert emitter._radar_native_budget.snapshot()['ceilingState'] == 'paused'
+
+
+@pytest.mark.parametrize('ceiling', [budget.NATIVE_NEWEST_ONLY_BYTES, budget.NATIVE_PAUSE_BYTES])
+def test_native_ceiling_preserves_iem_prefetch(make_emitter, hybrid, multisite, native, monkeypatch, ceiling):
+    emitter = make_emitter(); emitter._radar_native_budget.add(ceiling+1)
+    emitter._do_radar()
+    source, ctx = emitter._radar_idle_context
+    warmed = []
+    emitter._radar_prefetched.clear()
+    original = emitter._radar_tile_batch
+    def fill(target, *args, **kwargs):
+        warmed.append((target, ae._radar_variant(args[1], target)))
+        return original(target, *args, **kwargs)
+    monkeypatch.setattr(emitter, '_radar_tile_batch', fill)
+    monkeypatch.setattr(emitter, '_radar_headroom_delay', lambda *args: 0)
+    emitter._radar_prefetch(source, dict(ctx, viewed=True, refresh=dict(state='idle')))
+    assert warmed and all(variant != 'native' for _, variant in warmed)
+    assert any(target == 'iem-mrms-lcref' for target, _ in warmed)
