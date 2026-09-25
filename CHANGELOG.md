@@ -18,6 +18,16 @@ to shared upstream code that the classic console benefits from too.
   function; on a touchscreen it was a target that did nothing. Removed.
 
 ### Radar
+- **v2 draws the radar's own cells.** A new **v1 | v2** switch beside SMOOTH. v1
+  is the site radar as before, from IEM's tiles, which are gridded to about 1 km
+  before we see them. v2 reads NOAA's Level III base reflectivity from its public
+  AWS bucket and draws each tile from the radar's own gates, half a degree by
+  250 m, so zoom 9 and 10 show squall lines and cell edges the way a phone radar
+  app does. Same scan, same colours, same loop; the caption credits NOAA Level
+  III. It applies to the single-site view (Region stays v1) and remembers the
+  choice across reboots. This is phase 0: nearby radars are layered, not yet
+  merged cell by cell, and a cold switch downloads about 9 MB and takes about a
+  minute to fill all eight frames on the Pi 4.
 - **The radar draws rain, not clutter.** Nothing below 15 dBZ is drawn now, from
   any source, and the grey clear-air band is gone from site mode. On a dry
   afternoon with a 0 % forecast, 49 % of what the panel drew was that grey band

@@ -48,7 +48,7 @@ import pytz
 
 from lib.radar_geometry import (world_point, world_inverse, parse_center,
                                 circle_intersects_bounds, distance_meters)
-from lib.radar_http import failure_class, RadarSession, is_transport_error, LocalTransportError
+from lib.radar_http import failure_class, RadarSession, is_transport_error, LocalTransportError, AmbiguousTransportError
 from lib.radar_fetch import HostHealth, CircuitOpen, Attempt, AttemptCancelled, tile_race
 from lib.radar_discovery import DiscoverySchedule
 from lib.radar_attention import Attention, Signals, GlanceHistory, RANK, WARM_HOLD_SEC
@@ -145,6 +145,7 @@ RADAR_SITE_LIST_URL = "https://mesonet.agron.iastate.edu/json/radar.py"
 RADAR_SITE_TILE_TEMPLATE = "https://mesonet.agron.iastate.edu/cache/tile.py/1.0.0/ridge::{site}-N0B-{stamp}/{z}/{x}/{y}.png"
 # v2: NOAA's own Level III product, public on AWS (NOAA Open Data Dissemination).
 RADAR_LEVEL3_BUCKET = "https://unidata-nexrad-level3.s3.amazonaws.com/"
+RADAR_LEVEL3_TRANSPORT = 'noaa-level3-n0b'  # independent health/cooldown dependency
 RADAR_LEVEL3_SCAN_CACHE = 24      # decoded scans (~1.3 MB each): 4 sites x 6 frames
 RADAR_LEVEL3_RETRY_SEC = 60       # a scan S3 lacks is not re-requested per tile
 RADAR_RAINVIEWER_COLOR = 2
@@ -1050,9 +1051,10 @@ class AlmanacEmitter:
         self._radar_tiles = OrderedDict()
         self._radar_native_groups = {}
         self._radar_level3_scans = OrderedDict()   # (site, stamp) -> decoded Scan, v2 only
-        self._radar_level3_flights = {}            # (site, stamp) -> lock; one download per scan
+        self._radar_level3_flights = {}            # (site, stamp) -> shared completion and verdict
         self._radar_level3_failed = {}             # (site, stamp) -> (retry at, error text)
         self._radar_level3_listings = {}           # (site, hour prefix) -> (listed at, keys)
+        self._radar_native_requested = False
         self._radar_disk_files = 0
         self._radar_disk_bytes = 0
         self._radar_idle_context = None
@@ -1736,6 +1738,7 @@ class AlmanacEmitter:
             sources.add('iem-mrms-lcref')
         if snap.source_pref == 'site' and not snap.source_fallback:
             sources.add('iem-nexrad-n0b')
+        sources = {dependency for source in sources for dependency in self._radar_transport_sources(source)}
         probe = self._radar_health.probe_delay(sources)
         now = time.monotonic()
         delays = [until-now for source, until in self._radar_cooldowns.items()
@@ -1996,6 +1999,10 @@ class AlmanacEmitter:
             self._radar_refresh = dict(refresh)
         self._radar_emit_now()
 
+    def _radar_transport_sources(self, source, ctx=None):
+        native = ctx.get('native', False) if ctx is not None else self._radar_native_requested
+        return (source, RADAR_LEVEL3_TRANSPORT) if source == 'iem-nexrad-n0b' and native else (source,)
+
     def _radar_headroom_delay(self, source, needed):
         with self._radar_lock:
             now = time.monotonic()
@@ -2003,7 +2010,8 @@ class AlmanacEmitter:
             count = len(self._radar_request_times)
             missing = count + needed - RADAR_REQUESTS_PER_MIN
             window = self._radar_request_times[min(missing, count)-1]+60-now if missing > 0 and count else 0
-            return max(0, window, self._radar_cooldowns.get(source, 0)-now)
+            cooldown = max(self._radar_cooldowns.get(s, 0) for s in self._radar_transport_sources(source))
+            return max(0, window, cooldown-now)
 
     def _radar_retry_fields(self):
         # Caller holds the publication lock; expiry can precede timer dispatch.
@@ -2185,7 +2193,7 @@ class AlmanacEmitter:
         Logger.info(f'almanac_emit: radar {source} stale connection retry; transport_retries={count}; '
                     f'stale_first_byte_retries={first_byte_count}')
 
-    def _radar_request(self, source, url, deadline, method='GET', metadata=False, reserve=0, attempt=None, retry=False):
+    def _radar_request(self, source, url, deadline, method='GET', metadata=False, reserve=0, attempt=None, retry=False, validate=None):
         """Validated transport; every attempt uses one monotonic rate/cooldown gate."""
         import urllib.request
         import urllib.error
@@ -2194,6 +2202,8 @@ class AlmanacEmitter:
             with self._radar_lock:
                 probed = self._radar_probe_reuse.pop(url, None)
             if probed is not None:
+                if validate is not None:
+                    validate(probed)
                 return probed  # this pass already paid for the half-open probe
         # Host and rate admission are atomic; an open host costs no budget and
         # a denied rate slot must not strand a half-open probe.
@@ -2259,6 +2269,8 @@ class AlmanacEmitter:
                     raise ValueError('oversized radar response')
                 if time.monotonic() >= deadline:
                     raise TimeoutError('radar response exceeded deadline')
+                if validate is not None:
+                    validate(raw)
                 if metadata:
                     validators = {}
                     response_headers = getattr(response, 'headers', {})
@@ -2279,6 +2291,8 @@ class AlmanacEmitter:
             outcome = 'http-'+str(error.code)
             count_outcome = 'http'
             if error.code == 304 and metadata and cached:
+                if validate is not None:
+                    validate(cached[0])
                 count_outcome = 'ok'
                 self._radar_health.record(source, url, True, probe=probe)
                 return cached[0]
@@ -2722,17 +2736,18 @@ class AlmanacEmitter:
         raise ValueError('no fresh complete IEM frame: ' + ctx.get('last_error', 'unavailable'))
 
     def _radar_level3_scan(self, site, stamp, ctx, deadline):
-        """The decoded Level III scan IEM calls `stamp` for `site`, fetched once.
+        """Share a bounded scan acquisition, including its failure, across tiles.
 
-        IEM floors each volume's start to the minute; the S3 key carries its
-        seconds (IEM 03:42 is ATX_N0B_..._03_42_24). Tile threads for one scan
-        share a single download; a scan S3 lacks fails fast for a minute.
+        Waiters never become owners of an obsolete flight. No completion or
+        negative-cache entry retains an exception traceback (and its arrays).
         """
         import urllib.error
+        import xml.etree.ElementTree as ET
         from lib.radar_level3 import decode, match_key
         from lib.radar_palette import DISPLAY_FLOOR_DBZ
         stamp_ts = datetime.strptime(_radar_stamp_text(stamp), '%Y%m%d%H%M').replace(tzinfo=timezone.utc).timestamp()
         key = (site, stamp_ts)
+        self._radar_checkpoint(ctx)
         with self._radar_lock:
             scan = self._radar_level3_scans.get(key)
             if scan is not None:
@@ -2740,65 +2755,95 @@ class AlmanacEmitter:
                 return scan
             failed = self._radar_level3_failed.get(key)
             if failed and time.monotonic() < failed[0]:
-                raise ValueError(failed[1])
-            flight = self._radar_level3_flights.setdefault(key, threading.Lock())
-        with flight:
+                raise failed[2](failed[1])
+            flight = self._radar_level3_flights.get(key)
+            owner = flight is None
+            if owner:
+                flight = dict(done=_Event(), scan=None, error=None)
+                self._radar_level3_flights[key] = flight
+        if not owner:
+            while not flight['done'].is_set():
+                self._radar_checkpoint(ctx)
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise TimeoutError('level3 scan wait deadline')
+                flight['done'].wait(min(.1, remaining))
+            self._radar_checkpoint(ctx)
+            if flight['error'] is not None:
+                error_type, message = flight['error']
+                raise error_type(message)
+            return flight['scan']
+        reserve = ctx.get('request_reserve', RADAR_HISTORY_RESERVE if ctx.get('prefetch') else 0)
+        options = dict(reserve=reserve) if reserve else {}
+        source = RADAR_LEVEL3_TRANSPORT  # global rate/byte counters, separate provider health
+        try:
+            prefix = '%s_N0B_%s' % (site[1:], datetime.fromtimestamp(stamp_ts, timezone.utc).strftime('%Y_%m_%d_%H'))
             with self._radar_lock:
-                scan = self._radar_level3_scans.get(key)
-                failed = self._radar_level3_failed.get(key)
-            if scan is not None:
-                return scan
-            if failed and time.monotonic() < failed[0]:
-                raise ValueError(failed[1])  # a waiter behind the failed download
-            reserve = ctx.get('request_reserve', RADAR_HISTORY_RESERVE if ctx.get('prefetch') else 0)
-            options = dict(reserve=reserve) if reserve else {}
-            source = 'iem-nexrad-n0b'  # one rate gate and byte account for single-site radar
-            try:
-                prefix = '%s_N0B_%s' % (site[1:], datetime.fromtimestamp(stamp_ts, timezone.utc).strftime('%Y_%m_%d_%H'))
+                listed = self._radar_level3_listings.get((site, prefix))
+            name = match_key(listed[1], stamp_ts) if listed else None
+            if name is None and (listed is None or time.monotonic()-listed[0] > 20):
+                keys = ()
+                def validate_listing(raw):
+                    nonlocal keys
+                    try:
+                        root = ET.fromstring(raw)
+                    except ET.ParseError as error:
+                        raise ValueError('level3 invalid listing') from error
+                    if root.tag.rsplit('}', 1)[-1] != 'ListBucketResult':
+                        raise ValueError('level3 invalid listing')
+                    if any(e.text == 'true' for e in root.iter() if e.tag.rsplit('}', 1)[-1] == 'IsTruncated'):
+                        raise ValueError('level3 truncated hourly listing')
+                    keys = tuple(e.text for e in root.iter() if e.tag.rsplit('}', 1)[-1] == 'Key'
+                                 and e.text and re.fullmatch(r'[A-Z0-9_]{1,64}', e.text)
+                                 and e.text.startswith(prefix + '_'))
+                self._radar_request(source, RADAR_LEVEL3_BUCKET+'?list-type=2&prefix='+prefix,
+                    min(deadline, time.monotonic()+RADAR_TILE_TIMEOUT_SEC),
+                    metadata=True, validate=validate_listing, **options)
+                listed = (time.monotonic(), keys)
                 with self._radar_lock:
-                    listed = self._radar_level3_listings.get((site, prefix))
-                name = match_key(listed[1], stamp_ts) if listed else None
-                if name is None and (listed is None or time.monotonic()-listed[0] > 20):
-                    raw = self._radar_request(source, RADAR_LEVEL3_BUCKET+'?list-type=2&prefix='+prefix,
-                                              min(deadline, time.monotonic()+RADAR_TILE_TIMEOUT_SEC), **options)
-                    keys = re.findall(rb'<Key>([A-Z0-9_]{1,64})</Key>', raw)
-                    listed = (time.monotonic(), tuple(k.decode() for k in keys))
-                    with self._radar_lock:
-                        self._radar_level3_listings[(site, prefix)] = listed
-                        while len(self._radar_level3_listings) > 16:
-                            self._radar_level3_listings.pop(next(iter(self._radar_level3_listings)))
-                    name = match_key(listed[1], stamp_ts)
-                if name is None:
-                    raise ValueError('level3 scan %s %s not published' % (site, _radar_stamp_text(stamp)))
-                raw = self._radar_request(source, RADAR_LEVEL3_BUCKET+name,
-                                          min(deadline, time.monotonic()+2*RADAR_TILE_TIMEOUT_SEC), **options)
+                    self._radar_level3_listings[(site, prefix)] = listed
+                    while len(self._radar_level3_listings) > 16:
+                        self._radar_level3_listings.pop(next(iter(self._radar_level3_listings)))
+                name = match_key(listed[1], stamp_ts)
+            if name is None:
+                raise ValueError('level3 scan %s %s not published' % (site, _radar_stamp_text(stamp)))
+            self._radar_checkpoint(ctx)
+            def validate_product(raw):
+                nonlocal scan
                 lat, lon, _ = _NEXRAD_SITES[site]
                 scan = decode(raw, expect_site=(lat, lon), speckle_dbz=DISPLAY_FLOOR_DBZ)
-                if abs(scan.volume_ts - stamp_ts) >= 120:
+                if not 0 <= scan.volume_ts - stamp_ts < 60:
                     raise ValueError('level3 volume time does not match the scan')
-            except (_RadarBudget, _RadarSuperseded, CircuitOpen):
-                raise  # pass control, not a verdict on the scan
-            except Exception as error:
-                # Every tile of the scan would repeat this; a transport failure
-                # retries sooner than a product S3 lacks or we refuse.
+            self._radar_request(source, RADAR_LEVEL3_BUCKET+name,
+                min(deadline, time.monotonic()+2*RADAR_TILE_TIMEOUT_SEC), validate=validate_product, **options)
+            with self._radar_lock:
+                self._radar_level3_scans[key] = scan
+                self._radar_level3_failed.pop(key, None)
+                while len(self._radar_level3_scans) > RADAR_LEVEL3_SCAN_CACHE:
+                    self._radar_level3_scans.popitem(last=False)
+            flight['scan'] = scan
+            return scan
+        except BaseException as error:
+            control = isinstance(error, (_RadarBudget, _RadarSuperseded, CircuitOpen))
+            # Preserve pass control and local/ambiguous transport classification
+            # without keeping socket objects or decode tracebacks alive.
+            kind = failure_class(error)
+            error_type = (type(error) if control else LocalTransportError if kind == 'local'
+                          else AmbiguousTransportError if kind == 'ambiguous'
+                          else TimeoutError if is_transport_error(error) else ValueError)
+            message = type(error).__name__ + ': ' + str(error)
+            flight['error'] = (error_type, message)
+            if isinstance(error, Exception) and not control:
                 retry = RADAR_LEVEL3_RETRY_SEC if isinstance(error, (ValueError, urllib.error.HTTPError)) else 10
                 with self._radar_lock:
-                    self._radar_level3_failed[key] = (time.monotonic()+retry, type(error).__name__+': '+str(error))
+                    self._radar_level3_failed[key] = (time.monotonic()+retry, message, error_type)
                     while len(self._radar_level3_failed) > 64:
                         self._radar_level3_failed.pop(next(iter(self._radar_level3_failed)))
-                raise
-            else:
-                with self._radar_lock:
-                    self._radar_level3_scans[key] = scan
-                    self._radar_level3_failed.pop(key, None)
-                    while len(self._radar_level3_scans) > RADAR_LEVEL3_SCAN_CACHE:
-                        self._radar_level3_scans.popitem(last=False)
-                return scan
-            finally:
-                # Waiters already hold this lock object and find the verdict above.
-                with self._radar_lock:
-                    if self._radar_level3_flights.get(key) is flight:
-                        del self._radar_level3_flights[key]
+            raise
+        finally:
+            with self._radar_lock:
+                flight['done'].set()
+                del self._radar_level3_flights[key]
 
     def _radar_site_listing(self, ctx, site):
         """One listing owner for viewport acquisition and Region's cadence check."""
@@ -3111,8 +3156,7 @@ class AlmanacEmitter:
                         # Repair the published measurement, even if a late
                         # neighbour listing would now choose a different scan.
                         pairs = [(p['id'],p['ts']) for p in frames[t]['siteScans']] if source == 'iem-nexrad-n0b' else [(None,t)]
-                        cost = sum(not _radar_present(ctx,source,site,scan,ctx['zoom'],x,y)
-                            for site,scan in pairs for x,y,_,_ in _radar_site_tiles(ctx,site))
+                        cost = self._radar_frame_request_cost(source, ctx, pairs)
                         cost += source == 'iem-mrms-lcref'
                         needed = cost + reserve
                         if deep:
@@ -3189,6 +3233,32 @@ class AlmanacEmitter:
             self._radar_budget_retry(source, len(ctx['tiles'])+2)
         return self._radar_result
 
+    def _radar_frame_request_cost(self, source, ctx, pairs):
+        """Price network acquisitions, not the number of generated PNGs."""
+        from lib.radar_level3 import match_key
+        native = _radar_variant(ctx, source) == 'native'
+        count, scans, listings = 0, set(), set()
+        for site, stamp in pairs:
+            missing = sum(not _radar_present(ctx, source, site, stamp, ctx['zoom'], x, y)
+                          for x, y, _, _ in _radar_site_tiles(ctx, site))
+            if not native:
+                count += missing
+                continue
+            if not missing:
+                continue
+            text = _radar_stamp_text(stamp)
+            ts = datetime.strptime(text, '%Y%m%d%H%M').replace(tzinfo=timezone.utc).timestamp()
+            key = (site, ts)
+            with self._radar_lock:
+                if key in self._radar_level3_scans or key in scans:
+                    continue
+                scans.add(key)
+                prefix = '%s_N0B_%s' % (site[1:], datetime.fromtimestamp(ts, timezone.utc).strftime('%Y_%m_%d_%H'))
+                listed = self._radar_level3_listings.get((site, prefix))
+                if listed is None or match_key(listed[1], ts) is None:
+                    listings.add((site, prefix))
+        return count + len(scans) + len(listings)
+
     def _radar_mandatory_reserve(self, source, ctx, stamps):
         tiles = _radar_grid(ctx)
         count = 0
@@ -3198,6 +3268,13 @@ class AlmanacEmitter:
             if 'site_scans' in ctx:
                 return _radar_site_pairs(ctx,stamp)
             return [(site['id'],site.get('newestTs') or stamp) for site in ctx.get('sites',()) if site.get('reporting')]
+        if _radar_variant(ctx, source) == 'native':
+            pairs = [pair for stamp in stamps for pair in required(stamp)]
+            count = self._radar_frame_request_cost(source, dict(ctx, tiles=tiles), pairs)
+            layers = max(1, len(required(stamps[-1]))) if stamps else 1
+            # A cold newest needs one S3 listing and one product per site;
+            # also reserve IEM discovery for each site.
+            return min(RADAR_REQUESTS_PER_MIN-1, max(count, 2*layers)+layers)
         for stamp in stamps:
             pairs = required(stamp)
             for site, scan in pairs:
@@ -3480,7 +3557,7 @@ class AlmanacEmitter:
         if not local and self._radar_transport_failures[source] >= 3:
             return True
         self._radar_retained_refresh('failed')
-        probe = self._radar_health.probe_delay({source}) or 0
+        probe = self._radar_health.probe_delay(set(self._radar_transport_sources(source, ctx))) or 0
         self._radar_budget_retry(source, 1, min_delay=max(2, probe),
             reason='deadline' if isinstance(error, TimeoutError) and not local else 'local' if local else 'provider')
         return False
@@ -3607,6 +3684,7 @@ class AlmanacEmitter:
                 native = len(raw) < 128 and raw.strip() == 'v2'
             except (OSError, UnicodeError):
                 native = False
+            self._radar_native_requested = native
             ctx = dict(listing_results={}, smooth=smooth, native=native, center=center, nexrad=_radar_nexrad(station_lat, station_lon, unit), viewed=viewed,
                 desired=desired, auto_zoom=auto_zoom, builds=0, station=station, unit=unit, previous_result=previous,
                 preference_stamp=stamp, stamp_names=stamp_names, intent_triggered=intent_triggered, discovery=discovery,
@@ -3700,7 +3778,8 @@ class AlmanacEmitter:
                 if previous.frames and source != previous.source_id:
                     ctx['staging_source'] = source
                     ctx['switch_reason'] = '; '.join(errors) or 'preferred source recovered after 300s dwell'
-                if self._radar_cooldowns.get(source, 0) > time.monotonic():
+                if any(self._radar_cooldowns.get(s, 0) > time.monotonic()
+                       for s in self._radar_transport_sources(source, ctx)):
                     self._radar_retained_refresh('failed')
                     self._radar_budget_retry(source, 1, reason='provider')
                     return
@@ -3709,7 +3788,8 @@ class AlmanacEmitter:
                 ctx.pop('missing_tiles', None)
                 ctx.pop('retained_failed', None)
                 try:
-                    probes = self._radar_health.probes(source)
+                    probes = [probe for s in self._radar_transport_sources(source, ctx)
+                              for probe in self._radar_health.probes(s)]
                 except CircuitOpen as error:
                     if source == 'iem-nexrad-n0b':
                         ctx['sources'][1].update(available=False, reason='scan unavailable')
@@ -3759,7 +3839,8 @@ class AlmanacEmitter:
                     return
                 try:
                     for probe_url, is_metadata in probes:
-                        raw = self._radar_request(source, probe_url, ctx['deadline'],
+                        probe_source = RADAR_LEVEL3_TRANSPORT if probe_url.startswith(RADAR_LEVEL3_BUCKET) else source
+                        raw = self._radar_request(probe_source, probe_url, ctx['deadline'],
                             method='GET' if is_metadata else 'HEAD', metadata=True)
                         if is_metadata:
                             self._radar_probe_reuse[probe_url] = raw

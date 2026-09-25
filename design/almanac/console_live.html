@@ -3202,7 +3202,7 @@
     if(radarSwitch){radarSwitch.generation=radarIntent.generation;radarSwitch.requiresIntent=true;radarSwitch.committed=true;}
     radarIntent.timer=setTimeout(()=>{poll(immediate);},immediate?0:120);}
   $('rad-smooth').addEventListener('click',()=>{if(radarNativeActive())return;radarSmooth.value=radarSmooth.pending=!radarSmooth.value;radarZoomRender();poll(true);});
-  ['v1','v2'].forEach(v=>$('rad-'+v).addEventListener('click',()=>{if(radarRender.value===v)return;radarRender.value=radarRender.pending=v;radarZoomRender();poll(true);}));
+  ['v1','v2'].forEach(v=>$('rad-'+v).addEventListener('click',()=>{if(radarRender.writable===false||radarRender.value===v)return;radarRender.value=radarRender.pending=v;radarZoomRender();poll(true);}));
   // v2 draws gates, not IEM colours: Smooth has nothing to soften there. Region has no single radar, so it stays v1.
   function radarNativeActive(){return radarRender.value==='v2'&&radarView.data?.sourceMode==='site';}
   function radarZoomRender(){var r=radarView.data,rail=$('rad-zoom');rail.hidden=!r;if(!r||!radarCamera)return;var native=radarNativeActive();$('rad-smooth').setAttribute('aria-pressed',String(!!radarSmooth.value&&!native));$('rad-smooth').setAttribute('aria-disabled',String(native));$('rad-v1').setAttribute('aria-pressed',String(radarRender.value!=='v2'));$('rad-v2').setAttribute('aria-pressed',String(radarRender.value==='v2'));var z=Math.round(radarCamera.zoom);rail.dataset.mode=radarZoom.auto?'auto':'manual';rail.dataset.state='confirmed';rail.setAttribute('aria-busy','false');$('rad-zoom-mode').textContent=radarZoom.auto?'Auto':String(z);$('rad-zoom-reset').hidden=radarZoom.auto;$('rad-zoom-out').disabled=z<=r.zoomMin;$('rad-zoom-in').disabled=z>=10;radarView.zoomNote=z>r.zoomMax?r.zoomSource+' reaches zoom '+r.zoomMax+' — scaled to this view.':radarRender.value==='v2'&&r.sourceMode!=='site'?'v2 draws one radar’s own cells · Region stays v1':'';radarNoteRender();}
@@ -3561,8 +3561,9 @@
         if(x.ack){radarIntent.owner=x.ack.session;if(!radarIntent.owned){radarIntent.accepted=x.ack.intent;if(!radarIntent.edited)radarIntent.preferredMode=x.ack.intent.source||radarIntent.preferredMode;radarIntent.owned=x.ack.session===radarIntent.session;if(radarIntent.owned&&!radarIntent.edited&&x.ack.intent.zoom!==undefined&&radarCamera){var r=radarView.data,c=x.ack.intent.center==='station'?r.center:x.ack.intent.center,z=x.ack.intent.zoom==='auto'?r.zoomAutoLevel:x.ack.intent.zoom;radarZoom.auto=x.ack.intent.zoomPolicy==='auto'||x.ack.intent.zoom==='auto';if(Math.abs(radarCamera.lat-c.lat)>1e-8||Math.abs(radarCamera.lon-c.lon)>1e-8||radarCamera.zoom!==z){radarCameraSet({...c,zoom:z});radarSettle();}if(x.ack.intent.source!==r.sourceMode)radarSource.desired=x.ack.intent.source;}}if(x.ack.session===radarIntent.session&&x.ack.generation===sentIntentGeneration){radarIntent.ready=false;radarTrace('accepted');}}
         if(x.smooth==='on'||x.smooth==='off'){var smooth=x.smooth==='on';if(radarSmooth.pending===smooth)radarSmooth.pending=null;if(radarSmooth.pending===null)radarSmooth.value=smooth;}
         else if(radarSmooth.value===null)radarSmooth.value=!!d.radar?.smooth;
-        if(x.render==='v1'||x.render==='v2'){if(radarRender.pending===x.render)radarRender.pending=null;if(radarRender.pending===null)radarRender.value=x.render;}
-        else if(radarRender.value===null)radarRender.value=d.radar?.native?'v2':'v1';
+        if(x.render==='v1'||x.render==='v2'){radarRender.writable=true;if(radarRender.pending===x.render)radarRender.pending=null;if(radarRender.pending===null)radarRender.value=x.render;}
+        else {radarRender.writable=false;radarRender.pending=null;radarRender.value=d.radar?.native?'v2':'v1';}
+        ['v1','v2'].forEach(v=>$('rad-'+v).disabled=radarRender.writable===false);
         render(d);                                /* may throw — book success AFTER it */
 
         lastRenderMs = Date.now();

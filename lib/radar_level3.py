@@ -15,6 +15,7 @@ Gate codes: 0 below threshold, 1 range folded, n >= 2 is (n-2)/2 - 32 dBZ.
 """
 import bz2
 import math
+import re
 import struct
 from datetime import datetime, timedelta, timezone
 from functools import lru_cache
@@ -30,7 +31,7 @@ EARTH_RADIUS_M = 6371000.0
 EFFECTIVE_RADIUS_M = EARTH_RADIUS_M * 4 / 3  # standard refraction
 SITE_TOLERANCE_DEG = 0.05
 # The render identity of a native tile; bump when geometry or colouring changes.
-NATIVE_REVISION = "level3-n0b-polar-v1"
+NATIVE_REVISION = "level3-n0b-polar-v2"
 
 
 class Scan:
@@ -68,7 +69,7 @@ def decode(raw, expect_site=None, speckle_dbz=None):
     code, _, _, length, _, _, blocks = struct.unpack('>hhIIhhh', raw[offset:offset + 18])
     if code != PRODUCT_CODE:
         raise ValueError('level3 product %d is not N0B' % code)
-    if length != len(raw) - offset or blocks < 3:
+    if length != len(raw) - offset or blocks != 3:
         raise ValueError('level3 message length')
     words = struct.unpack('>51h', raw[offset + 18:offset + 120])
     if words[0] != -1 or words[6] != PRODUCT_CODE:
@@ -84,21 +85,28 @@ def decode(raw, expect_site=None, speckle_dbz=None):
     elevation = words[20] / 10
     if not 0 < elevation <= 2:
         raise ValueError('level3 elevation %.1f is not a lowest tilt' % elevation)
-    volume_ts = _julian_ts(words[11], struct.unpack('>I', raw[offset + 42:offset + 46])[0])
+    day, seconds = struct.unpack('>HI', raw[offset + 40:offset + 46])
+    if day == 0 or seconds >= 86400:
+        raise ValueError('level3 volume time')
+    volume_ts = _julian_ts(day, seconds)
     expanded = struct.unpack('>I', raw[offset + 102:offset + 106])[0]
     body = bytes(raw[offset + 120:])
     if body[:3] == b'BZh':
         if not 0 < expanded <= MAX_SYMBOLOGY_BYTES:
             raise ValueError('level3 uncompressed size')
         decompressor = bz2.BZ2Decompressor()
-        body = decompressor.decompress(body, MAX_SYMBOLOGY_BYTES + 1)
-        if len(body) != expanded or not decompressor.eof:
+        try:
+            body = decompressor.decompress(body, MAX_SYMBOLOGY_BYTES + 1)
+        except OSError as error:
+            raise ValueError('level3 invalid bzip2 stream') from error
+        if len(body) != expanded or not decompressor.eof or decompressor.unused_data:
             raise ValueError('level3 decompressed size')
-    if len(body) < 30:
+    if not 30 <= len(body) <= MAX_SYMBOLOGY_BYTES:
         raise ValueError('level3 symbology')
-    divider, block_id, _, layers = struct.unpack('>hhIh', body[:10])
-    layer_divider, _ = struct.unpack('>hI', body[10:16])
-    if divider != -1 or block_id != 1 or layers < 1 or layer_divider != -1:
+    divider, block_id, block_length, layers = struct.unpack('>hhIh', body[:10])
+    layer_divider, layer_length = struct.unpack('>hI', body[10:16])
+    if (divider != -1 or block_id != 1 or layers != 1 or layer_divider != -1 or
+            block_length != len(body) or layer_length != len(body) - 16):
         raise ValueError('level3 symbology header')
     packet, first_gate, gates, _, _, _, radials = struct.unpack('>7h', body[16:30])
     if packet != 16 or first_gate != 0 or not 0 < gates <= MAX_GATES or not 300 <= radials <= 800:
@@ -106,16 +114,29 @@ def decode(raw, expect_site=None, speckle_dbz=None):
     codes = np.zeros((radials, gates), np.uint8)
     bearing_index = np.full(3600, -1, np.int16)
     cursor = 30
+    previous_start, previous_width, swept = None, 0, 0
     for radial in range(radials):
         if cursor + 6 > len(body):
             raise ValueError('level3 truncated radial')
         count, start, width = struct.unpack('>3h', body[cursor:cursor + 6])
         cursor += 6
-        if not 0 <= count <= gates or not 0 <= start < 3600 or not 1 <= width <= 20 or cursor + count > len(body):
+        if not 0 <= count <= gates or not 0 <= start < 3600 or not 1 <= width <= 20 or cursor + count + (count & 1) > len(body):
             raise ValueError('level3 radial header')
+        # QC uses adjacent rows as adjacent azimuths. Reject duplicate or
+        # scrambled rays even if their union happens to cover the circle.
+        if previous_start is not None:
+            step = (start - previous_start) % 3600
+            swept += step
+            if step == 0 or swept >= 3600 or step < previous_width - 1:
+                raise ValueError('level3 radial order')
+        previous_start, previous_width = start, width
         codes[radial, :count] = np.frombuffer(body, np.uint8, count, cursor)
         cursor += count + (count & 1)
         bearing_index[(start + np.arange(width)) % 3600] = radial
+    if cursor != len(body):
+        raise ValueError('level3 trailing radial data')
+    if 3600 - swept < previous_width - 1:
+        raise ValueError('level3 radial overlap')
     if (bearing_index < 0).mean() > .02:
         raise ValueError('level3 azimuth coverage')
     if speckle_dbz is not None:
@@ -201,12 +222,14 @@ def gate_lookup(scan, z, x, y, size=256):
 def render_tile(scan, z, x, y, palette, supersample=None):
     """Return (PIL 'P' image, visible pixel count) for one 256-pixel tile.
 
-    Below zoom 9 one pixel spans more than one gate; each pixel then takes the
-    strongest of a 2x2 sample so a narrow core is not lost between samples.
+    At zoom 7 one pixel (~830 m at 47 N) spans several gates; each pixel then
+    takes the strongest of a 2x2 sample so a narrow core is not lost between
+    samples. From zoom 8 a pixel is about one gate, and 2x2 would quadruple
+    the trigonometry (measured on the Pi 4: 105 ms against 28 ms per tile).
     """
     from PIL import Image
     slots, colours = colour_table(palette)
-    factor = supersample or (2 if z < 9 else 1)
+    factor = supersample or (2 if z < 8 else 1)
     row, gate = gate_lookup(scan, z, x, y, 256 * factor)
     codes = scan.codes[np.maximum(row, 0), gate]
     codes[row < 0] = 0
@@ -223,11 +246,12 @@ def render_tile(scan, z, x, y, palette, supersample=None):
 def s3_key_time(key):
     """'ATX_N0B_2026_09_25_03_42_24' -> epoch seconds, or None."""
     try:
-        parts = key.rsplit('/', 1)[-1].split('_')
-        if len(parts) != 8 or parts[1] != 'N0B':
+        name = key.rsplit('/', 1)[-1]
+        if not re.fullmatch(r'[A-Z0-9]{3}_N0B_[0-9]{4}(?:_[0-9]{2}){5}', name):
             return None
+        parts = name.split('_')
         return datetime(*map(int, parts[2:]), tzinfo=timezone.utc).timestamp()
-    except (ValueError, TypeError):
+    except (ValueError, TypeError, AttributeError, OverflowError):
         return None
 
 
@@ -236,7 +260,7 @@ def match_key(keys, stamp_ts):
     best = None
     for key in keys:
         ts = s3_key_time(key)
-        if ts is not None and -60 < ts - stamp_ts < 120:
+        if ts is not None and 0 <= ts - stamp_ts < 60:
             if best is None or abs(ts - stamp_ts - 30) < abs(best[0] - stamp_ts - 30):
                 best = (ts, key)
     return best[1] if best else None

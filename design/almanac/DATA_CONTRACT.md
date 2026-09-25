@@ -1386,6 +1386,76 @@ manual deadline clock. `tests/verify_radar_v61.py` checks both preference
 handoffs in both themes, retained plate ownership, the 600-frame admission
 refusal fence, release/poll retries, and before/after memory tables (`--baseline`).
 
+### v2: the radar's own cells (Level III, phase 0, 2026-09-24)
+
+**v1** is the radar above: IEM ridge tiles, gridded by IEM to about 1 km before
+we remap them. **v2** draws single-site NEXRAD from NOAA's Level III base
+reflectivity (N0B, product 153: 720 radials of 0.5 degrees, 1840 gates of 250 m),
+read from the public bucket `https://unidata-nexrad-level3.s3.amazonaws.com/`.
+Design and the later phases: `RADAR-NATIVE-DESIGNS.md`.
+
+**Preference.** A `v1 | v2` group sits after SMOOTH (two 48×44 px segments on the
+plate scrim, `aria-pressed`). The camera owner sends `radarRender=v1|v2`; the rules
+are Smooth's exactly: one value, loopback and accepted camera transactions only,
+atomic replace only on change, durable at
+`$XDG_STATE_HOME/wfpiconsole/radar_render`, acknowledged by
+`X-Radar-Render: v1|v2`, and watched by the emitter even under an ordered intent.
+Default is v1. v2 applies only while the site source is on screen: Region has no
+single radar and stays v1 (the note says so), and Smooth is disabled while v2
+draws, since gates have no colour edges to soften.
+
+**Render variant.** v2 is a third tile variant beside plain and Smooth:
+`_radar_variant(ctx, source)` is `'native'` for `iem-nexrad-n0b` with v2 selected,
+otherwise the Smooth boolean. The variant has its own render revision directory
+(`_radar_render_revision('native')`, advertised in `radar/.native-revision` so
+the server serves it immutable), a disk key suffixed `('native',)`, and PNG
+metadata with `revision` = `level3-n0b-polar-v2` (`radar_level3.NATIVE_REVISION`).
+Gates are measurements, not matched colours, so `unmatchedPixels` and
+`ambiguousPixels` are 0 and `remapped` is true. The manifest adds
+`tiles.variant` (`false`, `true` or `"native"`); `tiles.smooth` stays a boolean,
+true only for Smooth, so the page never interpolates v2 pixels. The payload adds
+`radar.native`, and its attribution reads `NOAA NEXRAD Level III`.
+
+**Scan identity.** IEM names a scan by its volume start floored to the minute;
+the S3 key carries the seconds (`ATX_N0B_2026_09_25_03_42_24` is IEM's 03:42).
+The emitter lists the hour prefix (`?list-type=2&prefix=ATX_N0B_YYYY_MM_DD_HH`),
+takes the key inside the IEM stamp's minute, and downloads it through the radar
+transport under its own dependency, `noaa-level3-n0b`: it shares the global rate
+gate, byte accounting and tier, but has its own host breaker and cooldown, so an
+AWS outage never blocks v1. A product counts as a success only after it decodes
+and its volume time falls inside that minute; a listing only after it parses as
+an untruncated `ListBucketResult`. Admission prices a v2 frame by the listings
+and products it still needs, not by the tiles it will draw. One download per scan serves
+every tile thread; up to 24 decoded scans (~1.3 MB each) stay in memory. A scan
+S3 lacks, or that fails validation, fails fast for 60 s (10 s after a transport
+error) instead of once per tile, keeping the failure's class (local,
+ambiguous or provider) so backoff stays right. Waiters share the owner's verdict
+and give up at their own deadline.
+
+**Decoding** (`lib/radar_level3.py`) refuses: a size over 2 MB; a WMO header
+that isn't two CRLF lines; any product but 153; a message length that disagrees
+with the bytes; a site more than 0.05 degrees from the listed radar; thresholds
+other than (−320, 5, 254); an elevation outside (0, 2] degrees; a bzip2 body
+whose expanded size disagrees with the header; a packet other than 16; radial
+headers out of bounds; more than 2 % of bearings uncovered. Gate code n ≥ 2 is
+(n−2)/2 − 32 dBZ; 0 (below threshold) and 1 (range folded) draw nothing. Gates
+at or above the 15 dBZ display floor with fewer than two such neighbours are
+cleared (aircraft, birds, interference).
+
+**Drawing.** Each pixel centre is taken to ground distance and bearing from the
+radar, then to slant range on the 4/3-earth beam at the scan's elevation, and
+reads gate `floor(range / 250 m)` of the radial covering that bearing. At zoom 7
+a pixel takes the strongest of a 2×2 sample. Colour is the shared display LUT
+applied by the same step rule as the IEM remap, so equal reflectivity draws the
+same colour in v1 and v2 (tested code by code). Neighbouring radars are still
+drawn in painter order; the per-pixel lowest-beam mosaic is phase 2.
+
+**Measured on the Pi 4** (KATX in rain, 2026-09-24): products 251–333 KB and
+0.2–1.6 s each; decode and despeckle 149 ms; a new tile 28 ms at zoom 9–10;
+opening a cached tile 2.7 ms. A cold switch at zoom 8 with four radars
+downloaded 31 products (9 MB) and filled all eight frames in 59 s, with the
+first new frame at 13 s.
+
 ### Shared reflectivity palette
 
 `lib/radar_palette.py` pins complete native colour inverses in `lib/data/`, with

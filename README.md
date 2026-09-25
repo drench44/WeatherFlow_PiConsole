@@ -89,8 +89,8 @@ frames, and everywhere else — or whenever that feed can't be reached — it fa
 back to a global ten-minute mosaic, always saying which one is on screen. Every
 source's echoes are drawn on one reflectivity scale — nine bands from 10 to
 75 dBZ in the RadarScope tradition, sage through green for light rain before
-the yellows and reds, the same pixels on paper and night, nothing below 10 dBZ
-so clear-air clutter never films the map, and no guessing at rain versus snow.
+the yellows and reds, the same pixels on paper and night, nothing below 15 dBZ
+so insects and clear-air clutter never film the map, and no guessing at rain versus snow.
 Recent frames play as a smooth loop, five a second with a short crossfade and
 a hold on the newest, whose scan time is printed beside the clock and is never
 dressed up as "live"; opening the tab brings the loop up from cache in
@@ -98,8 +98,7 @@ milliseconds, and play means play even while frames are still arriving. Two
 buttons choose the picture: **Region**, many radars blended with a new image
 every two minutes, or the nearest **NEXRAD** site by its callsign — its own
 scans at their real times, every neighbouring radar whose range reaches the
-view composited underneath, faint returns from 5 dBZ so a clear-air day still
-shows its texture, and a plain caption under the buttons that says which radar,
+view composited underneath, and a plain caption under the buttons that says which radar,
 how far, and how often, with the radar's operating mode read from its own
 cadence: a scan every four minutes or so is precipitation mode, every ten is
 clear-air. The site button tells you before you tap when that radar is off the
@@ -109,7 +108,12 @@ lands in a second or two. A quiet +/− sets the zoom and remembers it across
 reboots — a zoom step keeps the loop you were watching playing until the new
 frames are in — and a **SMOOTH** toggle, off by default, softens the gate edges
 of every echo without inventing detail, interpolated on the reflectivity field
-so every pixel is still a legend colour. The station glyph shows where home is
+so every pixel is still a legend colour. Beside it, **v1 | v2** picks how the
+site radar is drawn: v1 from IEM's tiles, gridded to about a kilometre; v2
+from NOAA's Level III product, the radar's own half-degree by 250-metre cells,
+so zoom 9 and 10 look like a phone radar app instead of a mosaic of squares.
+v2 is a first version: neighbouring radars are layered rather than merged cell
+by cell yet, and a cold switch takes about a minute to fill the loop. The station glyph shows where home is
 while you're away and the view drifts back to it after a minute and a half
 untouched.
 
