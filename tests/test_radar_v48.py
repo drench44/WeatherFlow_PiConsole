@@ -59,6 +59,12 @@ def test_fresh_hang_and_hanging_retry_never_replayed(origin, reused):
 def test_six_hanging_reused_workers_share_deadline(make_emitter, origin, monkeypatch, tmp_path, fresh_hangs):
     emitter = make_emitter()
     monkeypatch.setattr(ae, 'RADAR_DIR', str(tmp_path/'radar'))
+    # This measures the shared deadline and retry accounting. A hedge is legal
+    # here whenever one worker's retry frees a warm socket before another has
+    # waited RADAR_HEDGE_SEC; the six hang in lockstep only on an idle machine
+    # (a loaded CI runner staggered them and hedged once, 2026-09-25). Hedging
+    # has its own tests; keep it out of this timeline.
+    monkeypatch.setattr(ae, 'RADAR_HEDGE_SEC', 60)
     infos = []
     monkeypatch.setattr(ae.Logger, 'info', infos.append)
     source = 'iem-mrms-lcref'
