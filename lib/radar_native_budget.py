@@ -4,7 +4,7 @@ import logging
 import os
 import threading
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from functools import lru_cache
 from pathlib import Path
 
@@ -45,14 +45,18 @@ class NativeBudget:
 
     Call persist outside the renderer lock. Thresholds and forward UTC rollovers
     flush immediately; other changes are written at most once per 60 seconds.
-    A failed write pauses native access without changing the actual byte count.
+    Failed writes retry with bounded backoff. Native remains memory-metered under
+    the same byte ceilings; ledger health is independent of the daily limit.
     """
     def __init__(self, path, clock=time.time, monotonic=time.monotonic):
         self.path, self.clock, self.monotonic = Path(path), clock, monotonic
         self.lock = threading.RLock()
         self.persist_lock = threading.Lock()
         self.day, self.bytes = '', 0
+        self.clock_day = None
         self.failed = False
+        self.retry_at = 0.
+        self.write_failures = 0
         self.saved = None
         self.last_write = None
         try:
@@ -66,18 +70,25 @@ class NativeBudget:
             pass
 
     def _state(self):
-        return ('paused' if self.failed or self.bytes > NATIVE_PAUSE_BYTES else
+        return ('paused' if self.bytes > NATIVE_PAUSE_BYTES else
                 'newest-only' if self.bytes > NATIVE_NEWEST_ONLY_BYTES else 'normal')
 
     def _rollover(self):
-        day = datetime.fromtimestamp(self.clock(), timezone.utc).strftime('%Y-%m-%d')
-        if day > self.day:
+        now = self.clock()
+        clock_day = int(now // 86400)
+        if clock_day == self.clock_day:
+            return
+        today = datetime.fromtimestamp(now, timezone.utc).date()
+        day, tomorrow = today.isoformat(), (today + timedelta(days=1)).isoformat()
+        if day > self.day or self.day > tomorrow:
             self.day, self.bytes = day, 0
+        self.clock_day = clock_day
 
     def snapshot(self):
         with self.lock:
             self._rollover()
-            return dict(day=self.day, bytesToday=self.bytes, ceilingState=self._state())
+            return dict(day=self.day, bytesToday=self.bytes, ceilingState=self._state(),
+                        ledgerState='retrying' if self.failed else 'ok')
 
     def add(self, count):
         if count <= 0:
@@ -99,8 +110,10 @@ class NativeBudget:
                     self._rollover()
                     current = (self.day, self.bytes, self._state())
                     urgent = self.saved is None or current[0] != self.saved[0] or current[2] != self.saved[2]
-                    if self.failed or current == self.saved or (not urgent and self.last_write is not None and
-                            self.monotonic()-self.last_write < 60):
+                    if self.failed and self.monotonic() < self.retry_at:
+                        return
+                    if not self.failed and (current == self.saved or (not urgent and self.last_write is not None and
+                            self.monotonic()-self.last_write < 60)):
                         return
                 target = self.path.resolve()
                 temporary = target.with_name(target.name+'.tmp')
@@ -110,13 +123,19 @@ class NativeBudget:
                     os.fsync(stream.fileno())
                 os.replace(temporary, target)
                 with self.lock:
+                    self.failed = False
+                    self.write_failures = 0
                     self.saved = current
                     self.last_write = self.monotonic()
         except Exception as error:
             # Accounting must never replace a response or its original failure.
             with self.lock:
+                first_failure = not self.failed
                 self.failed = True
-            logging.getLogger(__name__).warning('Native radar ledger unavailable; native paused: %s', error)
+                self.write_failures += 1
+                self.retry_at = self.monotonic() + min(300, 5 * 2**min(self.write_failures-1, 6))
+            if first_failure:
+                logging.getLogger(__name__).warning('Native radar ledger unavailable; retrying, bytes counted in memory: %s', error)
         finally:
             if temporary is not None:
                 try:

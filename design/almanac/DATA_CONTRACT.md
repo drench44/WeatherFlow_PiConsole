@@ -600,11 +600,17 @@ The v1/v2 preference chooses the site renderer in Auto too.
   footprint at the same centre. Coverage is the union of the reporting sites'
   230 km spherical range discs, integrated over 512 Web Mercator screen rows.
   Overlaps count once. Tile margins do not count as viewport area.
-- Budget, timeout, transport and `scan unavailable` outcomes are unknown: keep
-  the displayed source. Preserve the last good listing and coverage evidence,
-  using it only within `RADAR_SITE_MAX_AGE_SEC`; expiry alone does not turn an
-  unknown result into a confirmed outage. A real not-reporting listing or
-  existing dark-site refusal can select Region immediately.
+- Budget, timeout and transport outcomes are initially unknown. Unknown evidence
+  can hold Site only while its displayed scan age is strictly below
+  `RADAR_SITE_MAX_AGE_SEC` and its adapter has fewer than three consecutive
+  provider failures. Otherwise select Region through the normal staging path.
+  Failed listings replace reporting=true with unknown, then unavailable after
+  one Site scan cadence (300 seconds from the first consecutive failed check).
+  Repeated failures do not restart that clock; a successful check resets it.
+  The closest radar must report; unknown neighbours matter only when their range
+  discs could change the 85% entry / 70% stay verdict. A redundant failed listing
+  cannot veto Site. A real not-reporting listing or dark-site refusal can select
+  Region immediately. Region remains in the adapter chain after Site fails.
 - Hold against a reverse automatic switch for 10 seconds after publication,
   unless settled zoom moved at least 2 levels since that switch. Loss of valid
   reporting takes precedence over this hold; coverage changes obey it. The existing intent
@@ -612,10 +618,13 @@ The v1/v2 preference chooses the site renderer in Auto too.
 
 Selection does not publish a candidate. The existing frame staging path retains
 the old source until the candidate newest frame is publishable. The page keeps
-its decoded frame staging for source and renderer/variant changes: the complete
-previous loop stays visible until min(4, n) frames of the new loop are decoded,
-where n is the advertised target, not just the newest frame published so far.
-The existing “Switching …” and “sharpening” copy describes the wait.
+its decoded frame staging for source changes: the complete previous loop stays
+visible until min(4, n) frames of the new loop are decoded, where n is the
+advertised target, not just the frames published so far. Tile scheduling and
+acceptance use the same readiness predicate. A renderer-only change on the same
+source/site accepts as soon as the new variant's newest frame is decoded;
+history backfills normally. Its caption says `Sharpening to v2 · showing v1`
+(or the reverse), never “Switching to” the same radar.
 Region still has a native zoom ceiling of 9; Auto
 can select Site at camera zoom 10 when the guards permit it.
 
@@ -623,10 +632,15 @@ A manual Region or Site choice holds until Auto is tapped or 45 minutes pass
 without a touch. The lease reads the existing `presence` marker used by radar
 attention; view polling does not renew it. Without a touch marker, the source
 preference's timestamp starts the hold. Future lease timestamps are clamped to
-the first observed current time so repeated polls cannot extend the hold.
+the first observed current time. A stamp-specific exclusive anchor file in the
+marker directory preserves that time across server/engine restarts; repeated
+polls and restarts cannot extend the hold. If a durable anchor cannot be read or
+written, that future marker expires rather than receiving another lease.
 Camera moves alone do not renew it; the page sends
 `radarSource` only for an explicit source change, and camera-only transactions
-preserve the source lease's acceptance time.
+preserve the source lease's acceptance time. A poll acknowledges an explicit
+source change only if that request actually carried `radarSource` and its
+intent generation is still current. An older poll cannot consume a newer tap.
 The engine checks expiry without needing a browser. The server persists Auto
 before recording a subsequent touch, so an expired choice cannot revive on the
 next poll or restart. Manual Site retains the zoom-7 floor and
@@ -635,19 +649,19 @@ next poll or restart. Manual Site retains the zoom-7 floor and
 ### Closest-site evidence and refusal (v6.0)
 
 The closest-site identity stays independent of the drawn timeline. When `nexrad`
-is non-null, these fields describe its **last known listing evidence**, even
-while Region is showing and even when acquisition subsequently fails. Failed
-checks preserve known evidence and its original observation time; without prior
-known evidence they report unknown availability. Auto bounds evidence reuse by
-`RADAR_SITE_MAX_AGE_SEC`. The scan age remains visible after that bound:
+is non-null, these fields describe its **latest listing check**. Failed checks
+report unknown availability, aging to unavailable after one scan cadence; they
+never preserve an earlier reporting=true verdict. Successful cached listings
+retain their check time, and Auto reuses them for at most one scan cadence.
+Auto bounds displayed Site retention by `RADAR_SITE_MAX_AGE_SEC`:
 
 | Field | Meaning |
 | --- | --- |
-| `nexrad.reporting` | Boolean freshness result at the last known listing evaluation; null when unknown. False alone does not prove an empty listing: inspect `reason` and `newestTs`. |
+| `nexrad.reporting` | Boolean freshness result at the latest listing evaluation; null during the first cadence of an unknown check. False alone does not prove an empty listing: inspect `reason` and `newestTs`. |
 | `nexrad.newestTs` | Newest accepted UTC scan epoch from the listing, or null for an empty/failed listing. Existing listing validation and history horizon still apply. |
 | `nexrad.ageSec` | Nonnegative whole seconds since `newestTs`, recomputed at publication; null without a scan. This clock advances while `checkedTs` stays fixed. |
 | `nexrad.reason` | Null when reporting, `not reporting` for an empty or over-age listing, `scan unavailable` for a failed/invalid listing; null before any check. |
-| `nexrad.checkedTs` | Wall-clock epoch of the retained listing evidence. Failed retries, cache reuse and heartbeat publication do not advance known evidence. Null before a check. |
+| `nexrad.checkedTs` | Wall-clock epoch of the latest listing attempt. Cache reuse and heartbeat publication do not advance it. Null before a check. |
 | `nexrad.checkedAt` | Station-local configured-clock rendering of `checkedTs`, or null. It is a check time, never a claimed outage start. |
 | `nexrad.nextCheckTs` | Current existing discovery wakeup epoch, or null when no wakeup is scheduled. Budget/busy-lane rescheduling changes this value. |
 | `nexrad.nextCheckAt` | Station-local configured-clock rendering of `nextCheckTs`, or null. |
@@ -662,15 +676,36 @@ that pass. This applies to an empty closest-site choice from an already measured
 Region view. Existing site playback still uses its nearest-reporting timeline;
 an old but nonempty listing or a transport error follows normal acquisition.
 
-On each existing discovery wakeup while Region shows, the closest eligible
-site is listed before the unchanged-MRMS early return, including while unviewed
-or below site zoom seven. There is no additional timer, emit-triggered I/O or
-polling loop. This optional request shares the pass deadline and 240/minute gate,
-preserving the footprint-aware mandatory reserve (at least 34 interaction slots). It yields under budget pressure without inventing
-a new observation. A per-pass listing table prevents repeating the closest-site
-request when site acquisition/fallback/warming follows in that same pass. Later
-discovery refreshes both site knowledge and Region imagery; reporting recovery
-can fulfill the durable site preference on that wakeup.
+While Region shows, its existing discovery wakeup checks the closest eligible
+site before the unchanged-MRMS early return, including manual Region and Auto
+below zoom 8. Quiet rest/dormant passes also refresh that listing on their
+existing tier cadence. These checks preserve pre-tap status, scan/check times,
+and immediate dark-site refusal. Auto at zoom 8+ gathers viewport Site evidence
+for its decision, reusing successful listings within a 300-second cadence and
+caching coverage by viewport geometry and reporting-site coordinates (bounded
+to 16 entries). The independent Region closest-site check retains its original
+discovery cadence rather than inheriting the Auto decision cache interval.
+Auto includes Site breaker dependencies only at settled zoom 8+ or while Site
+shows; an unused Site/S3 breaker cannot shorten Region's discovery due time or
+create probe recovery retries. Region's request admission and 100 ms intent
+watcher do not evaluate native policy; a Region fallback checkpoint uses the
+acquisition target even while Site is still displayed. There is no additional
+timer, emit-triggered I/O or polling loop. The closest-site check shares the
+pass deadline and 240/minute gate, preserving the footprint-aware mandatory
+reserve (at least 34 interaction slots). It yields under budget pressure without
+inventing a new observation. A per-pass listing table prevents repeating the
+closest-site request when site acquisition/fallback/warming follows in that
+same pass. Later discovery refreshes both site knowledge and Region imagery;
+reporting recovery can fulfill the durable site preference on that wakeup.
+
+A settled, viewed Region warms the Site newest tiles at the same centre and
+zoom plus eligible neighbours; a completed mosaic return retries this warming.
+Manual Site retains opposite-mode Region warming. In Auto, Region warms Site
+at settled zoom >= 7, and Site warms Region at settled zoom <= 7. Warming fetches
+Level III products only when native is allowed in the effective live/warm tier
+and the ceiling is `normal`; otherwise it warms v1 tiles. Shadow attention does
+not gate native. Existing viewed/idle, attention prefetch, and interaction
+reserve admission still apply.
 
 Both themes keep the closest segment tappable when the site is `not reporting`
 or its scan is unavailable. A second line, also in its accessible name, says
@@ -1334,8 +1369,12 @@ No new animation is introduced, including under reduced motion.
 
 The emitter's existing idle tier writes both native LRU bytes and the immutable
 remapped disk paths used by `serve.py` and the v4 page. Opposite-mode newest at
-the current camera takes precedence over optional zoom neighbours. Source
-cooldowns cannot block another source's eligible round; the shared 240/minute
+the current camera takes precedence over optional zoom neighbours when eligible.
+Manual Site warms Region, and manual Region warms Site. Auto warms the next
+source at the settled camera: Region-to-Site at zoom >= 7, Site-to-Region at
+zoom <= 7. Native warming requires the effective live/warm tier and a normal
+ceiling; otherwise Site warming uses v1 tiles. Source cooldowns cannot block
+another source's eligible round; the shared 240/minute
 cap and footprint/layer-aware mandatory reserve apply (v5.7 replaces the fixed
 34-request reserve). A round is
 remembered only after all its tiles succeed; indexed evictions or reported disk
@@ -1493,12 +1532,19 @@ including listings, products, invalid bodies and partial reads. Cache hits and
 304 responses add no body bytes. Counts use UTC days and persist by atomic
 replacement through the `radar_native_bytes.json` runtime symlink into
 `$XDG_STATE_HOME/wfpiconsole/` (default `~/.local/state/wfpiconsole/`). Counts
-survive engine restarts and reboots. A clock before the stored UTC day cannot
-reset its count; rollover requires a later day. Accounting holds a short memory
-lock, and SD persistence runs outside the renderer/accounting locks: flush on
+survive engine restarts and reboots. A stored UTC day up to one day ahead is
+retained to tolerate a small backward clock correction. A day more than one day
+ahead is invalid and resets to zero on today's UTC day; normal rollover uses a
+later day. Accounting holds a short memory lock, and SD persistence runs outside the renderer/accounting locks: flush on
 threshold crossings and day changes, otherwise at most once per 60 seconds.
-A crash may lose the unflushed interval. A write failure logs once and pauses
-native access without replacing the transport result or losing metrics.
+A crash may lose the unflushed interval. A write failure logs once per failure
+streak and retries on later engine watcher/pass ticks with exponential backoff
+(5, 10, 20, 40, 80, 160, then at most 300 seconds). Success clears the failure.
+Native remains allowed while persistence is unavailable, but every body byte
+still counts in memory and both byte ceilings still apply. A restart during an
+unpersisted interval can lose those bytes. Ledger health is independent of the
+daily ceiling; failure never masquerades as daily-limit exhaustion or replaces
+the transport result/metrics.
 This is a response-body budget, not an ISP traffic counter. A request already
 in flight may cross a threshold.
 
@@ -1513,9 +1559,10 @@ In attention shadow mode, tiers gate neither native access nor Auto evaluation.
 The intent watcher also detects UTC rollover and resumes the eligible variant.
 
 `/health.radar.native` and `radar.nativeBudget` contain `day` (UTC `YYYY-MM-DD`),
-`bytesToday`, and `ceilingState` (`normal`, `newest-only`, or `paused`). The page
-shows `v2 paused · daily data limit` when v2 is selected and the ceiling is
-paused. Per-pixel multi-site merging and N0H quality control remain out of scope.
+`bytesToday`, `ceilingState` (`normal`, `newest-only`, or `paused`), and
+`ledgerState` (`ok` or `retrying`). The page shows
+`v2 accounting retrying · bytes counted in memory` for ledger failure and
+`v2 paused · daily data limit` only when the byte ceiling is paused. Per-pixel multi-site merging and N0H quality control remain out of scope.
 
 **Scan identity.** IEM names a scan by its volume start floored to the minute;
 the S3 key carries the seconds (`ATX_N0B_2026_09_25_03_42_24` is IEM's 03:42).

@@ -213,7 +213,8 @@ def test_failed_closest_site_is_not_retried_per_auto_pass(make_emitter, hybrid, 
     multisite.calls.clear()
     emitter._do_radar()
     assert not [call for call in multisite.calls if call[0] == 'list']
-    # Ordinary discovery still refreshes evidence and permits immediate recovery.
+    # Discovery after a scan cadence refreshes evidence and permits recovery.
+    hybrid.mono += ae._RADAR_SOURCES['iem-nexrad-n0b']['cadence']
     multisite.scans['KNEA'] = [hybrid.latest]
     emitter._do_radar(discovery=True, intent_triggered=False)
     assert emitter._radar_result.source_mode == 'site'

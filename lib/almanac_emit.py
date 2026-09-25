@@ -1093,6 +1093,7 @@ class AlmanacEmitter:
         self._radar_transport_retries = 0
         self._radar_stale_first_byte_retries = 0
         self._radar_health = HostHealth()
+        self._radar_coverage_cache = OrderedDict()
         self._radar_site_status = {}  # last listing evidence, independent of tile validity
         self._radar_discovery = DiscoverySchedule()
         self._radar_discovery_event = None
@@ -1547,6 +1548,8 @@ class AlmanacEmitter:
 
     def _radar_site_policy(self, ctx=None):
         target = ctx.get('target_source') if ctx is not None else self._radar_target_source
+        if ctx is not None and target is not None:
+            return target == 'iem-nexrad-n0b'
         return self._radar_result.source_mode == 'site' or target == 'iem-nexrad-n0b'
 
     def _radar_attention_active(self):
@@ -1557,10 +1560,10 @@ class AlmanacEmitter:
         return bool(snap.frames and snap.frames[-1]['complete'] and snap.ts_frame is not None
             and 0 <= now - snap.ts_frame < (snap.stale_sec or RADAR_IEM_STALE_SEC)
             and self._radar_result_stamp == self._radar_preference_stamp()
-            and (snap.tiles or {}).get('variant', False) == _radar_variant(dict(
+            and (snap.source_mode != 'site' or (snap.tiles or {}).get('variant', False) == _radar_variant(dict(
                 native=self._radar_native_requested, attention=self._radar_effective_tier(),
                 native_ceiling=self._radar_native_budget.snapshot()['ceilingState'],
-                smooth=(snap.tiles or {}).get('smooth', False)), snap.source_id))
+                smooth=(snap.tiles or {}).get('smooth', False)), snap.source_id)))
 
     def _radar_attention_changed(self, before, now, schedule=True):
         """Apply changed demand, including weather wakes and day/night targets.
@@ -1766,7 +1769,9 @@ class AlmanacEmitter:
         sources = {snap.source_id}
         if snap.source_id == 'rainviewer':
             sources.add('iem-mrms-lcref')
-        if snap.source_pref == 'auto' or snap.source_pref == 'site' and not snap.source_fallback:
+        zoom = snap.zoom_desired if snap.zoom_desired is not None else snap.zoom_auto_level
+        if (snap.source_pref == 'auto' and (snap.source_mode == 'site' or (zoom or 0) >= radar_auto.UP_ZOOM)
+                or snap.source_pref == 'site' and not snap.source_fallback):
             sources.add('iem-nexrad-n0b')
         sources = {dependency for source in sources for dependency in self._radar_transport_sources(source)}
         probe = self._radar_health.probe_delay(sources)
@@ -1819,9 +1824,11 @@ class AlmanacEmitter:
         if self._radar_source_pref in ('site', 'mosaic') and radar_auto.source_preference(
                 Path(self.output_path).parent, self._radar_read_intent(), time.time()) == 'auto':
             self._radar_restart = True
-        ceiling = self._radar_native_budget.snapshot()['ceilingState']
-        if self._radar_site_policy() and self._radar_policy_ceiling is not None and ceiling != self._radar_policy_ceiling:
-            self._radar_restart = True
+        if self._radar_native_budget.failed:
+            self._radar_native_budget.persist()  # retry on watcher ticks, subject to ledger backoff
+        if self._radar_site_policy() and self._radar_policy_ceiling is not None:
+            if self._radar_native_budget.snapshot()['ceilingState'] != self._radar_policy_ceiling:
+                self._radar_restart = True
         if self._radar_auto_due is not None and time.monotonic() >= self._radar_auto_due:
             self._radar_auto_due = None
             self._radar_restart = True
@@ -2044,19 +2051,21 @@ class AlmanacEmitter:
         self._radar_emit_now()
 
     def _radar_transport_sources(self, source, ctx=None):
+        if source != 'iem-nexrad-n0b':
+            return (source,)  # Region admission never evaluates native policy
         native = (_radar_variant(ctx, source) == 'native' if ctx is not None else
                   native_allowed(self._radar_native_requested, self._radar_effective_tier(),
                                  self._radar_native_budget.snapshot()['ceilingState']))
-        return (source, RADAR_LEVEL3_TRANSPORT) if source == 'iem-nexrad-n0b' and native else (source,)
+        return (source, RADAR_LEVEL3_TRANSPORT) if native else (source,)
 
-    def _radar_headroom_delay(self, source, needed):
+    def _radar_headroom_delay(self, source, needed, ctx=None):
         with self._radar_lock:
             now = time.monotonic()
             self._radar_request_times = sorted(t for t in self._radar_request_times if now-t < 60)
             count = len(self._radar_request_times)
             missing = count + needed - RADAR_REQUESTS_PER_MIN
             window = self._radar_request_times[min(missing, count)-1]+60-now if missing > 0 and count else 0
-            cooldown = max(self._radar_cooldowns.get(s, 0) for s in self._radar_transport_sources(source))
+            cooldown = max(self._radar_cooldowns.get(s, 0) for s in self._radar_transport_sources(source, ctx))
             return max(0, window, cooldown-now)
 
     def _radar_retry_fields(self):
@@ -2917,7 +2926,7 @@ class AlmanacEmitter:
         known = None
         reason = 'not reporting'
         try:
-            known = self._radar_known(source, ctx, site['id'])
+            known = self._radar_known(source, dict(ctx, intent_triggered=True) if ctx.get('auto_listing_cache') else ctx, site['id'])
             if known is not None:
                 stamps = [t for t in known['stamps'] if 0 <= now-t <= RADAR_HISTORY_SEC + RADAR_SITE_MAX_AGE_SEC]
             else:
@@ -2949,13 +2958,18 @@ class AlmanacEmitter:
         site.update(reporting=None if reason == 'scan unavailable' else newest is not None and now-newest < RADAR_SITE_MAX_AGE_SEC,
                     newestTs=newest, ageSec=int(now-newest) if newest is not None else None)
         checked = known.get('checkedTs') if known is not None else now
-        if known is None and (reason != 'scan unavailable' or
-                              self._radar_site_status.get(site['id'], {}).get('reporting') is None):
+        if known is None:
             # Cached acquisition may age scans out of its history window, but
             # only an actual listing attempt can replace the last-check evidence.
             with self._radar_lock:
+                previous = self._radar_site_status.get(site['id'], {})
+                failed_since = previous.get('failedSince', now) if reason == 'scan unavailable' else None
+                if failed_since is not None and now-failed_since >= _RADAR_SOURCES[source]['cadence']:
+                    site['reporting'] = False
                 self._radar_site_status[site['id']] = dict(reporting=site['reporting'], newestTs=newest,
                     reason=site['reason'], checkedTs=checked)
+                if failed_since is not None:
+                    self._radar_site_status[site['id']]['failedSince'] = failed_since
         result = site['id'], tuple(stamps), known is not None
         if 'listing_results' in ctx and known is None:
             ctx['listing_results'][site['id']] = ({k: site[k] for k in ('reporting', 'newestTs', 'ageSec', 'reason')}, result)
@@ -3361,21 +3375,20 @@ class AlmanacEmitter:
         floor = RADAR_SITE_MIN_ZOOM if source == 'iem-nexrad-n0b' else RADAR_MIN_ZOOM
         targets = [(source, z) for z in (ctx['zoom']-1, ctx['zoom']+1)
                    if floor <= z <= _RADAR_SOURCES[source]['max_zoom']]
-        if source == 'iem-nexrad-n0b':
+        if source == 'iem-nexrad-n0b' and (ctx.get('source_pref') != 'auto' or ctx['camera_zoom'] <= 7):
             if ctx['zoom'] <= _RADAR_SOURCES['iem-mrms-lcref']['max_zoom']:
                 targets.insert(0, ('iem-mrms-lcref', ctx['zoom']))
             targets.extend(('iem-mrms-lcref', z) for z in (ctx['zoom']-1, ctx['zoom']+1)
                            if RADAR_MIN_ZOOM <= z <= _RADAR_SOURCES['iem-mrms-lcref']['max_zoom'])
-        elif source == 'iem-mrms-lcref' and ctx['sources'][1]['available'] and ctx['zoom'] >= RADAR_SITE_MIN_ZOOM:
+        elif (source == 'iem-mrms-lcref' and ctx['sources'][1]['available']
+              and ctx['zoom'] >= RADAR_SITE_MIN_ZOOM):
             # Same-centre mode tap first; also cover a mode+zoom press (z8 -> site z7).
             targets.extend(('iem-nexrad-n0b', z) for z in
                            (ctx['zoom'], ctx['zoom']-1, ctx['zoom']+1)
                            if RADAR_SITE_MIN_ZOOM <= z <= 10)
         # The current camera's opposite mode comes before optional zoom neighbours.
         targets.sort(key=lambda item: item[0] == source or item[1] != ctx['zoom'])
-        targets = [(target,z) for target,z in targets if (target != source or own_fresh)
-                   and not (ctx.get('native_ceiling', 'normal') != 'normal' and
-                            _radar_variant(ctx, target) == 'native')]
+        targets = [(target,z) for target,z in targets if target != source or own_fresh]
         reserve = self._radar_mandatory_reserve(source, ctx, [newest])
         retry = self._radar_session.on_retry
         admitted_sources = set()
@@ -3386,11 +3399,15 @@ class AlmanacEmitter:
                     continue
                 warm = dict(ctx, intent_triggered=True, prefetch=True, target_source=target, sources=list(ctx['sources']),
                             request_reserve=reserve, tile_workers=RADAR_TILE_WORKERS)
+                # The newest-only ceiling permits foreground native, but optional
+                # warming uses v1 unless native has its full live/warm allowance.
+                if warm.get('native_ceiling', 'normal') != 'normal':
+                    warm['native'] = False
                 self._radar_checkpoint(warm)
                 if target not in admitted_sources:
                     # As with the original Z±1 tier, admit a source round once
                     # with 60 spare slots; every request still preserves 34.
-                    if self._radar_headroom_delay(target, RADAR_PREFETCH_HEADROOM + reserve):
+                    if self._radar_headroom_delay(target, RADAR_PREFETCH_HEADROOM + reserve, warm):
                         self._radar_budget_retry(target, RADAR_PREFETCH_HEADROOM + reserve)
                         # A source cooldown must not block the other source.
                         # The shared request cap and reserve still apply to both.
@@ -3644,11 +3661,24 @@ class AlmanacEmitter:
                 intent=dict(ctx['intent']), frameIndex=0, frameTotal=0, pending={}, **self._radar_retry_fields())
         return True
 
+    def _radar_auto_coverage(self, bounds, sites):
+        # Geometry changes only with the camera or the reporting set, not scans.
+        key = (tuple(sorted(bounds.items())), tuple(sorted((s['lat'], s['lon']) for s in sites)))
+        if key not in self._radar_coverage_cache:
+            self._radar_coverage_cache[key] = radar_auto.coverage_fraction(bounds, sites, RADAR_SITE_RANGE_METERS)
+            if len(self._radar_coverage_cache) > 16:
+                self._radar_coverage_cache.popitem(last=False)
+        return self._radar_coverage_cache[key]
+
     def _radar_auto_source(self, ctx, site_ok):
         zoom = ctx['desired'] if ctx['desired'] is not None else ctx['auto_zoom']
         previous = ctx['previous_result']
         showing = previous.source_mode if previous.frames else None
         available, coverage = (None if site_ok else False), 0.
+        def availability(site):
+            evidence = self._radar_site_status.get(site['id'], site) if site else {}
+            return radar_auto.listing_availability(evidence, time.time(),
+                _RADAR_SOURCES['iem-nexrad-n0b']['cadence'], RADAR_SITE_MAX_AGE_SEC)
         evidence = self._radar_site_status.get(ctx['nexrad']['id'], {}) if ctx['nexrad'] else {}
         refused = (evidence.get('reporting') is False and evidence.get('reason') == 'not reporting'
                    and evidence.get('checkedTs') is not None
@@ -3665,7 +3695,7 @@ class AlmanacEmitter:
                                              RADAR_VIEWPORT_W, RADAR_VIEWPORT_H)
             _, _, coverage_bounds, _ = _radar_viewport(ctx['center']['lat'], ctx['center']['lon'], coverage_zoom,
                                                       RADAR_VIEWPORT_W, RADAR_VIEWPORT_H)
-            ctx.update(bounds=bounds, zoom=zoom, camera_zoom=zoom, target_source='iem-nexrad-n0b')
+            ctx.update(bounds=bounds, zoom=zoom, camera_zoom=zoom, target_source='iem-nexrad-n0b', auto_listing_cache=True)
             if self._radar_session is None or self._radar_provider != 'iem':
                 if self._radar_session is not None:
                     self._radar_session.close()
@@ -3676,31 +3706,37 @@ class AlmanacEmitter:
                 'iem-nexrad-n0b', end, first_byte=first_byte)
             try:
                 ctx['auto_discovered'] = self._radar_site_discover(ctx)
-                nearest = self._radar_site_status.get(ctx['nexrad']['id'], {})
-                unknown = any(s.get('reason') == 'scan unavailable' for s in ctx['sites'])
-                stamps = ctx['site_scans'].get(ctx['nexrad']['id'], ())
-                if (nearest.get('reason') == 'not reporting' and nearest.get('reporting') is False
-                        and 0 <= time.time()-nearest.get('checkedTs', 0) < RADAR_SITE_MAX_AGE_SEC):
+                nearest_available = availability(ctx['nexrad'])
+                reporting = [s for s in ctx['sites'] if availability(s) is True]
+                missing = [s for s in ctx['sites'] if availability(s) is None]
+                coverage = self._radar_auto_coverage(coverage_bounds, reporting)
+                threshold = radar_auto.STAY_COVERAGE if showing == 'site' else radar_auto.MIN_COVERAGE
+                if nearest_available is False:
                     available = False
-                elif stamps and not unknown:
-                    available = 0 <= time.time()-stamps[-1] < RADAR_SITE_MAX_AGE_SEC
-                    reporting = [s for s in ctx['sites'] if s['reporting']]
-                    coverage = radar_auto.coverage_fraction(coverage_bounds, reporting, RADAR_SITE_RANGE_METERS)
+                elif nearest_available is True:
+                    # Unknown neighbours matter only if they could change the
+                    # coverage verdict. A redundant failed site cannot veto entry.
+                    available = True
+                    if (coverage < threshold and missing and
+                            self._radar_auto_coverage(coverage_bounds, reporting+missing) >= threshold):
+                        available = None
+                if available is not None:
                     self._radar_auto_evidence[key] = dict(at=time.time(), available=available, coverage=coverage)
             except _RadarSuperseded:
                 raise
             except (ValueError, TimeoutError, _RadarBudget, CircuitOpen):
                 if ctx.get('site_failure') == 'out of view':
                     available, coverage = True, 0.  # known geometry, not a failed listing
-                nearest = self._radar_site_status.get(ctx['nexrad']['id'], {})
-                if (nearest.get('reason') == 'not reporting' and nearest.get('reporting') is False
-                        and 0 <= time.time()-nearest.get('checkedTs', 0) < RADAR_SITE_MAX_AGE_SEC):
+                if availability(ctx['nexrad']) is False:
                     available = False
         elif site_ok and not refused:
             # Zoom alone can select Region without collecting new Site evidence.
             available, coverage = True, 1.
-        # Retain good evidence for telemetry/recovery, but do not turn an unknown
-        # acquisition into a fresh coverage verdict (even when that cache ages out).
+        # Unknown acquisition is a bounded hold, never evidence of fresh scans.
+        if available is None and showing == 'site' and (
+                previous.ts_frame is None or not 0 <= time.time()-previous.ts_frame < RADAR_SITE_MAX_AGE_SEC
+                or self._radar_transport_failures.get('iem-nexrad-n0b', 0) >= 3):
+            available = False
         ctx['auto_evidence'] = self._radar_auto_evidence.get(key)
         last = self._radar_auto_switch
         selected = radar_auto.choose(zoom, showing, available, coverage,
@@ -3813,7 +3849,7 @@ class AlmanacEmitter:
             self._radar_policy_ceiling = self._radar_native_budget.snapshot()['ceilingState']
             self._radar_auto_due = None
             ctx = dict(listing_results={}, smooth=smooth, native=native,
-                native_ceiling=self._radar_native_budget.snapshot()['ceilingState'], center=center, nexrad=_radar_nexrad(station_lat, station_lon, unit), viewed=viewed,
+                native_ceiling=self._radar_policy_ceiling, center=center, nexrad=_radar_nexrad(station_lat, station_lon, unit), viewed=viewed,
                 desired=desired, auto_zoom=auto_zoom, builds=0, station=station, unit=unit, previous_result=previous,
                 preference_stamp=stamp, stamp_names=stamp_names, intent_triggered=intent_triggered, discovery=discovery,
                 deadline=pass_deadline, pass_deadline=pass_deadline, inventory=self._radar_disk_inventory, manifest_cache=self._radar_manifest_cache)
@@ -3864,7 +3900,8 @@ class AlmanacEmitter:
                 stamps = [f['ts'] for f in previous.frames[-(8 if viewed else 1):]]
                 reserve = max(RADAR_HISTORY_RESERVE, self._radar_mandatory_reserve(previous.source_id, check, stamps))
                 check['request_reserve'] = reserve
-                if not self._radar_headroom_delay('iem-nexrad-n0b', reserve+1):
+                # This IEM listing has no Level III transport dependency.
+                if not self._radar_headroom_delay('iem-nexrad-n0b', reserve+1, dict(check, native=False)):
                     if self._radar_session is None or self._radar_provider != 'iem':
                         if self._radar_session is not None:
                             self._radar_session.close()
@@ -3889,8 +3926,6 @@ class AlmanacEmitter:
                 ctx['sources'][1].update(available=False, reason='not reporting')
             same_mode = previous.available and previous.source_pref == ctx['source_pref'] and previous.source_fallback == ctx['source_fallback']
             target_mode = 'site' if adapters[0][0] == 'iem-nexrad-n0b' else 'mosaic'
-            if preference == 'auto' and previous.source_mode == 'site' and target_mode == 'site':
-                adapters = adapters[:1]  # only a known Auto verdict may leave the displayed Site
             if (same_mode and (preference != 'auto' or previous.source_mode == target_mode)
                     and previous.source_id in dict(adapters) and previous.source_id != adapters[0][0]
                     and time.monotonic()-self._radar_source_since < 300

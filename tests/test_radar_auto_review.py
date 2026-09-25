@@ -52,12 +52,15 @@ def test_unknown_discovery_keeps_site_and_evidence(make_emitter, hybrid, multisi
         def fail(ctx):
             raise TimeoutError('deadline') if failure == 'timeout' else ae._RadarBudget('budget')
         monkeypatch.setattr(emitter, '_radar_site_discover', fail)
-    for elapsed in (2, 12, 30, ae.RADAR_SITE_MAX_AGE_SEC+1):
+    for elapsed in (2, 12):
         hybrid.mono = elapsed
         emitter._radar_forget('iem-nexrad-n0b')
         emitter._do_radar(discovery=True, intent_triggered=False)
         assert emitter._radar_result.source_mode == 'site'
-        assert emitter._radar_site_status['KNEA'] == status
+        if failure in ('listing', 'nearest_listing'):
+            assert emitter._radar_site_status['KNEA']['reporting'] is None
+        else:
+            assert emitter._radar_site_status['KNEA'] == status
         assert emitter._radar_auto_evidence == (evidence if elapsed < ae.RADAR_SITE_MAX_AGE_SEC else {})
 
 
@@ -128,7 +131,7 @@ def test_accounting_failure_preserves_transport_result_and_metrics(make_emitter,
     else:
         assert request() == b'body'
     assert emitter._radar_request_metrics[-1]['bytes'] == 4
-    assert emitter._radar_native_budget.snapshot()['ceilingState'] == 'paused'
+    assert emitter._radar_native_budget.snapshot()['ledgerState'] == 'retrying'
     emitter._radar_native_budget.add(3)
     assert emitter._radar_native_budget.snapshot()['bytesToday'] == 7
     assert len([r for r in caplog.records if 'ledger unavailable' in r.message]) == 1
@@ -244,7 +247,7 @@ def test_bcm2837_defaults_v1(model):
 
 def test_auto_schedules_site_breaker_recovery(make_emitter, monkeypatch):
     emitter = make_emitter()
-    emitter._radar_result = emitter._radar_result._replace(source_pref='auto', source_id='iem-mrms-lcref', source_mode='mosaic')
+    emitter._radar_result = emitter._radar_result._replace(source_pref='auto', source_id='iem-mrms-lcref', source_mode='mosaic', zoom_desired=8)
     seen = []
     monkeypatch.setattr(emitter._radar_health, 'probe_delay', lambda sources: seen.append(sources) or 12)
     assert emitter._radar_probe_delay() == 12
@@ -252,7 +255,7 @@ def test_auto_schedules_site_breaker_recovery(make_emitter, monkeypatch):
 
 
 @pytest.mark.parametrize('count', [1, 3, 8])
-def test_variant_change_stages_complete_previous_loop(count):
+def test_variant_change_adopts_decoded_newest(count):
     run_page(r'''
 const old=radarView.loaded.slice(),r=manifest();
 r.tiles.variant='native';r.tiles.revision='abcdef123456';r.native=true;
@@ -260,15 +263,9 @@ r.frameCount=COUNT;r.refresh={state:'history',frameTotal:COUNT};
 r.tiles.frames=r.tiles.frames.slice(-1);
 renderRadar({radar:r,ts:100900});
 assert.ok(radarView.pendingSource);decode(radarView.pendingSource.frames[0]);radarAcceptSource();
-if(COUNT>1){
- assert.deepEqual(radarView.loaded,old);assert.ok(old.every(f=>f.bitmap.closes===0));
- const next=structuredClone(r);next.tiles.frames=manifest().tiles.frames.slice(-COUNT);
- renderRadar({radar:next,ts:100901});
- radarView.pendingSource.frames.slice(0,Math.min(4,COUNT)).forEach(f=>{if(!f.bitmap)decode(f)});
- radarAcceptSource();
-}
+assert.ok(old.every(f=>f.bitmap.closes===1));
 assert.equal(radarView.pendingSource,null);assert.equal(radarView.data.tiles.variant,'native');
-assert.ok(radarReady().length>=Math.min(4,COUNT));
+assert.equal(radarReady().length,1);
 '''.replace('COUNT', str(count)))
 
 
@@ -310,6 +307,7 @@ def test_coverage_exit_waits_for_guard_in_real_engine(make_emitter, hybrid, mult
     intent(tmp_path, 9, seq=2); emitter._do_radar()
     assert emitter._radar_result.source_mode == 'site'
     coverage[0] = .69; hybrid.mono += 2
+    emitter._radar_coverage_cache.clear()  # injected geometry changed
     emitter._do_radar(discovery=True, intent_triggered=False)
     assert emitter._radar_result.source_mode == 'site' and emitter._radar_auto_due == 10
     hybrid.mono += 10

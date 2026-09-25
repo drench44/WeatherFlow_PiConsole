@@ -1,5 +1,7 @@
 """Fork-only settled-camera source policy and spherical viewport coverage."""
+import hashlib
 import math
+import os
 import threading
 from collections import OrderedDict
 from pathlib import Path
@@ -23,12 +25,44 @@ def _lease_timestamp(root, marker, stamp, now):
     key = (str(root), marker)
     with _lease_lock:
         old_stamp, anchor = _lease_clocks.get(key, (None, now))
-        anchor = min(anchor if stamp == old_stamp else stamp, now)
+        if stamp != old_stamp:
+            # A stamp-specific, exclusive file lets server and engine share the
+            # first anchor across restarts. Never rewrite a newer touch/choice.
+            digest = hashlib.sha256(repr(float(stamp)).encode()).hexdigest()[:24]
+            path = Path(root) / ('.radar-lease-' + marker + '-' + digest)
+            try:
+                try:
+                    if stamp > now:
+                        with path.open('x') as stream:
+                            stream.write(str(now))
+                            stream.flush()
+                            os.fsync(stream.fileno())
+                except FileExistsError:
+                    pass
+                anchor = float(path.read_text())
+                if not math.isfinite(anchor):
+                    anchor = 0.
+            except FileNotFoundError:
+                anchor = stamp if stamp <= now else 0.
+            except (OSError, ValueError):
+                anchor = 0.  # cannot durably anchor: expire, never slide the lease
+        anchor = min(anchor, now)
         _lease_clocks[key] = (stamp, anchor)
         _lease_clocks.move_to_end(key)
         while len(_lease_clocks) > 128:
             _lease_clocks.popitem(last=False)
         return anchor
+
+
+def listing_availability(evidence, now, cadence, max_age):
+    """Age listing uncertainty even when no subsequent request can be admitted."""
+    if evidence.get('reason') == 'scan unavailable':
+        since = evidence.get('failedSince', evidence.get('checkedTs'))
+        return False if since is not None and now-since >= cadence else None
+    if evidence.get('reporting') is True:
+        newest = evidence.get('newestTs')
+        return newest is not None and 0 <= now-newest < max_age
+    return evidence.get('reporting')
 
 
 def choose(settled_zoom, showing=None, site_available=False, coverage=0.,

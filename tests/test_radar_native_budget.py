@@ -243,11 +243,11 @@ def test_newest_failure_above_soft_ceiling_builds_only_one_native_frame(make_emi
     assert len(emitter._radar_result.frames) == 1
 
 
-def test_unwritable_ledger_pauses_further_native(make_emitter, monkeypatch):
+def test_unwritable_ledger_reports_persistence_failure(make_emitter, monkeypatch):
     emitter = make_emitter()
     monkeypatch.setattr(budget.os, 'replace', lambda *args: (_ for _ in ()).throw(OSError('read-only ledger')))
     emitter._radar_native_budget.add(20)
-    assert emitter._radar_native_budget.snapshot()['ceilingState'] == 'paused'
+    assert emitter._radar_native_budget.snapshot()['ledgerState'] == 'retrying'
 
 
 @pytest.mark.parametrize('ceiling', [budget.NATIVE_NEWEST_ONLY_BYTES, budget.NATIVE_PAUSE_BYTES])

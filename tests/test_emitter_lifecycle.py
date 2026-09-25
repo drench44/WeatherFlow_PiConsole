@@ -156,6 +156,12 @@ def test_a_day_of_forecast_failures_stays_one_retry_chain(make_emitter, clock, m
     """ Every hourly failure used to start its own two-minute retry chain, so a
     day offline meant thousands of attempts and dozens of live chains. """
     _inline_threads(monkeypatch)
+    # The scheduler and radar rate/backoff gates must share simulated time.
+    # Real monotonic time can otherwise make a whole simulated day spin at a
+    # nearly expired cooldown without advancing that cooldown.
+    epoch = time.time()
+    monkeypatch.setattr(ae.time, 'time', lambda: epoch + clock.now)
+    monkeypatch.setattr(ae.time, 'monotonic', lambda: clock.now)
     import urllib.request
 
     def refuse(*args, **kwargs):
