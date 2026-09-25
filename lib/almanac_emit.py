@@ -1737,7 +1737,7 @@ class AlmanacEmitter:
             self._radar_retained_refresh('idle')
             return
         self._radar_quiet_at = now
-        local_failures = self._radar_health.failure_counts('iem-nexrad-n0b')['local']
+        local_failures = self._radar_health.failure_counts('iem-nexrad-n0b', 'iem-mrms-lcref')['local']
         try:
             if self._radar_session is None or self._radar_provider != 'iem':
                 if self._radar_session is not None:
@@ -1754,14 +1754,14 @@ class AlmanacEmitter:
                     pass
             sentinel_every = knobs['sentinel']
             due = sentinel_every and (self._radar_sentinel is None or now - self._radar_sentinel['at'] >= sentinel_every)
-            if (due and self._radar_health.failure_counts('iem-nexrad-n0b')['local'] == local_failures
+            if (due and self._radar_health.failure_counts('iem-nexrad-n0b', 'iem-mrms-lcref')['local'] == local_failures
                     and _radar_iem_eligible(ctx['station'][0], ctx['station'][1])):
                 self._radar_sentinel_pass(ctx)
         except (_RadarBudget, CircuitOpen, TimeoutError, OSError, ValueError) as error:
             self._radar_note_yield(error)
         finally:
             self._radar_local_failure_streak = (self._radar_local_failure_streak + 1
-                if self._radar_health.failure_counts('iem-nexrad-n0b')['local'] > local_failures else 0)
+                if self._radar_health.failure_counts('iem-nexrad-n0b', 'iem-mrms-lcref')['local'] > local_failures else 0)
             with self._radar_lock:
                 if self._radar_pass['outcome'] not in ('failed',):
                     self._radar_pass['outcome'] = 'quiet'

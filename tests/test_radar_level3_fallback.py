@@ -234,3 +234,18 @@ def test_site_failure_log_reports_suppressed_count_after_the_interval(make_emitt
     entry = emitter._radar_health_payload()['mosaic']['siteFailures']['KNEA']
     assert entry['count'] == 3 and entry['suppressed'] == 0
     assert len(warnings) == 2 and '1 not logged' in warnings[-1]
+
+
+def test_quiet_region_failure_still_backs_off_without_a_nearby_site(make_emitter, hybrid, monkeypatch):
+    from tests.test_radar_attention_engine import tier
+    monkeypatch.setattr(ae, 'RADAR_ATTENTION_MODE', 'active')
+    monkeypatch.setattr(ae, '_radar_nexrad', lambda *args: None)
+    emitter = make_emitter()
+    tier(emitter, 'rest')
+    def fail(req, timeout):
+        raise socket.gaierror(-3, 'resolver unavailable')
+    hybrid.failure = fail
+    emitter._do_radar()
+    assert hybrid.calls
+    assert emitter._radar_local_failure_streak == 1
+    assert emitter._radar_local_backoff() == 2

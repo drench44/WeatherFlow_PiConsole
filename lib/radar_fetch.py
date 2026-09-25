@@ -160,10 +160,11 @@ class HostHealth:
                 if sum(ok for _, ok in s['samples']) / len(s['samples']) < .5:
                     s['until'] = time.monotonic()+self.COOLDOWN
 
-    def failure_counts(self, source):
-        """Local and ambiguous failures on this source's hosts, not every host."""
+    def failure_counts(self, *sources):
+        """Local and ambiguous failures on these sources' hosts, counted once."""
         with self.lock:
-            states = [self.hosts[h] for h in self.sources.get(source, ())]
+            hosts = {h for source in sources for h in self.sources.get(source, ())}
+            states = [self.hosts[h] for h in hosts]
             return {kind: sum(s[kind] for s in states) for kind in ('local', 'ambiguous')}
 
     def probes(self, source):
