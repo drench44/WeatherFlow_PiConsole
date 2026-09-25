@@ -141,12 +141,18 @@ def test_a_wedged_page_leaves_renders_flat_while_polls_climb(serve_at):
     assert after['polls'] >= 5
 
 
-def test_only_loopback_clients_can_credit_a_render(serve_at):
-    module, _ = serve_at(_payload())
-    assert '127.0.0.1' in module.LOOPBACK and '::1' in module.LOOPBACK
-    # the credit is gated on the client address, not on the query string alone
-    source = SERVE.read_text()
-    assert 'self.client_address[0] in LOOPBACK' in source
+@pytest.mark.parametrize('address,credited', [
+    ('127.0.0.1', 1), ('::1', 1), ('::ffff:127.0.0.1', 1),
+    ('192.168.0.14', 0),   # a LAN controller may steer the radar, never credit the panel's paint
+    ('198.51.100.7', 0)])
+def test_only_loopback_clients_can_credit_a_render(monkeypatch, tmp_path, address, credited):
+    module = _load_serve(monkeypatch, tmp_path, _payload())
+    monkeypatch.setattr(module.http.server.SimpleHTTPRequestHandler, 'do_GET', lambda self: None)
+    handler = object.__new__(module.Handler)
+    handler.client_address = (address, 12345)
+    handler.path = '/wx.json?_=1&r=1'
+    handler.do_GET()
+    assert module._renders == credited
 
 
 def test_radar_view_marker_from_real_poll_preserves_counters(serve_at, tmp_path):

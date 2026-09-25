@@ -125,6 +125,11 @@ def test_loopback_bad_tile_report_is_bounded_and_repairs(make_emitter,hybrid,tmp
     e._radar_consume_bad_tiles();assert key not in e._radar_disk_inventory
     with pytest.raises(urllib.error.HTTPError) as bad: post(b'../wx.json')
     assert bad.value.code==400
-    monkeypatch.setattr(module,'LOOPBACK',())
-    with pytest.raises(urllib.error.HTTPError) as remote: post(relative)
-    assert remote.value.code==403
+    # Only the panel reports bad tiles: a LAN controller (remote control) and a
+    # public client are refused, whatever the path.
+    for address in ('192.168.0.14', '198.51.100.7'):
+        sent = []
+        h = object.__new__(module.Handler); h.client_address = (address, 1); h.path = '/radar-bad-tile'
+        h.send_error = lambda code, *a: sent.append(code)
+        h.do_POST()
+        assert sent == [403], address
