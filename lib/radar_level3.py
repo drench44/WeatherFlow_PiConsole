@@ -1,4 +1,4 @@
-"""NEXRAD Level III base reflectivity (N0B, product 153): decode and draw tiles.
+"""NEXRAD Level III reflectivity (153/N0B) and classification (165/N0H).
 
 Fork-only. IEM's ridge tiles are resampled to roughly 1 km cells before we see
 them; the radar's own product is 0.5 degree x 250 m. This module reads that
@@ -11,7 +11,9 @@ WMO header (two CRLF-terminated lines), an 18-byte message header, a 102-byte
 product description block, then the symbology block, bzip2-compressed as a
 whole. The symbology holds one digital radial packet (code 16): per radial a
 start azimuth and width in tenths of a degree, and one byte per 250 m gate.
-Gate codes: 0 below threshold, 1 range folded, n >= 2 is (n-2)/2 - 32 dBZ.
+N0B gate codes: 0 below threshold, 1 range folded, n >= 2 is (n-2)/2 - 32 dBZ.
+N0H uses categorical codes and its own description thresholds, with 1200 gates
+and approximately one-degree rays. The independent bearing tables align QC.
 """
 import bz2
 import math
@@ -31,7 +33,7 @@ EARTH_RADIUS_M = 6371000.0
 EFFECTIVE_RADIUS_M = EARTH_RADIUS_M * 4 / 3  # standard refraction
 SITE_TOLERANCE_DEG = 0.05
 # The render identity of a native tile; bump when geometry or colouring changes.
-NATIVE_REVISION = "level3-n0b-polar-v2"
+NATIVE_REVISION = "level3-n0b-n0h-mosaic-v3"
 
 
 class Scan:
@@ -52,6 +54,15 @@ def _julian_ts(day, seconds):
 
 
 def decode(raw, expect_site=None, speckle_dbz=None):
+    return _decode(raw, expect_site, speckle_dbz, 153)
+
+
+def decode_n0h(raw, expect_site=None):
+    """Decode product 165 using its own categorical description layout."""
+    return _decode(raw, expect_site, None, 165)
+
+
+def _decode(raw, expect_site, speckle_dbz, product):
     """Return a validated Scan. Every structural doubt raises ValueError.
 
     `expect_site` is (lat, lon); a product from a different radar is refused.
@@ -64,15 +75,15 @@ def decode(raw, expect_site=None, speckle_dbz=None):
         offset = raw.index(b'\r\r\n', first + 3) + 3
     except ValueError:
         raise ValueError('level3 WMO header') from None
-    if offset > 64:
+    if offset > 64 or offset + 120 > len(raw):
         raise ValueError('level3 WMO header')
     code, _, _, length, _, _, blocks = struct.unpack('>hhIIhhh', raw[offset:offset + 18])
-    if code != PRODUCT_CODE:
-        raise ValueError('level3 product %d is not N0B' % code)
+    if code != product:
+        raise ValueError('level3 product %d is not %s' % (code, 'N0B' if product == 153 else 'N0H'))
     if length != len(raw) - offset or blocks != 3:
         raise ValueError('level3 message length')
     words = struct.unpack('>51h', raw[offset + 18:offset + 120])
-    if words[0] != -1 or words[6] != PRODUCT_CODE:
+    if words[0] != -1 or words[6] != product:
         raise ValueError('level3 description block')
     lat, lon = (v / 1000 for v in struct.unpack('>ii', raw[offset + 20:offset + 28]))
     if not (-90 <= lat <= 90 and -180 <= lon <= 180):
@@ -80,7 +91,8 @@ def decode(raw, expect_site=None, speckle_dbz=None):
     if expect_site is not None and (abs(lat - expect_site[0]) > SITE_TOLERANCE_DEG or
                                     abs(lon - expect_site[1]) > SITE_TOLERANCE_DEG):
         raise ValueError('level3 product is from another radar')
-    if words[21:24] != (-320, 5, 254):
+    if (product == 153 and words[21:24] != (-320, 5, 254) or
+            product == 165 and (words[21:24] != (0, 0, 0) or words[26] != 255)):
         raise ValueError('level3 data thresholds')
     elevation = words[20] / 10
     # Every site swept on 2026-09-25 reported 0.5; a few mountain sites are
@@ -111,7 +123,7 @@ def decode(raw, expect_site=None, speckle_dbz=None):
             block_length != len(body) or layer_length != len(body) - 16):
         raise ValueError('level3 symbology header')
     packet, first_gate, gates, _, _, _, radials = struct.unpack('>7h', body[16:30])
-    if packet != 16 or first_gate != 0 or not 0 < gates <= MAX_GATES or not 300 <= radials <= 800:
+    if packet != 16 or first_gate != 0 or not 0 < gates <= (MAX_GATES if product == 153 else 1200) or not 300 <= radials <= 800:
         raise ValueError('level3 radial packet')
     codes = np.zeros((radials, gates), np.uint8)
     bearing_index = np.full(3600, -1, np.int16)
@@ -245,11 +257,11 @@ def render_tile(scan, z, x, y, palette, supersample=None):
     return image, int(np.count_nonzero(pixels))
 
 
-def s3_key_time(key):
+def s3_key_time(key, product="N0B"):
     """'ATX_N0B_2026_09_25_03_42_24' -> epoch seconds, or None."""
     try:
         name = key.rsplit('/', 1)[-1]
-        if not re.fullmatch(r'[A-Z0-9]{3}_N0B_[0-9]{4}(?:_[0-9]{2}){5}', name):
+        if not re.fullmatch(r'[A-Z0-9]{3}_' + re.escape(product) + r'_[0-9]{4}(?:_[0-9]{2}){5}', name):
             return None
         parts = name.split('_')
         return datetime(*map(int, parts[2:]), tzinfo=timezone.utc).timestamp()
@@ -257,11 +269,11 @@ def s3_key_time(key):
         return None
 
 
-def match_key(keys, stamp_ts):
+def match_key(keys, stamp_ts, product="N0B"):
     """The product whose volume starts in the IEM scan's minute (IEM floors it)."""
     best = None
     for key in keys:
-        ts = s3_key_time(key)
+        ts = s3_key_time(key, product)
         if ts is not None and 0 <= ts - stamp_ts < 60:
             if best is None or abs(ts - stamp_ts - 30) < abs(best[0] - stamp_ts - 30):
                 best = (ts, key)

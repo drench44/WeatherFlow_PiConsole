@@ -268,10 +268,13 @@ def test_native_budget_prices_scans_instead_of_output_tiles(scan_engine, monkeyp
     monkeypatch.setattr(ae, '_radar_site_tiles', lambda ctx, site: tiles)
     ctx = dict(native=True, attention='live', zoom=7, inventory=emitter._radar_disk_inventory)
     pairs = [('KNEA', STAMP), ('KNEA', STAMP+60)]
-    assert emitter._radar_frame_request_cost(SOURCE, ctx, pairs) == 3  # one hourly listing, two products
-    emitter._radar_level3_scans[('KNEA', STAMP)] = object()
-    assert emitter._radar_frame_request_cost(SOURCE, ctx, pairs) == 2
-    emitter._radar_level3_scans[('KNEA', STAMP+60)] = object()
+    assert emitter._radar_frame_request_cost(SOURCE, ctx, pairs) == 6  # two hourly listings, two products per volume
+    emitter._radar_level3_scans[('KNEA', STAMP)] = SimpleNamespace(volume_ts=STAMP+24)
+    assert emitter._radar_frame_request_cost(SOURCE, ctx, pairs) == 5
+    emitter._radar_level3_scans[('KNEA', STAMP+60)] = SimpleNamespace(volume_ts=STAMP+84)
+    assert emitter._radar_frame_request_cost(SOURCE, ctx, pairs) == 3
+    emitter._radar_level3_scans[('KNEA', STAMP+24, 'N0H')] = object()
+    emitter._radar_level3_scans[('KNEA', STAMP+84, 'N0H')] = object()
     assert emitter._radar_frame_request_cost(SOURCE, ctx, pairs) == 0
     assert emitter._radar_frame_request_cost(SOURCE, dict(ctx, native=False), pairs) == 60
 

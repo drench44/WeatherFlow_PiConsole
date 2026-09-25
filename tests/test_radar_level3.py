@@ -261,7 +261,9 @@ def test_a_missing_scan_is_not_requested_per_tile(make_emitter, hybrid, multisit
     hybrid.view()
     emitter = make_emitter(); emitter._do_radar()
     newest = [c for c in native.calls if c[1].endswith(datetime.fromtimestamp(hybrid.latest + 24, timezone.utc).strftime('%H_%M_%S'))]
-    assert len([c for c in native.calls if c[0] == 'list']) <= 3
+    listings = [c[1] for c in native.calls if c[0] == 'list']
+    # Two products, two reporting sites, and the midnight hour boundary.
+    assert len(listings) <= 8 and len(listings) == len(set(listings))
     assert len(newest) <= 1
     failed = emitter._radar_level3_failed[('KNEA', hybrid.latest)]
     assert failed[0] > ae.time.monotonic()

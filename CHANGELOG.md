@@ -7,6 +7,17 @@ to shared upstream code that the classic console benefits from too.
 ## 2026-09-25
 
 ### Radar
+- **v2 combines nearby radars by their lowest beam and filters clutter.** Each
+  pixel takes the lowest beam within 230 km, including a clear reading, so a
+  higher radar no longer paints rain through it. NOAA's N0H classification
+  removes ground clutter and range folding, allowing another radar to fill
+  those gaps; birds and insects become clear. It adds about 25 KB per site and
+  scan under the same daily cap. Missing classification never holds up rain:
+  the caption says "unfiltered" and names the affected site when others are
+  filtered. Neighbours may be up to 8 minutes older or 60 seconds newer than
+  the primary frame. A late scan or classification gets a new tile identity;
+  cached frames keep their meaning. The page draws one layer for v2, including
+  a single radar, while v1 and Region keep their existing rendering.
 - **Auto picks the radar by zoom.** A new **Auto** button, the default, sits
   beside Region and the nearest site. Zoom in to 8 or closer and it switches to
   the site radar; zoom out to 6 or wider and it returns to Region; at 7 it keeps

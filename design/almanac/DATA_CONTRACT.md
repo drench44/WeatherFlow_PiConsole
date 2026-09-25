@@ -1486,10 +1486,83 @@ manual deadline clock. `tests/verify_radar_v61.py` checks both preference
 handoffs in both themes, retained plate ownership, the 600-frame admission
 refusal fence, release/poll retries, and before/after memory tables (`--baseline`).
 
-### v2: the radar's own cells (Level III, phase 0, 2026-09-24)
+### v2 mosaic and clutter control (2026-09-25)
+
+**Inputs and time.** The existing primary radar clocks the loop, including
+single-site views. Native loops contain at most eight frames. For each frame,
+a reporting neighbour contributes its newest scan with `ts <= frame.ts + 60`
+and `frame.ts - ts <= 480` seconds. These `ts` values retain IEM's minute scan
+clock; each decoded product also records its exact `volumeTs` from NOAA.
+A missing, stale or invalid N0B leaves that site out of the frame. No temporal
+interpolation or MRMS mask is applied. Auto's source, coverage and attention
+policy is unchanged; its v2 site renderer now uses this mosaic.
+
+**Classification.** Product 165/N0H has 360 approximately one-degree radials,
+1200 250 m gates (300 km) and a separate 0.1-degree bearing lookup. Its decoder
+shares bounded header, compression, packet, position, coverage and volume-time
+validation with N0B but validates its own categorical description layout.
+The product's volume second must equal N0B's exactly. HCA is sampled at N0B
+ray centres using actual bearing tables, never `row // 2`. Class 20 (ground
+clutter/AP) and 150 (range folded) become no data. Class 10 (biological) becomes
+below threshold and blocks higher beams; it cannot turn an N0B range-folded gate
+into a valid measurement. All other classes, including 0 and 140, keep N0B.
+Outside HCA range or missing HCA bearings, N0B is retained. The existing N0B
+15 dBZ floor and despeckle remain. Missing/invalid HCA retains that site's N0B
+and marks it unfiltered; optional HCA has a bounded deadline reserving time to
+render reflectivity.
+
+**Per-pixel ownership.** `radar_mosaic.mosaic_codes` orders candidates by beam
+centre height using the product's antenna height/elevation and 4/3-earth
+geometry. Terrain at the pixel is common to every beam, so subtracting its
+height does not change the order. Only candidates inside the 230 km disc,
+product gate range and radial coverage qualify. The first valid gate wins,
+including below threshold. N0B code 1 and QC no data fall through; no winner
+is transparent. Candidates perform gate/bearing lookup only for unresolved
+pixels. The geometry LRU holds three tiles (at most 30 MiB at four sites and z7);
+slant ranges retain double precision to preserve gate boundaries.
+z7 uses 2×2 maximum supersampling after selection; z8–10 use one sample.
+The existing source palette code-to-slot table and PNG `weatherPixels` metadata
+are unchanged. Attention consumes the mosaic counts; the sentinel remains MRMS.
+
+**Immutable identity and storage.** Native frame metadata adds `mosaicKey`,
+`unfilteredSites`, and `siteScans[].volumeTs` / `.filtered`. Contributor metadata
+is distinct from tile layers. The URL is
+`radar/t/<native-revision>/iem-nexrad-n0b/M<24-lowercase-hex>/<YYYYMMDDHHMM>/<z>/<x>/<y>.png`.
+The 96-bit SHA-256 prefix hashes the render revision and sorted
+`(site, exact volume second, has N0H)` tuples (the full native tile render revision participates, including palette identity). Changing a contributor, scan or
+QC availability produces a new key, including on repair or after restart.
+A published key never changes meaning. Old keyed tiles remain valid until
+ordinary eviction. Decoder/QC/selection changes bump `NATIVE_REVISION`; the
+existing migration removes obsolete revision roots and updates `.native-revision`.
+The server accepts mosaic segments only for NEXRAD under the native revision.
+Inventory scans, disk keys, bad-tile reports, manifests and pinning use the
+mosaic segment as the storage site, and frame time as the stamp. All viewport
+tiles are expected, including transparent tiles outside radar coverage.
+
+**Page and health.** A native mosaic frame fetches and draws one layer per tile;
+v1 retains farthest-to-nearest site stacking. The mosaic key participates in
+page frame identity, staging, tile readiness and bitmap reuse. The newest
+frame's `unfilteredSites` appends `· unfiltered` to the caption, or names the
+sites if only some lack HCA. `/health.radar.mosaic` carries the newest key and
+unfiltered sites; payload `sites[].filtered` reports newest contributor status.
+
+**Acquisition cost.** Separate product-specific hourly prefixes keep S3 listings
+bounded: the date follows the product name, so `{SITE}_N` would list unrelated
+products across all hours. A cold site-volume costs two listings and two
+products; listings are reused by hour and decoded products by volume. N0H adds
+about 25 KB, using the same Level III transport, single-flight, negative cache,
+rate admission and byte ledger as N0B. HCA failures retry after 20 s (10 s for
+transport errors), allowing late HCA to publish a new key. No HCA requests in
+watch/rest/dormant or paused native, and no native history/prefetch at the
+newest-only ceiling. Optional HCA has its own circuit/cooldown state, published at
+`/health.radar.classification`, so its failures cannot open N0B's circuit.
+Neither a failed HCA nor its failure cache blocks N0B. An unfiltered newest
+frame less than three minutes old schedules a 20-second readiness retry.
+
+### v2: the radar's own cells (Level III, 2026-09-25)
 
 **v1** is the radar above: IEM ridge tiles, gridded by IEM to about 1 km before
-we remap them. **v2** draws single-site NEXRAD from NOAA's Level III base
+we remap them. **v2** mosaics contributing NEXRAD sites from NOAA's Level III base
 reflectivity (N0B, product 153: 720 radials of 0.5 degrees, 1840 gates of 250 m),
 read from the public bucket `https://unidata-nexrad-level3.s3.amazonaws.com/`.
 Design and the later phases: `RADAR-NATIVE-DESIGNS.md`.
@@ -1513,7 +1586,7 @@ attention tier `live` or `warm`, and the daily ceiling below its pause state.
 Otherwise it is the Smooth boolean. The variant has its own render revision directory
 (`_radar_render_revision('native')`, advertised in `radar/.native-revision` so
 the server serves it immutable), a disk key suffixed `('native',)`, and PNG
-metadata with `revision` = `level3-n0b-polar-v2` (`radar_level3.NATIVE_REVISION`).
+metadata with `revision` = `level3-n0b-n0h-mosaic-v3` (`radar_level3.NATIVE_REVISION`).
 Gates are measurements, not matched colours, so `unmatchedPixels` and
 `ambiguousPixels` are 0 and `remapped` is true. The manifest adds
 `tiles.variant` (`false`, `true` or `"native"`); `tiles.smooth` stays a boolean,
@@ -1562,7 +1635,7 @@ The intent watcher also detects UTC rollover and resumes the eligible variant.
 `bytesToday`, `ceilingState` (`normal`, `newest-only`, or `paused`), and
 `ledgerState` (`ok` or `retrying`). The page shows
 `v2 accounting retrying · bytes counted in memory` for ledger failure and
-`v2 paused · daily data limit` only when the byte ceiling is paused. Per-pixel multi-site merging and N0H quality control remain out of scope.
+`v2 paused · daily data limit` only when the byte ceiling is paused. N0H shares this ledger and both ceiling policies.
 
 **Scan identity.** IEM names a scan by its volume start floored to the minute;
 the S3 key carries the seconds (`ATX_N0B_2026_09_25_03_42_24` is IEM's 03:42).
@@ -1574,16 +1647,16 @@ AWS outage never blocks v1. A product counts as a success only after it decodes
 and its volume time falls inside that minute; a listing only after it parses as
 an untruncated `ListBucketResult`. Admission prices a v2 frame by the listings
 and products it still needs, not by the tiles it will draw. One download per scan serves
-every tile thread; up to 24 decoded scans (~1.3 MB each) stay in memory. A scan
+every tile thread; up to 36 N0B scans (~1.3 MB each) and 36 N0H scans (~0.43 MB each) stay in memory, with independent per-product eviction. A scan
 S3 lacks, or that fails validation, fails fast for 60 s (10 s after a transport
 error) instead of once per tile, keeping the failure's class (local,
 ambiguous or provider) so backoff stays right. Waiters share the owner's verdict
 and give up at their own deadline.
 
 **Decoding** (`lib/radar_level3.py`) refuses: a size over 2 MB; a WMO header
-that isn't two CRLF lines; any product but 153; a message length that disagrees
+that isn't two CRLF lines; any product other than the requested 153 or 165; a message length that disagrees
 with the bytes; a site more than 0.05 degrees from the listed radar; thresholds
-other than (−320, 5, 254); an elevation outside (0, 2] degrees; a bzip2 body
+other than (−320, 5, 254) for N0B, or nonzero words 21–23 / word 26 other than 255 for N0H; an elevation outside [−1, 2] degrees; a bzip2 body
 whose expanded size disagrees with the header; a packet other than 16; radial
 headers out of bounds; more than 2 % of bearings uncovered. Gate code n ≥ 2 is
 (n−2)/2 − 32 dBZ; 0 (below threshold) and 1 (range folded) draw nothing. Gates
@@ -1595,8 +1668,8 @@ radar, then to slant range on the 4/3-earth beam at the scan's elevation, and
 reads gate `floor(range / 250 m)` of the radial covering that bearing. At zoom 7
 a pixel takes the strongest of a 2×2 sample. Colour is the shared display LUT
 applied by the same step rule as the IEM remap, so equal reflectivity draws the
-same colour in v1 and v2 (tested code by code). Neighbouring radars are still
-drawn in painter order; the per-pixel lowest-beam mosaic is phase 2.
+same colour in v1 and v2 (tested code by code). Native selection is per pixel,
+as specified below; v1 keeps its painter order.
 
 **Measured on the Pi 4** (KATX in rain, 2026-09-24): products 251–333 KB and
 0.2–1.6 s each; decode and despeckle 149 ms; a new tile 28 ms at zoom 9–10;
@@ -1683,10 +1756,12 @@ rejected. There are supersede checkpoints before and after every tile.
 ### Source rendering and playback
 
 Site selection, real scan listings, nearest reporting station-timeline primary,
-230km spherical range intersection, four-site cap and farthest-first stacking
-survive. Each secondary scan is real, no later than the primary and no more than
-900s older. Tile failures preserve other successful tiles; the page combines
-aligned site tiles using one 256px scratch for either preference, never four viewport layers.
+230km spherical range intersection and the four-site cap survive. In v1,
+farthest-first stacking and real secondary scans no later than the primary and
+no more than 900s older remain. Tile failures preserve other successful tiles;
+the page combines aligned v1 site tiles using one 256px scratch for plain or
+Smooth, never four viewport layers. v2 instead uses the single native mosaic
+layer, QC and time rule specified above.
 
 The site picker always names the closest site (`nexrad.id`), falling back to the
 caption's primary only when `nexrad` is null. It retains the number of actual

@@ -13,7 +13,7 @@ def test_four_job_reservations_always_return(geo, outcome):
         return html[html.index('  '+start):html.index('  '+end)]
     code = section('function radarCancelJobs(', 'function radarBasemapLevel(')
     code += section('async function radarReadPNG(', 'function radarBasePaint(')
-    code += section('async function radarFetchTile(', 'function radarFindTile(')
+    code += section('function radarFrameLayers(', 'function radarFindTile(')
     code += section('function radarUnreserve(', 'function radarGeoClear(')
     script = r'''
 const assert=require('node:assert/strict');

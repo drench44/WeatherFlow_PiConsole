@@ -468,7 +468,7 @@ class Handler(http.server.SimpleHTTPRequestHandler):
             if not 0 < length <= 256:
                 raise ValueError('report length')
             path = self.rfile.read(length).decode('ascii').lstrip('/')
-            if not re.fullmatch(r'radar/t/[a-f0-9]{12}/(?:iem-mrms-lcref|iem-nexrad-n0b|rainviewer)/(?:-|[A-Z0-9]{4})/[0-9]{12}/[0-9]{1,2}/[0-9]{1,4}/[0-9]{1,4}\.png',path,re.ASCII):
+            if not re.fullmatch(r'radar/t/[a-f0-9]{12}/(?:iem-mrms-lcref|iem-nexrad-n0b|rainviewer)/(?:-|[A-Z0-9]{4}|M[a-f0-9]{24})/[0-9]{12}/[0-9]{1,2}/[0-9]{1,4}/[0-9]{1,4}\.png',path,re.ASCII):
                 raise ValueError('tile path')
             with _count_lock:
                 marker = os.path.join(os.path.dirname(DATA),'radar_bad_tiles')
@@ -551,14 +551,14 @@ class Handler(http.server.SimpleHTTPRequestHandler):
     def send_head(self):
         path = self.path.split('?')[0]
         local = self.translate_path(path)
-        tile=re.fullmatch(r'/radar/t/([a-f0-9]{12})/(iem-mrms-lcref|iem-nexrad-n0b|rainviewer)/(-|[A-Z0-9]{4})/[0-9]{12}/([0-9]{1,2})/([0-9]{1,4})/([0-9]{1,4})\.png',path,re.ASCII)
+        tile=re.fullmatch(r'/radar/t/([a-f0-9]{12})/(iem-mrms-lcref|iem-nexrad-n0b|rainviewer)/(-|[A-Z0-9]{4}|M[a-f0-9]{24})/[0-9]{12}/([0-9]{1,2})/([0-9]{1,4})/([0-9]{1,4})\.png',path,re.ASCII)
         geo=re.fullmatch(r'/radar/geo/([a-f0-9]{12})/(paper|night)/([0-9]{1,2})/([0-9]{1,4})/([0-9]{1,4})\.png',path,re.ASCII)
         sites=re.fullmatch(r'/radar/sites-([a-f0-9]{12})\.json',path,re.ASCII)
         def revision(kind,value):
             try:
                 with open(os.path.join(WEB,'radar','.'+kind+'-revision')) as f:return f.read()==value
             except OSError:return False
-        immutable=bool(tile and (revision('tile',tile[1]) or revision('smooth',tile[1]) or revision('native',tile[1])) and 4<=int(tile[4])<=10 and int(tile[5])<2**int(tile[4]) and int(tile[6])<2**int(tile[4]) or
+        immutable=bool(tile and (not tile[3].startswith('M') or tile[2]=='iem-nexrad-n0b' and revision('native',tile[1])) and (revision('tile',tile[1]) or revision('smooth',tile[1]) or revision('native',tile[1])) and 4<=int(tile[4])<=10 and int(tile[5])<2**int(tile[4]) and int(tile[6])<2**int(tile[4]) or
                        geo and revision('geo',geo[1]) and 4<=int(geo[3])<=10 and int(geo[4])<2**int(geo[3]) and int(geo[5])<2**int(geo[3]) or
                        sites and revision('sites',sites[1]))
         self._immutable_radar=immutable and os.path.isfile(local)
