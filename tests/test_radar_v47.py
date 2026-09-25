@@ -104,7 +104,7 @@ def test_window_identity_reset(make_emitter, hybrid, tmp_path, monkeypatch, chan
     if change == 'cold': e._radar_result = ae._RADAR_NONE
     elif change == 'zoom': ctx['zoom'] -= 1
     elif change == 'center': ctx['bounds'] = dict(ctx['bounds'], n=0)
-    elif change == 'revision': monkeypatch.setattr(ae, '_radar_render_revision', lambda: 'new-revision')
+    elif change == 'revision': monkeypatch.setattr(ae, '_radar_render_revision', lambda smooth=False: 'new-revision')
     elif change == 'legend': e._radar_result = e._radar_result._replace(legend={'id':'changed'})
     elif change == 'source': source = 'rainviewer'
     elif change == 'site': e._radar_result = e._radar_result._replace(site_id='different')

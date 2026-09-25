@@ -629,6 +629,9 @@
   .rad-smooth { width: 64px; min-width: 44px; padding: 0 9px; font: 600 10px var(--sans); letter-spacing: .06em; }
   .rad-smooth[aria-pressed="true"] { border-color: var(--ink); text-decoration: underline; text-underline-offset: 4px; }
   .rad-reset[hidden] { display: none; }
+  .rad-render { display: flex; height: 44px; border: 1px solid var(--rule); border-radius: 2px; }
+  .rad-render .rad-seg { min-width: 48px; height: 42px; margin-top: 0; padding: 0 12px; font: 600 12px var(--sans); letter-spacing: .04em; }
+  .rad-smooth[aria-disabled="true"] { opacity: .38; cursor: default; }
   .rad-reset:active { opacity: .5; }
   .rad-zoom[data-state="pending"] .rad-zoom-read { opacity: .45; }
   #rad-asof { font: 17px var(--serif); font-variant-numeric: tabular-nums; }
@@ -1191,6 +1194,10 @@
           <button class="rad-step" id="rad-zoom-in" type="button" aria-label="Zoom in — closer">+</button>
           <button class="rad-reset" id="rad-zoom-reset" type="button" aria-label="Reset zoom to automatic" hidden>&#8635;</button>
           <button class="rad-reset rad-smooth" id="rad-smooth" type="button" aria-label="Smooth reflectivity" title="Softens gate edges; tiles stay 256 px. At zoom 7 they display 1:1. Enlarged views add no measured detail." aria-pressed="false">SMOOTH</button>
+          <div class="rad-render" id="rad-render" role="group" aria-label="Radar drawing">
+            <button class="rad-seg" id="rad-v1" type="button" aria-pressed="true" aria-label="v1: IEM tiles, about 1 km cells" title="v1: IEM's pre-gridded tiles, about 1 km cells">v1</button>
+            <button class="rad-seg" id="rad-v2" type="button" aria-pressed="false" aria-label="v2: the radar's own 250 m cells" title="v2: NOAA Level III, the radar's own 0.5° × 250 m cells. Single site only.">v2</button>
+          </div>
         </div>
         <div id="rad-note" role="status" aria-live="polite" data-shown="false"></div>
         <div class="rad-legend" id="rad-legend"></div>
@@ -2710,7 +2717,7 @@
   var RAD_MAX_LAT=85.05112878, RAD_CONTROLS='.rad-src,.rad-src-cap,.rad-legend,.rad-loop,.rad-zoom,.rad-recenter';
   var radarView={data:null,active:false,loaded:[],readyFrames:[],cycle:[],retired:[],started:false,current:null,good:null,paused:false,
     singleSweep:false,clear:false,refresh:{state:'idle'},legendKey:null,nextAt:0};
-  var radarCamera=null, radarSource={desired:null}, radarZoom={auto:true}, radarSmooth={value:null,pending:null};
+  var radarCamera=null, radarSource={desired:null}, radarZoom={auto:true}, radarSmooth={value:null,pending:null}, radarRender={value:null,pending:null};
   /* crypto.randomUUID exists only in a secure context (https or localhost); a LAN viewer on plain http would throw here and stop the whole board. */
   function radarSessionId(){var c=window.crypto;if(c&&typeof c.randomUUID==='function')return c.randomUUID();return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g,function(ch){var r=(c&&typeof c.getRandomValues==='function'?c.getRandomValues(new Uint8Array(1))[0]:Math.random()*256)&15;return (ch==='x'?r:(r&3|8)).toString(16);});}
   var radarIntent={session:radarSessionId(),generation:0,owner:null,owned:false,heartbeat:0,preferredMode:null,localSeq:0,ready:false,timer:null,postedAt:0};
@@ -3194,8 +3201,11 @@
     if(!radarIntent.preferredMode)radarIntent.preferredMode=radarView.data?.sourcePref||'mosaic';
     if(radarSwitch){radarSwitch.generation=radarIntent.generation;radarSwitch.requiresIntent=true;radarSwitch.committed=true;}
     radarIntent.timer=setTimeout(()=>{poll(immediate);},immediate?0:120);}
-  $('rad-smooth').addEventListener('click',()=>{radarSmooth.value=radarSmooth.pending=!radarSmooth.value;radarZoomRender();poll(true);});
-  function radarZoomRender(){var r=radarView.data,rail=$('rad-zoom');rail.hidden=!r;if(!r||!radarCamera)return;$('rad-smooth').setAttribute('aria-pressed',String(!!radarSmooth.value));var z=Math.round(radarCamera.zoom);rail.dataset.mode=radarZoom.auto?'auto':'manual';rail.dataset.state='confirmed';rail.setAttribute('aria-busy','false');$('rad-zoom-mode').textContent=radarZoom.auto?'Auto':String(z);$('rad-zoom-reset').hidden=radarZoom.auto;$('rad-zoom-out').disabled=z<=r.zoomMin;$('rad-zoom-in').disabled=z>=10;radarView.zoomNote=z>r.zoomMax?r.zoomSource+' reaches zoom '+r.zoomMax+' — scaled to this view.':'';radarNoteRender();}
+  $('rad-smooth').addEventListener('click',()=>{if(radarNativeActive())return;radarSmooth.value=radarSmooth.pending=!radarSmooth.value;radarZoomRender();poll(true);});
+  ['v1','v2'].forEach(v=>$('rad-'+v).addEventListener('click',()=>{if(radarRender.value===v)return;radarRender.value=radarRender.pending=v;radarZoomRender();poll(true);}));
+  // v2 draws gates, not IEM colours: Smooth has nothing to soften there. Region has no single radar, so it stays v1.
+  function radarNativeActive(){return radarRender.value==='v2'&&radarView.data?.sourceMode==='site';}
+  function radarZoomRender(){var r=radarView.data,rail=$('rad-zoom');rail.hidden=!r;if(!r||!radarCamera)return;var native=radarNativeActive();$('rad-smooth').setAttribute('aria-pressed',String(!!radarSmooth.value&&!native));$('rad-smooth').setAttribute('aria-disabled',String(native));$('rad-v1').setAttribute('aria-pressed',String(radarRender.value!=='v2'));$('rad-v2').setAttribute('aria-pressed',String(radarRender.value==='v2'));var z=Math.round(radarCamera.zoom);rail.dataset.mode=radarZoom.auto?'auto':'manual';rail.dataset.state='confirmed';rail.setAttribute('aria-busy','false');$('rad-zoom-mode').textContent=radarZoom.auto?'Auto':String(z);$('rad-zoom-reset').hidden=radarZoom.auto;$('rad-zoom-out').disabled=z<=r.zoomMin;$('rad-zoom-in').disabled=z>=10;radarView.zoomNote=z>r.zoomMax?r.zoomSource+' reaches zoom '+r.zoomMax+' — scaled to this view.':radarRender.value==='v2'&&r.sourceMode!=='site'?'v2 draws one radar’s own cells · Region stays v1':'';radarNoteRender();}
   // Retry epochs and their reference clock come from the same payload. A kiosk
   // wall clock can be wrong; elapsed UI/switch time is not a scheduled retry.
   function radarPendingRetry(){
@@ -3537,11 +3547,11 @@
     var geoQuery=radarActive&&radarCamera?'&radarGeoZoom='+clamp(Math.round(radarCamera.zoom),4,10)+'&radarGeoCenter='+encodeURIComponent(radarCamera.lat.toFixed(10)+','+(((radarCamera.lon+180)%360+360)%360-180).toFixed(10)):'';
     var viewQuery='&viewSession='+radarIntent.session+'&viewSeq='+gen+(radarIntent.viewOwner==null?'':'&viewClaim='+encodeURIComponent(radarIntent.viewOwner));
     var touched = presenceDirty; presenceDirty = false;
-    fetch("wx.json?_=" + started + viewQuery + (ack ? "&r=1" : "") + (touched ? "&touch=1" : "") + (radarActive ? "&view=radar&radarTheme="+radarBaseStyle.theme+"&radarMoving="+(radarGesture.state!=='idle'?1:0) + geoQuery + zoomQuery + (radarSmooth.pending===null?"":"&radarSmooth="+(radarSmooth.pending?"on":"off")) : "&view=none"), opts)
+    fetch("wx.json?_=" + started + viewQuery + (ack ? "&r=1" : "") + (touched ? "&touch=1" : "") + (radarActive ? "&view=radar&radarTheme="+radarBaseStyle.theme+"&radarMoving="+(radarGesture.state!=='idle'?1:0) + geoQuery + zoomQuery + (radarSmooth.pending===null?"":"&radarSmooth="+(radarSmooth.pending?"on":"off")) + (radarRender.pending===null?"":"&radarRender="+radarRender.pending) : "&view=none"), opts)
       .then(function (r) {
         if (!r.ok) throw new Error("HTTP " + r.status);
         var srv = Date.parse(r.headers.get("Date") || "");   /* the producer's clock, 1 s resolution */
-        return r.json().then(function (d) { return { d: d, srvMs: srv, ack:JSON.parse(r.headers.get('X-Radar-Intent')||'null'), smooth:r.headers.get('X-Radar-Smooth'), viewOwner:r.headers.get('X-View-Session') }; });
+        return r.json().then(function (d) { return { d: d, srvMs: srv, ack:JSON.parse(r.headers.get('X-Radar-Intent')||'null'), smooth:r.headers.get('X-Radar-Smooth'), render:r.headers.get('X-Radar-Render'), viewOwner:r.headers.get('X-View-Session') }; });
       })
       .then(function (x) {
         if (gen !== pollGen) return;              /* superseded; this one was abandoned */
@@ -3551,6 +3561,8 @@
         if(x.ack){radarIntent.owner=x.ack.session;if(!radarIntent.owned){radarIntent.accepted=x.ack.intent;if(!radarIntent.edited)radarIntent.preferredMode=x.ack.intent.source||radarIntent.preferredMode;radarIntent.owned=x.ack.session===radarIntent.session;if(radarIntent.owned&&!radarIntent.edited&&x.ack.intent.zoom!==undefined&&radarCamera){var r=radarView.data,c=x.ack.intent.center==='station'?r.center:x.ack.intent.center,z=x.ack.intent.zoom==='auto'?r.zoomAutoLevel:x.ack.intent.zoom;radarZoom.auto=x.ack.intent.zoomPolicy==='auto'||x.ack.intent.zoom==='auto';if(Math.abs(radarCamera.lat-c.lat)>1e-8||Math.abs(radarCamera.lon-c.lon)>1e-8||radarCamera.zoom!==z){radarCameraSet({...c,zoom:z});radarSettle();}if(x.ack.intent.source!==r.sourceMode)radarSource.desired=x.ack.intent.source;}}if(x.ack.session===radarIntent.session&&x.ack.generation===sentIntentGeneration){radarIntent.ready=false;radarTrace('accepted');}}
         if(x.smooth==='on'||x.smooth==='off'){var smooth=x.smooth==='on';if(radarSmooth.pending===smooth)radarSmooth.pending=null;if(radarSmooth.pending===null)radarSmooth.value=smooth;}
         else if(radarSmooth.value===null)radarSmooth.value=!!d.radar?.smooth;
+        if(x.render==='v1'||x.render==='v2'){if(radarRender.pending===x.render)radarRender.pending=null;if(radarRender.pending===null)radarRender.value=x.render;}
+        else if(radarRender.value===null)radarRender.value=d.radar?.native?'v2':'v1';
         render(d);                                /* may throw — book success AFTER it */
 
         lastRenderMs = Date.now();

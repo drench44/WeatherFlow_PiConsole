@@ -10,3 +10,4 @@ Pillow==11.0.0    # radar tile compositing (lib/almanac_emit._do_radar); the emi
 websocket-client==1.8.0   # tools/benchmark_radar_kiosk.py drives the live kiosk over Chromium's DevTools protocol; the test suite imports the tool's summary helpers
 websockets==15.0.1  # service/websocket.py, matches wfpiconsole.sh's runtime pin; the transport tests import the real module
 certifi==2025.8.3   # service/websocket.py's TLS context; the version the Pi runs
+numpy==2.2.6      # lib/radar_level3.py decodes and draws v2 radar; wfpiconsole.sh installs numpy>=2.0.2 at runtime
