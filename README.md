@@ -277,7 +277,8 @@ first live reading arrives.
 
 The engine logs one summary line per radar pass (`radar pass outcome=...`); a
 pass that yields on an internal budget says `error=deferred: <reason>`. On the
-Pi 4 kiosk the engine log is `/tmp/almanac_data.log` and the tile cache lives
+Pi 4 kiosk the engine log is `/tmp/almanac_data.log` (the two previous runs as
+`.1` and `.2`, each starting with the reason the engine was started) and the tile cache lives
 under `~/almanac_web/radar`.
 
 To inspect the running page itself, the kiosk's Chromium listens on the loopback

@@ -6,6 +6,17 @@ to shared upstream code that the classic console benefits from too.
 
 ## 2026-09-24
 
+### Kiosk
+- **An engine restart keeps the evidence.** The launcher overwrote the engine log
+  every time it restarted the engine, so its watchdog destroyed the record of why
+  it fired: on 2026-09-24 the live Tempest feed stalled twice while WeatherFlow's
+  own records show the station reporting every minute, and nothing was left to
+  explain it. Each start now rotates the log (the two previous runs are kept as
+  `.1` and `.2`) and writes its reason on the first line: `boot`, `died`,
+  `data-stale`, `data-error` or `sensor-silent`.
+- **No dead Menu button.** The tab bar carried a dimmed "Menu" button with no
+  function; on a touchscreen it was a target that did nothing. Removed.
+
 ### Radar
 - **The radar draws rain, not clutter.** Nothing below 15 dBZ is drawn now, from
   any source, and the grey clear-air band is gone from site mode. On a dry

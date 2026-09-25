@@ -64,3 +64,28 @@ def test_kiosk_launcher_passes_shellcheck_when_available():
     if shellcheck is None:
         return
     subprocess.run([shellcheck, str(SCRIPT)], check=True)
+
+
+def test_engine_log_survives_a_watchdog_restart_and_says_why(tmp_path):
+    # 2026-09-24: two "sensor silent" restarts truncated the log that explained them.
+    src = SCRIPT.read_text()
+    start = src.index('rotate_engine_log(){'); end = src.index('\n}\n', start) + 3
+    log = tmp_path / 'engine.log'
+    script = f'ENGINE_LOG={log}\n' + src[start:end] + '''
+echo run-one >> "$ENGINE_LOG"
+rotate_engine_log sensor-silent; echo run-two >> "$ENGINE_LOG"
+rotate_engine_log died; echo run-three >> "$ENGINE_LOG"
+rotate_engine_log data-stale
+'''
+    subprocess.run(['bash', '-c', script], check=True)
+    assert log.read_text().startswith('=== engine start ') and 'reason=data-stale' in log.read_text()
+    assert 'reason=died' in (tmp_path / 'engine.log.1').read_text() and 'run-three' in (tmp_path / 'engine.log.1').read_text()
+    assert 'reason=sensor-silent' in (tmp_path / 'engine.log.2').read_text() and 'run-two' in (tmp_path / 'engine.log.2').read_text()
+    for call in ('launch_engine died', 'launch_engine "data-$st"', 'launch_engine sensor-silent'):
+        assert call in src
+    assert '>>"$ENGINE_LOG" 2>&1 &' in src
+
+
+def test_no_dead_menu_button_on_the_touch_panel():
+    for page in ('design/almanac/console_live.html', 'design/almanac/console.html'):
+        assert '<button class="tab dim">Menu</button>' not in Path(page).read_text()

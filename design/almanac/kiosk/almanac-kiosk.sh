@@ -185,11 +185,21 @@ launch_xvfb(){
   Xvfb "$VDISP" -screen 0 1024x600x24 -nolisten tcp >/tmp/almanac_xvfb.log 2>&1 &
   XVFB_PID=$!
 }
+ENGINE_LOG=/tmp/almanac_data.log
+rotate_engine_log(){
+  # A watchdog restart used to truncate the log that explained why the watchdog
+  # fired (2026-09-24: two "sensor silent" restarts, no evidence left). Keep the
+  # two previous runs; each new run starts with why it was started.
+  [ -s "$ENGINE_LOG.1" ] && mv -f "$ENGINE_LOG.1" "$ENGINE_LOG.2"
+  [ -s "$ENGINE_LOG" ] && mv -f "$ENGINE_LOG" "$ENGINE_LOG.1"
+  printf '=== engine start %s reason=%s\n' "$(date '+%Y-%m-%dT%H:%M:%S%z')" "${1:-boot}" > "$ENGINE_LOG"
+}
 launch_engine(){
+  rotate_engine_log "${1:-boot}"
   # A panel with no tab bar (WFP_TABS=0) has no way to show radar, so the engine
   # runs none of it: no tile cache scan, no acquisition, no geography, no
   # listings. WFP_RADAR overrides explicitly if ever needed.
-  ( cd "$APP" && DISPLAY="$VDISP" WFP_HEADLESS=1 WFP_RADAR="${WFP_RADAR:-${WFP_TABS:-1}}" KCFG_GRAPHICS_MAXFPS=10 "$PY" main.py ) >/tmp/almanac_data.log 2>&1 &
+  ( cd "$APP" && DISPLAY="$VDISP" WFP_HEADLESS=1 WFP_RADAR="${WFP_RADAR:-${WFP_TABS:-1}}" KCFG_GRAPHICS_MAXFPS=10 "$PY" main.py ) >>"$ENGINE_LOG" 2>&1 &
   ENGINE_PID=$!
   ENGINE_GRACE=6                                   # ~90s warmup before the freshness check judges it
 }
@@ -283,7 +293,7 @@ CLOG=/tmp/almanac_chrome.log
 loops=0; stale_hits=0; health_failures=0; degraded_hits=0; degraded_acted=0
 while [ "$STOPPING" -eq 0 ]; do
   kill -0 "$XVFB_PID" 2>/dev/null || { echo "Xvfb died — relaunching" >> "$CLOG"; launch_xvfb; sleep 2; }
-  kill -0 "$ENGINE_PID" 2>/dev/null || { echo "data engine died — relaunching" >> "$CLOG"; launch_engine; }
+  kill -0 "$ENGINE_PID" 2>/dev/null || { echo "data engine died — relaunching" >> "$CLOG"; launch_engine died; }
   kill -0 "$SERVE_PID"  2>/dev/null || { echo "web server died — relaunching"  >> "$CLOG"; launch_server; }
   if [ "$MODE" != headless ] && ! kill -0 "$CRPID" 2>/dev/null; then
     echo "chromium exited — relaunching" >> "$CLOG"
@@ -314,7 +324,7 @@ while [ "$STOPPING" -eq 0 ]; do
       stale_hits=$((stale_hits + 1))
       if [ "$stale_hits" -ge 2 ]; then
         echo "data $st — restarting data engine" >> "$CLOG"
-        stop_process "$ENGINE_PID" engine; launch_engine
+        stop_process "$ENGINE_PID" engine; launch_engine "data-$st"
         stale_hits=0; degraded_hits=0     # degraded_acted survives: only a fresh observation ends the episode
       fi
     elif [ "$st" = "degraded" ]; then
@@ -327,7 +337,7 @@ while [ "$STOPPING" -eq 0 ]; do
       degraded_hits=$((degraded_hits + 1))
       if [ "$degraded_hits" -ge 4 ] && [ "$degraded_acted" -eq 0 ]; then
         echo "sensor silent — restarting data engine once" >> "$CLOG"
-        stop_process "$ENGINE_PID" engine; launch_engine
+        stop_process "$ENGINE_PID" engine; launch_engine sensor-silent
         degraded_acted=1
       fi
     else
