@@ -83,7 +83,9 @@ def decode(raw, expect_site=None, speckle_dbz=None):
     if words[21:24] != (-320, 5, 254):
         raise ValueError('level3 data thresholds')
     elevation = words[20] / 10
-    if not 0 < elevation <= 2:
+    # Every site swept on 2026-09-25 reported 0.5; a few mountain sites are
+    # licensed for slightly negative lowest tilts, which the beam model handles.
+    if not -1 <= elevation <= 2:
         raise ValueError('level3 elevation %.1f is not a lowest tilt' % elevation)
     day, seconds = struct.unpack('>HI', raw[offset + 40:offset + 46])
     if day == 0 or seconds >= 86400:

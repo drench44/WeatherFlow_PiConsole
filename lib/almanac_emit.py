@@ -3697,7 +3697,10 @@ class AlmanacEmitter:
             if _radar_iem_eligible(station_lat, station_lon):
                 adapters.insert(0, ('iem-mrms-lcref', self._radar_iem_frames))
             site = ctx['nexrad']
-            site_ok = bool(_radar_iem_eligible(station_lat, station_lon) and site and site['distanceMeters'] <= RADAR_SITE_RANGE_METERS)
+            # A radar in range is enough: the CONUS mask bounds MRMS, not NEXRAD, and
+            # Alaska, Hawaii, Puerto Rico and Guam have their own sites (IEM lists
+            # them, NOAA publishes their Level III).
+            site_ok = bool(site and site['distanceMeters'] <= RADAR_SITE_RANGE_METERS)
             ctx['sources'] = [dict(mode='mosaic', available=True),
                 dict(mode='site', siteId=site['id'] if site else None, available=site_ok,
                      reason=None if site_ok else 'no site in range')]

@@ -183,7 +183,9 @@ def test_unchanged_rainviewer_preserves_validated_manifest(make_emitter, hybrid,
     e._do_radar(intent_triggered=False)
     before = len(hybrid.calls)
     e._do_radar(intent_triggered=False, discovery=True)
-    assert len(hybrid.calls) == before + 1
+    # Outside MRMS the closest site is still in range here, and its listing is
+    # checked on discovery; the RainViewer manifest itself costs one request.
+    assert len([c for c in hybrid.calls[before:] if c[0] == 'rainviewer']) == 1
     known = e._radar_known('rainviewer', dict(intent_triggered=True))
     assert known['newest'] == hybrid.rv and known['host'] == 'https://tiles.example'
     assert known['past'][hybrid.rv] == '/v2/' + str(hybrid.rv)
