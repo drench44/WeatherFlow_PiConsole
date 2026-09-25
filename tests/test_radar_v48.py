@@ -208,6 +208,7 @@ def test_linux_keepalive_options_and_unsupported_platforms(monkeypatch):
 
 
 def test_retried_pass_succeeds_without_failure_note(make_emitter, origin, monkeypatch, tmp_path):
+    (tmp_path/'radar_source').write_text('mosaic')  # Region transport; Auto would also list sites
     emitter = make_emitter()
     session = http.RadarSession(first_byte_timeout=.12)
     emitter._radar_session, emitter._radar_provider = session, ae._RADAR_SOURCES['iem-mrms-lcref']['provider']

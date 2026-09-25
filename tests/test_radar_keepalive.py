@@ -253,6 +253,7 @@ def test_six_workers_complete_frame_with_closing_connections(make_emitter, origi
     origin.alternate = True
     origin.delay = .02
     origin.hold = 6      # tile requests are released only once six are in flight
+    (tmp_path/'radar_source').write_text('mosaic')  # Region transport; Auto would also list sites
     monkeypatch.setattr(ae, 'RADAR_DIR', str(tmp_path/'radar'))
     monkeypatch.setattr(ae, 'RADAR_IEM_METADATA_URL', origin.url+'/metadata')
     monkeypatch.setattr(ae, 'RADAR_IEM_ARCHIVE_TEMPLATE', origin.url+'/archive/%Y%m%d%H%M')
