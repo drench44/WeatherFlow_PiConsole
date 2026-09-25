@@ -34,9 +34,9 @@ def pixels(scans):
 
 
 @pytest.mark.parametrize('low,high,classification,expected', [
-    (110, 160, None, 110), (0, 160, None, 0), (80, 160, None, 80),
+    (110, 160, None, 110), (0, 160, None, 160), (80, 160, None, 160),
     (1, 160, None, 160), (110, 160, 20, 160), (110, 160, 150, 160),
-    (110, 160, 10, 0), (110, 160, 0, 110), (110, 160, 140, 110),
+    (110, 160, 10, 160), (110, 160, 0, 110), (110, 160, 140, 110),
     (110, 160, 60, 110), (1, 160, 10, 160),
 ])
 def test_selection_table(low, high, classification, expected):
@@ -142,6 +142,7 @@ def test_engine_one_mosaic_layer_metadata_ledger_and_restart(make_emitter, hybri
 
 @pytest.mark.parametrize('failure', ['missing', 'bad'])
 def test_hca_failure_never_blocks_and_late_hca_has_new_identity(make_emitter, hybrid, multisite, classified, failure):
+    hybrid.now = hybrid.latest + 60  # late classification is eligible for 180 s
     getattr(classified, failure).add('KNEA')
     emitter = make_emitter(); emitter._do_radar()
     frame = emitter._radar_result.frames[-1]
@@ -272,6 +273,7 @@ def test_mosaic_echo_is_counted_once_and_matches_metadata(make_emitter, hybrid, 
 
 
 def test_n0h_provider_failure_cannot_open_n0b_circuit(make_emitter, hybrid, multisite, classified):
+    hybrid.now = hybrid.latest + 60
     emitter=make_emitter(); emitter._do_radar()
     for key in list(emitter._radar_level3_scans):
         if len(key)==3: del emitter._radar_level3_scans[key]
@@ -280,6 +282,10 @@ def test_n0h_provider_failure_cannot_open_n0b_circuit(make_emitter, hybrid, mult
         emitter._radar_n0h_health.record(ae.RADAR_N0H_TRANSPORT, ae.RADAR_LEVEL3_BUCKET, False, ValueError('bad HCA'))
     state=emitter._radar_n0h_health._host(ae.RADAR_N0H_TRANSPORT,ae.RADAR_LEVEL3_BUCKET)
     assert state['until'] > hybrid.mono
+    # Complete filtered tiles now survive cache loss/circuit failure. Exercise
+    # a genuinely new volume, which requires optional classification admission.
+    multisite.scans['KNEA'].append(hybrid.latest+60)
+    hybrid.now += 60
     emitter._do_radar()
     frame=emitter._radar_result.frames[-1]
     assert frame['complete'] and frame['unfilteredSites']

@@ -7,17 +7,26 @@ to shared upstream code that the classic console benefits from too.
 ## 2026-09-25
 
 ### Radar
-- **v2 combines nearby radars by their lowest beam and filters clutter.** Each
-  pixel takes the lowest beam within 230 km, including a clear reading, so a
-  higher radar no longer paints rain through it. NOAA's N0H classification
-  removes ground clutter and range folding, allowing another radar to fill
-  those gaps; birds and insects become clear. It adds about 25 KB per site and
-  scan under the same daily cap. Missing classification never holds up rain:
-  the caption says "unfiltered" and names the affected site when others are
-  filtered. Neighbours may be up to 8 minutes older or 60 seconds newer than
-  the primary frame. A late scan or classification gets a new tile identity;
-  cached frames keep their meaning. The page draws one layer for v2, including
-  a single radar, while v1 and Region keep their existing rendering.
+- **v2 combines nearby radars by their lowest visible echo and filters clutter.**
+  Each pixel takes the lowest beam within 230 km that has an echo at or above
+  the display floor. A lower beam's clear or blocked return no longer hides a
+  neighbour's echo, including echo aloft seen only by a higher beam. NOAA's N0H
+  classification removes ground clutter and range folding. Birds and insects
+  clear unless more than half of their 5-by-9 classification neighbourhood is
+  precipitation, preserving biological labels embedded in rain. Missing
+  classification leaves a site unfiltered. Sites fetch concurrently and the
+  frame gives classification one 2.5-second wait after reflectivity is ready.
+  Late classification upgrades every eligible retained frame within 180 seconds
+  of its volume; expired missing products stop triggering discovery rebuilds.
+  Neighbours may be up to 8 minutes older or 60 seconds newer than the primary
+  frame. Durable frame metadata lets restarts and warming reuse cached tiles
+  without downloading their inputs again. Admission prices missing mosaic
+  inputs, and prefetch skips classification budget refusals. Hourly listings
+  have headroom at hour boundaries and retain current hours first. Geometry
+  is no longer cached across tile walks; two concurrent renders bound memory.
+  Changed inputs receive a new tile identity; cached frames keep their meaning.
+  The page draws one layer for v2, including a single radar, while v1 and Region
+  keep their existing rendering.
 - **Auto picks the radar by zoom.** A new **Auto** button, the default, sits
   beside Region and the nearest site. Zoom in to 8 or closer and it switches to
   the site radar; zoom out to 6 or wider and it returns to Region; at 7 it keeps

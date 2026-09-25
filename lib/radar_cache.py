@@ -99,6 +99,11 @@ class TileInventory:
             path = record[0]
             root = path.parents[5] if len(path.parents)>5 and path.parents[4].name==key[0] else path.parent
             parent = path.parent
+            # A mosaic sidecar belongs to the entire frame, across zooms.
+            frame_dir = path.parents[2]
+            if (key[1] or '').startswith('M') and not any(
+                    group[:3] == key[:3] for group in self.group_counts):
+                (frame_dir / 'frame.json').unlink(missing_ok=True)
             while parent != root:
                 try: parent.rmdir()
                 except OSError: break
@@ -206,6 +211,10 @@ class TileInventory:
         """
         kept = {record[0] for record in self.records.values() if root in record[0].parents}
         directories = {parent for path in kept for parent in path.parents if root == parent or root in parent.parents}
+        # Sidecars survive boot only alongside validated tiles. They never
+        # keep an otherwise unindexed frame alive and are validated by the reader.
+        kept.update(path.parents[2] / 'frame.json' for path in tuple(kept)
+                    if path.parents[3].name.startswith('M'))
         purged = 0
 
         def clean(directory, depth=0):

@@ -1,17 +1,21 @@
 """Immutable native frame inputs and lowest-beam, categorical-QC mosaics.
 
-Terrain at a pixel is common to every candidate: subtracting it from all
-beam altitudes leaves their order unchanged. No DEM or MRMS mask is needed.
+Blockage occurs along each beam path. A low beam's below-floor return must
+not hide an echo observed along a neighbouring radar's higher, clear path.
 """
 import hashlib
 import json
 import math
-from functools import lru_cache
+from threading import BoundedSemaphore
 
 import numpy as np
 
 from lib.radar_level3 import (Scan, NATIVE_REVISION, EARTH_RADIUS_M,
-    EFFECTIVE_RADIUS_M, GATE_METERS, _tile_lonlat, colour_table)
+    EFFECTIVE_RADIUS_M, GATE_METERS, _tile_lonlat, colour_table, floor_code)
+from lib.radar_palette import DISPLAY_FLOOR_DBZ
+
+# Bound transient geometry allocations across foreground and warming workers.
+_RENDER_SLOTS = BoundedSemaphore(2)
 
 
 def mosaic_key(pairs, revision=NATIVE_REVISION):
@@ -24,7 +28,7 @@ def quality_control(scan, classification):
     """Apply HCA to N0B gate centres using each product's actual azimuth table.
 
     Code 1 is our existing no-data/range-folded sentinel. Biological becomes
-    code 0, a measured clear gate. Missing HCA bearings/range retain N0B.
+    code 0 unless embedded in precipitation. Missing HCA bearings/range retain N0B.
     """
     if classification is None:
         return scan
@@ -48,14 +52,22 @@ def quality_control(scan, classification):
     present = hrow[:, None] >= 0
     target[present & ((classes == 20) | (classes == 150))] = 1
     # Never turn N0B range folding into a valid clear measurement.
-    target[present & (classes == 10) & (target != 1)] = 0
+    # Wrap azimuth, never range: the outermost gates are not neighbours of
+    # gates beside the antenna. Missing/outside gates count as non-precipitation
+    # in the fixed 45-cell neighbourhood. Sum separably to avoid a large window.
+    precipitation = (classification.codes >= 30) & (classification.codes <= 120)
+    radial_sum = sum(np.roll(precipitation.astype(np.uint8), shift, axis=0)
+                     for shift in range(-2, 3))
+    padded = np.pad(radial_sum, ((0, 0), (4, 4)))
+    neighbours = sum(padded[:, shift:shift+classification.gates] for shift in range(9))
+    embedded = neighbours[np.maximum(hrow, 0), :gates] > 22
+    target[present & (classes == 10) & ~embedded & (target != 1)] = 0
     return Scan(scan.lat, scan.lon, scan.height_m, scan.elevation_deg, scan.vcp,
                 scan.volume_ts, codes, scan.bearing_index)
 
 
-@lru_cache(maxsize=3)
 def _geometry(sites, z, x, y, size, radius):
-    """Bounded geometry cache: distances and rank only, no scan data retained."""
+    """Transient geometry; a viewport walk does not reuse whole-tile grids."""
     lat, lon = _tile_lonlat(z, x, y, size)
     la, lo = np.radians(lat)[:, None], np.radians(lon)[None, :]
     ranges, heights = [], []
@@ -75,7 +87,7 @@ def _geometry(sites, z, x, y, size, radius):
 
 
 def mosaic_codes(scans, z, x, y, size=256, radius=230000):
-    """Select once, including clear. Only unresolved pixels get gate lookups."""
+    """Select the lowest valid echo at the display floor; otherwise leave clear."""
     result = np.zeros(size*size, np.uint8)
     if not scans:
         return result.reshape(size, size)
@@ -97,7 +109,7 @@ def mosaic_codes(scans, z, x, y, size=256, radius=230000):
                 math.cos(a)*np.sin(la)-math.sin(a)*np.cos(la)*np.cos(dl))) % 360
             rows = scan.bearing_index[(bearing*10).astype(np.int32) % 3600]
             values = scan.codes[np.maximum(rows, 0), gates]
-            good = (rows >= 0) & (values != 1)
+            good = (rows >= 0) & (values >= floor_code(DISPLAY_FLOOR_DBZ))
             result[pixels[good]] = values[good]
             unresolved[pixels[good]] = False
         if not unresolved.any():
@@ -106,6 +118,11 @@ def mosaic_codes(scans, z, x, y, size=256, radius=230000):
 
 
 def render_mosaic(scans, z, x, y, palette, radius=230000):
+    with _RENDER_SLOTS:
+        return _render_mosaic(scans, z, x, y, palette, radius)
+
+
+def _render_mosaic(scans, z, x, y, palette, radius):
     from PIL import Image
     factor = 2 if z < 8 else 1
     codes = mosaic_codes(scans, z, x, y, 256*factor, radius)
@@ -118,3 +135,64 @@ def render_mosaic(scans, z, x, y, palette, radius=230000):
     image.putpalette(flat + [0]*(768-len(flat)))
     image.info['transparency'] = bytes(c[3] for c in colours)
     return image, int(np.count_nonzero(pixels))
+
+
+def read_frame_metadata(root, stamp, pairs, revision):
+    """Recover immutable input identity, without opening or acquiring a scan."""
+    candidates = []
+    expected = sorted([list(p) for p in pairs])
+    for path in root.glob('M*/%s/frame.json' % stamp):
+        try:
+            if path.is_symlink() or path.stat().st_size > 8192:
+                continue
+            value = json.loads(path.read_text())
+            if (value['revision'] != revision or value['stamp'] != stamp
+                    or value['requestedPairs'] != expected):
+                continue
+            contributors = value['siteScans']
+            if not isinstance(contributors, list) or not 1 <= len(contributors) <= len(expected):
+                continue
+            seen = set()
+            for p in contributors:
+                site, ts, volume, filtered = p['id'], p['ts'], p['volumeTs'], p['filtered']
+                if (site in seen or [site, ts] not in expected or type(ts) not in (int, float)
+                        or type(volume) not in (int, float) or not math.isfinite(volume)
+                        or volume != int(volume) or not 0 <= volume - ts < 60
+                        or type(filtered) is not bool):
+                    raise ValueError('invalid contributor')
+                seen.add(site)
+            key = mosaic_key([(p['id'], p['volumeTs'], p['filtered']) for p in contributors], revision)
+            if key != value['mosaicKey'] or key != path.parent.parent.name:
+                continue
+            candidates.append(dict(mosaicKey=key, siteScans=contributors,
+                requestedPairs=expected, unfilteredSites=[p['id'] for p in contributors if not p['filtered']]))
+        except (OSError, ValueError, KeyError, TypeError):
+            continue
+    # An older unfiltered identity may remain on disk after an upgrade.
+    return sorted(candidates, key=lambda v: (len(v['siteScans'])-len(v['unfilteredSites']),
+                                           len(v['siteScans'])), reverse=True)
+
+
+def write_frame_metadata(path, stamp, pairs, metadata, revision):
+    """Commit a small sidecar only after tiles exist, beside that frame's tiles."""
+    import os
+    import tempfile
+    value = dict(metadata, stamp=stamp, revision=revision,
+                 requestedPairs=sorted([list(p) for p in pairs]))
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = None
+    try:
+        with tempfile.NamedTemporaryFile(mode='w', dir=path.parent, suffix='.tmp', delete=False) as output:
+            temporary = output.name
+            json.dump(value, output, separators=(',', ':'), allow_nan=False)
+            output.flush()
+            os.fsync(output.fileno())
+        os.replace(temporary, path)
+        directory = os.open(path.parent, os.O_RDONLY)
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
+    finally:
+        if temporary is not None and os.path.exists(temporary):
+            os.unlink(temporary)
