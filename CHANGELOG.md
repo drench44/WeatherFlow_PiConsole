@@ -28,6 +28,10 @@ to shared upstream code that the classic console benefits from too.
   choice across reboots. This is phase 0: nearby radars are layered, not yet
   merged cell by cell, and a cold switch downloads about 9 MB and takes about a
   minute to fill all eight frames on the Pi 4.
+- **The header no longer calls a current loop old.** While the loop played, the
+  "As of" line took its age from whichever frame was on screen, so a fresh loop
+  read "48 min old" on its oldest frame. It now warns only when the data itself
+  is old; each frame's offset stays on the loop caption.
 - **The radar draws rain, not clutter.** Nothing below 15 dBZ is drawn now, from
   any source, and the grey clear-air band is gone from site mode. On a dry
   afternoon with a 0 % forecast, 49 % of what the panel drew was that grey band
