@@ -1,6 +1,7 @@
 """Hostile origin scenarios: real HTTPS and health HTTP, loopback only."""
 import json
 import os
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 
@@ -97,9 +98,26 @@ def test_fast_failure_retries_without_waiting_or_third_attempt(engine, origin):
 
 
 def test_response_progress_without_warm_lease_does_not_hedge(engine, origin):
+    # Both bodies are held by an event, not a 4 s clock: under full-suite load
+    # the second request could start >2 s late, the first connection would
+    # finish and go idle, and a legitimate hedge would fire (seen 2026-09-25).
     origin.behavior = lambda path, n: 'body'
-    result, _ = batch(engine, origin, count=2)
-    assert len(result) == 2 and engine._radar_health.hedges == 0
+    origin.stall_seconds = 30
+    out = {}
+    worker = threading.Thread(target=lambda: out.setdefault('batch', batch(engine, origin, count=2)))
+    worker.start()
+    try:
+        arrived = time.monotonic() + 10
+        while len(origin.requests) < 2 and time.monotonic() < arrived:
+            time.sleep(.01)
+        assert len(origin.requests) == 2
+        time.sleep(ae.RADAR_HEDGE_SEC + .5)   # the hedge window passes with both responses in progress
+        hedged = engine._radar_health.hedges
+    finally:
+        origin.release.set()
+        worker.join(15)
+    result, _ = out['batch']
+    assert len(result) == 2 and hedged == 0 and engine._radar_health.hedges == 0
     assert len(origin.requests) == 2
 
 
